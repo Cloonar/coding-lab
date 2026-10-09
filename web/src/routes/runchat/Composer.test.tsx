@@ -11,8 +11,15 @@
 //   §6), which shows only with a non-empty catalog while the box is empty or
 //   already a slash command, lists the FULL catalog, focuses the box, and
 //   whose picks behave exactly like the typed popover's;
+// - the reply box is a per-run draft in localStorage (issue #92): restored on
+//   open, isolated per run (also across a :id change without a remount),
+//   deleted by a successful send / an emptied box / an ended run, and inert
+//   when storage throws.
 
-import { describe, expect, it, vi } from 'vitest';
+import { createSignal } from 'solid-js';
+import { render } from 'solid-js/web';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Composer } from './Composer';
 import {
   baseRun,
   buttonByLabel,
@@ -22,6 +29,7 @@ import {
   finePointer,
   h,
   installChatHooks,
+  jsonResponse,
   menuItem,
   mountChat,
   moreButton,
@@ -30,6 +38,9 @@ import {
 } from './harness';
 
 installChatHooks();
+// Drafts persist in localStorage (issue #92): without this a test that types
+// and never sends would restore its text into the next test's run_1 composer.
+afterEach(() => localStorage.clear());
 
 describe('Composer', () => {
   it('replies through the composer and clears the input', async () => {
@@ -739,5 +750,247 @@ describe('Composer', () => {
     composerKey('Escape');
     await settle();
     expect(container.querySelector('.chat-cmd-pop')).toBeNull();
+  });
+});
+
+// The per-run draft (issue #92). Rendered straight (no router, no stream) so a
+// test can remount a run's composer and drive `runID` as a signal — the router
+// reuses the Composer when only `:id` changes.
+describe('Composer draft persistence (issue #92)', () => {
+  const draftKey = (id: string) => `lab.draft.chat.${id}`;
+  const stored = (id: string): string | null => localStorage.getItem(draftKey(id));
+  const storedValue = (id: string): unknown => {
+    const raw = stored(id);
+    return raw === null ? null : (JSON.parse(raw) as { v: unknown }).v;
+  };
+
+  let host: HTMLDivElement | undefined;
+  let disposeHost: (() => void) | undefined;
+  const unmount = () => {
+    disposeHost?.();
+    disposeHost = undefined;
+    host?.remove();
+    host = undefined;
+  };
+  afterEach(() => {
+    unmount();
+    vi.restoreAllMocks();
+  });
+
+  // Reply POSTs by run id; `replyStatus` is the knob for a failing send.
+  let replyStatus = 204;
+  const replied: { url: string; text: string }[] = [];
+  function stubReply(): void {
+    replyStatus = 204;
+    replied.length = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown, init?: RequestInit) => {
+        replied.push({
+          url: String(input),
+          text: (JSON.parse(String(init?.body)) as { text: string }).text,
+        });
+        if (replyStatus >= 400) {
+          return Promise.resolve(
+            jsonResponse(replyStatus, { error: 'run is not accepting replies' }),
+          );
+        }
+        return Promise.resolve(jsonResponse(replyStatus, ''));
+      }),
+    );
+  }
+
+  // Mounts a Composer for `runID` and returns the setter that re-points it.
+  function mountComposer(runID: string, extra: { ended?: boolean } = {}) {
+    stubReply();
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    const [id, setID] = createSignal(runID);
+    const [ended, setEnded] = createSignal(extra.ended ?? false);
+    disposeHost = render(
+      () => (
+        <Composer
+          runID={id()}
+          state="idle"
+          stateDetail=""
+          ended={ended()}
+          transcript="locating"
+          dialog={null}
+          messages={[]}
+          commitsBehind={0}
+          commands={[
+            { name: 'clear', description: '', arg_hint: '', source: 'builtin', chat_safe: true },
+          ]}
+          agentName="Claude Code"
+          openHint="open the session"
+          jumpVisible={false}
+          jumpEmphasis={false}
+          onJump={() => {}}
+          onError={() => {}}
+          onNotice={() => {}}
+          onSent={() => {}}
+          onPulled={() => {}}
+        />
+      ),
+      host,
+    );
+    return { setID, setEnded };
+  }
+
+  const box = () => host!.querySelector('.chat-input') as HTMLTextAreaElement;
+  function typeInto(value: string): void {
+    box().value = value;
+    box().dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const send = () => host!.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!;
+
+  it("restores the same run's draft into the box on a fresh mount", async () => {
+    mountComposer('run_a');
+    typeInto('half a thought\nsecond line');
+    await settle();
+    expect(storedValue('run_a')).toBe('half a thought\nsecond line');
+
+    unmount();
+    mountComposer('run_a');
+    await settle();
+    expect(box().value).toBe('half a thought\nsecond line');
+    expect(send().disabled).toBe(false);
+  });
+
+  it('keeps drafts per run: another run starts empty, and a :id change swaps the box without remounting', async () => {
+    mountComposer('run_a');
+    typeInto('only for A');
+    await settle();
+
+    // Run B has no draft: its box is empty even though A holds one.
+    unmount();
+    mountComposer('run_b');
+    await settle();
+    expect(box().value).toBe('');
+    unmount();
+
+    // Same component instance, runID A → B → A (the router reuses it on :id).
+    const swap = mountComposer('run_a');
+    await settle();
+    const el = box();
+    expect(el.value).toBe('only for A');
+
+    swap.setID('run_b');
+    await settle();
+    expect(box()).toBe(el); // not remounted
+    expect(box().value).toBe('');
+    expect(stored('run_b')).toBeNull(); // A's text never lands under B's key
+    expect(storedValue('run_a')).toBe('only for A'); // and A's draft survives
+
+    typeInto('only for B');
+    await settle();
+    expect(storedValue('run_b')).toBe('only for B');
+    expect(storedValue('run_a')).toBe('only for A');
+
+    swap.setID('run_a');
+    await settle();
+    expect(box().value).toBe('only for A');
+    expect(storedValue('run_b')).toBe('only for B');
+  });
+
+  it('deletes the entry on a successful send, via the button and via a popover click', async () => {
+    mountComposer('run_a');
+    typeInto('ship it');
+    await settle();
+    expect(stored('run_a')).not.toBeNull();
+
+    send().click();
+    await settle();
+    expect(replied.map((r) => r.text)).toEqual(['ship it']);
+    expect(box().value).toBe('');
+    expect(stored('run_a')).toBeNull();
+
+    // The popover's click-to-send path goes through the same send().
+    typeInto('/cle');
+    await settle();
+    expect(stored('run_a')).not.toBeNull();
+    host!.querySelector<HTMLButtonElement>('.chat-cmd-row')!.click();
+    await settle();
+    expect(replied.map((r) => r.text)).toEqual(['ship it', '/clear']);
+    expect(stored('run_a')).toBeNull();
+  });
+
+  it('keeps the entry (and the box) when the send fails', async () => {
+    mountComposer('run_a');
+    typeInto('please retry');
+    await settle();
+    replyStatus = 500;
+
+    send().click();
+    await settle();
+    expect(replied).toHaveLength(1);
+    expect(box().value).toBe('please retry');
+    expect(storedValue('run_a')).toBe('please retry');
+  });
+
+  it('deletes the entry when the box is emptied or left whitespace-only', async () => {
+    mountComposer('run_a');
+    typeInto('something');
+    await settle();
+    expect(stored('run_a')).not.toBeNull();
+
+    typeInto('');
+    await settle();
+    expect(stored('run_a')).toBeNull();
+
+    typeInto('again');
+    await settle();
+    typeInto('   ');
+    await settle();
+    expect(stored('run_a')).toBeNull();
+  });
+
+  it('saves a Tab completion', async () => {
+    mountComposer('run_a');
+    typeInto('/cle');
+    await settle();
+    box().dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    await settle();
+    expect(box().value).toBe('/clear ');
+    expect(storedValue('run_a')).toBe('/clear ');
+  });
+
+  it('deletes the entry once the run has ended', async () => {
+    const m = mountComposer('run_a');
+    typeInto('too late');
+    await settle();
+    expect(stored('run_a')).not.toBeNull();
+
+    m.setEnded(true);
+    await settle();
+    expect(host!.querySelector('.chat-input')).toBeNull();
+    expect(stored('run_a')).toBeNull();
+  });
+
+  it('works exactly as before when localStorage throws on every access', async () => {
+    const boom = () => {
+      throw new Error('storage disabled');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(boom);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(boom);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(boom);
+    vi.spyOn(Storage.prototype, 'key').mockImplementation(boom);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const m = mountComposer('run_a');
+    typeInto('no persistence');
+    await settle();
+    expect(box().value).toBe('no persistence');
+    expect(send().disabled).toBe(false);
+
+    send().click();
+    await settle();
+    expect(replied.map((r) => r.text)).toEqual(['no persistence']);
+    expect(box().value).toBe('');
+
+    m.setID('run_b'); // a swap reads a throwing storage as "no draft"
+    await settle();
+    expect(box().value).toBe('');
+    expect(errors).not.toHaveBeenCalled();
   });
 });

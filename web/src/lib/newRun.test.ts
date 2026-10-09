@@ -6,7 +6,7 @@
 // (a failing tracker warns but leaves the field enabled).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Instance, IssuePull, ReadinessCheck, Repo } from '../api';
+import type { Instance, IssuePull, IssueSummary, ReadinessCheck, Repo } from '../api';
 import { baseRepo } from '../routes/repo-home/harness';
 import {
   afkLine,
@@ -15,6 +15,7 @@ import {
   composerBlockers,
   composerPlaceholder,
   defaultRunLabel,
+  EMPTY_NEW_RUN_DRAFT,
   fieldDisabled,
   filterIssues,
   filterRepos,
@@ -24,10 +25,12 @@ import {
   issueActions,
   issueAge,
   issueFilterCounts,
+  isEmptyNewRunDraft,
   LAND_NOTE_AUTOLAND,
   LAND_NOTE_LIVE_LANDER,
   landNotes,
   newestIssues,
+  parseNewRunDraft,
   parseRecentRepos,
   preselectedRepo,
   pushRecentRepo,
@@ -45,6 +48,7 @@ import {
   triageState,
   triageTint,
   writeRecentRepos,
+  type NewRunDraft,
 } from './newRun';
 
 const repo = (id: string, over: Partial<Repo> = {}): Repo =>
@@ -909,5 +913,106 @@ describe('composerBlockers', () => {
 
   it('exports the host-Runner warning', () => {
     expect(HOST_RUNNER_WARNING).toBe('Runs on the host, unsandboxed, with full host access.');
+  });
+});
+
+// The New run draft's stored shape (issue #92): each field is checked on its
+// own, so one garbage field reads as its empty value and the rest survive.
+describe('parseNewRunDraft', () => {
+  const issue: IssueSummary = {
+    number: 47,
+    title: 'Rename the module path',
+    body: '',
+    state: 'open',
+    labels: ['needs-triage'],
+    comments_count: 0,
+    created_at: '2026-10-01T00:00:00.000Z',
+    updated_at: '2026-10-01T00:00:00.000Z',
+    pull: { number: 88, head_branch: 'afk/47', url: 'https://h/o/r/pull/88', escalated: false },
+  };
+  const full: NewRunDraft = {
+    text: 'half a thought',
+    label: 'mine',
+    pickedId: 'repo_2',
+    providerPick: 'codex',
+    modelPick: 'gpt-5',
+    effortPick: 'high',
+    remotePick: false,
+    attachment: { action: 'land', issue, repoId: 'repo_2' },
+  };
+
+  it('round-trips a full composition through JSON, remotePick false included', () => {
+    expect(parseNewRunDraft(JSON.parse(JSON.stringify(full)))).toEqual(full);
+  });
+
+  it('reads a non-object as no draft', () => {
+    for (const v of [null, undefined, 'text', 42, true, ['text']]) {
+      expect(parseNewRunDraft(v)).toBeNull();
+    }
+  });
+
+  it('reads an empty object as the untouched composition', () => {
+    expect(parseNewRunDraft({})).toEqual(EMPTY_NEW_RUN_DRAFT);
+  });
+
+  it('drops each wrongly typed field to its empty value and keeps the rest', () => {
+    expect(
+      parseNewRunDraft({
+        ...full,
+        text: 42,
+        providerPick: null,
+        remotePick: 'false',
+        pickedId: '',
+      }),
+    ).toEqual({ ...full, text: '', providerPick: '', remotePick: null, pickedId: null });
+    expect(parseNewRunDraft({ ...full, label: {}, modelPick: [], effortPick: 1 })).toEqual({
+      ...full,
+      label: '',
+      modelPick: '',
+      effortPick: '',
+    });
+  });
+
+  it('keeps remotePick null apart from false', () => {
+    expect(parseNewRunDraft({ remotePick: null })?.remotePick).toBeNull();
+    expect(parseNewRunDraft({ remotePick: false })?.remotePick).toBe(false);
+    expect(parseNewRunDraft({ remotePick: true })?.remotePick).toBe(true);
+  });
+
+  it('drops a malformed attachment, and only the attachment', () => {
+    const att = full.attachment!;
+    const broken = [
+      'triage',
+      { ...att, action: 'deploy' },
+      { ...att, repoId: undefined },
+      { ...att, repoId: '' },
+      { ...att, issue: null },
+      { ...att, issue: { ...issue, number: '47' } },
+      { ...att, issue: { ...issue, number: 0 } },
+      { ...att, issue: { ...issue, title: undefined } },
+      { ...att, issue: { ...issue, state: 'merged' } },
+      { ...att, issue: { ...issue, labels: ['ok', 3] } },
+      { ...att, issue: { ...issue, pull: { number: 88 } } },
+    ];
+    for (const attachment of broken) {
+      expect(parseNewRunDraft({ ...full, attachment })).toEqual({ ...full, attachment: null });
+    }
+  });
+
+  it('reads an absent pull as none', () => {
+    const noPull: Partial<IssueSummary> = { ...issue };
+    delete noPull.pull;
+    expect(
+      parseNewRunDraft({ ...full, attachment: { ...full.attachment, issue: noPull } })?.attachment
+        ?.issue.pull,
+    ).toBeNull();
+  });
+
+  it('isEmptyNewRunDraft: only the untouched composition is empty', () => {
+    expect(isEmptyNewRunDraft(EMPTY_NEW_RUN_DRAFT)).toBe(true);
+    expect(isEmptyNewRunDraft(full)).toBe(false);
+    expect(isEmptyNewRunDraft({ ...EMPTY_NEW_RUN_DRAFT, remotePick: false })).toBe(false);
+    expect(isEmptyNewRunDraft({ ...EMPTY_NEW_RUN_DRAFT, pickedId: 'repo_1' })).toBe(false);
+    expect(isEmptyNewRunDraft({ ...EMPTY_NEW_RUN_DRAFT, text: ' ' })).toBe(false);
   });
 });

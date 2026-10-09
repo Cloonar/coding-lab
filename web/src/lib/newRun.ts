@@ -2,14 +2,15 @@
 // repositories list behind the pills (and its localStorage key), the repo
 // picker's rows and filter, the Issues card (triage state, filters, counts,
 // age), the issue action that rides as the run's first_message (issue #96;
-// Land and its collision notes, issue #88), the AFK line, and the blockers
-// shown at the composer. routes/NewRun.tsx and its components render what
+// Land and its collision notes, issue #88), the AFK line, the blockers
+// shown at the composer, and the stored shape of the unsent composition
+// (issue #92; lib/drafts stores it). routes/NewRun.tsx and its components render what
 // these return; nothing here touches the DOM (the two storage helpers guard
 // themselves), so every rule is unit-tested in newRun.test.ts.
 //
 // The reference for copy and behavior is docs/reference/new-run-mockup.html.
 
-import type { Instance, IssuePull, Repo } from '../api';
+import type { Instance, IssuePull, IssueSummary, Repo } from '../api';
 import type { CloneProgress } from '../stores/cloneProgress';
 import { AFK_PAUSE_THRESHOLD } from './afk';
 import { READY_LABEL } from './issues';
@@ -706,4 +707,124 @@ export function composerBlockers(input: {
 /** Whether any blocker disables the field (the textarea and Send). */
 export function fieldDisabled(blockers: Blocker[]): boolean {
   return blockers.some((blocker) => blocker.disablesField);
+}
+
+// --- The New run draft (issue #92) ---
+
+/** An attached issue action as the draft stores it: the repo it was attached under rides along. */
+export interface NewRunAttachment {
+  action: IssueAction;
+  issue: IssueSummary;
+  /** The repo whose tracker the issue belongs to: a restore under another repo drops it. */
+  repoId: string;
+}
+
+/**
+ * The whole New run composition, stored under NEW_RUN_DRAFT_KEY (lib/drafts)
+ * until the run starts. Each field mirrors one of the page's signals; the
+ * empty values are the page's untouched state.
+ */
+export interface NewRunDraft {
+  text: string;
+  label: string;
+  /** null = no repo picked: the page preselects. */
+  pickedId: string | null;
+  /** '' = no pick, for the provider, model and effort alike. */
+  providerPick: string;
+  modelPick: string;
+  effortPick: string;
+  /** Three-valued (issue #163): null = untouched, and `false` is a real pick. */
+  remotePick: boolean | null;
+  attachment: NewRunAttachment | null;
+}
+
+/** The untouched composition. */
+export const EMPTY_NEW_RUN_DRAFT: NewRunDraft = {
+  text: '',
+  label: '',
+  pickedId: null,
+  providerPick: '',
+  modelPick: '',
+  effortPick: '',
+  remotePick: null,
+  attachment: null,
+};
+
+/** Whether a draft is the untouched composition — nothing worth storing. */
+export function isEmptyNewRunDraft(draft: NewRunDraft): boolean {
+  return (Object.keys(EMPTY_NEW_RUN_DRAFT) as (keyof NewRunDraft)[]).every(
+    (k) => draft[k] === EMPTY_NEW_RUN_DRAFT[k],
+  );
+}
+
+const ISSUE_ACTION_IDS: ReadonlySet<unknown> = new Set(ISSUE_ACTIONS.map((a) => a.id));
+
+/**
+ * A stored draft value, shaped field by field: a field of the wrong type
+ * reads as its empty value without discarding the others, and an attachment
+ * whose shape does not hold (unknown action, a malformed issue summary, no
+ * repo id) reads as none. A value that is not an object at all is no draft
+ * (null). Pure; never throws — readDraft's `accept` for the New run page.
+ */
+export function parseNewRunDraft(value: unknown): NewRunDraft | null {
+  if (!isRecord(value)) return null;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  return {
+    text: str(value.text),
+    label: str(value.label),
+    pickedId: typeof value.pickedId === 'string' && value.pickedId !== '' ? value.pickedId : null,
+    providerPick: str(value.providerPick),
+    modelPick: str(value.modelPick),
+    effortPick: str(value.effortPick),
+    remotePick: typeof value.remotePick === 'boolean' ? value.remotePick : null,
+    attachment: parseAttachment(value.attachment),
+  };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function parseAttachment(v: unknown): NewRunAttachment | null {
+  if (!isRecord(v)) return null;
+  if (!ISSUE_ACTION_IDS.has(v.action)) return null;
+  if (typeof v.repoId !== 'string' || v.repoId === '') return null;
+  const issue = parseIssueSummary(v.issue);
+  if (issue === null) return null;
+  return { action: v.action as IssueAction, issue, repoId: v.repoId };
+}
+
+function parseIssueSummary(v: unknown): IssueSummary | null {
+  if (!isRecord(v)) return null;
+  const { number, title, body, state, labels, comments_count, created_at, updated_at } = v;
+  if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) return null;
+  if (typeof title !== 'string' || typeof body !== 'string') return null;
+  if (state !== 'open' && state !== 'closed') return null;
+  if (!Array.isArray(labels) || !labels.every((l) => typeof l === 'string')) return null;
+  if (typeof comments_count !== 'number' || !Number.isFinite(comments_count)) return null;
+  if (typeof created_at !== 'string' || typeof updated_at !== 'string') return null;
+  const pull = parseIssuePull(v.pull);
+  if (pull === undefined) return null;
+  return {
+    number,
+    title,
+    body,
+    state,
+    labels: labels as string[],
+    comments_count,
+    created_at,
+    updated_at,
+    pull,
+  };
+}
+
+/** The issue's PR: null for none (or absent), undefined for a malformed one. */
+function parseIssuePull(v: unknown): IssuePull | null | undefined {
+  if (v === null || v === undefined) return null;
+  if (!isRecord(v)) return undefined;
+  const { number, head_branch, url, escalated } = v;
+  if (typeof number !== 'number' || !Number.isInteger(number)) return undefined;
+  if (typeof head_branch !== 'string' || typeof url !== 'string') return undefined;
+  if (typeof escalated !== 'boolean') return undefined;
+  return { number, head_branch, url, escalated };
 }
