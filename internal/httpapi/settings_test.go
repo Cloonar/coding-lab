@@ -48,6 +48,24 @@ func settingsOf(t *testing.T, body map[string]any) map[string]any {
 	return m
 }
 
+// assertErrorField checks the 400 body's "field" (issue #85): a refusal about
+// one settings key names that key so the form can pin the message under it;
+// want == "" means the refusal blames no key and the plain {"error"} shape
+// must carry no "field" at all.
+func assertErrorField(t *testing.T, body map[string]any, want string) {
+	t.Helper()
+	got, present := body["field"]
+	if want == "" {
+		if present {
+			t.Errorf("error body %v carries field %v, want the plain shape", body, got)
+		}
+		return
+	}
+	if got != want {
+		t.Errorf("error body %v: field = %v, want %q", body, got, want)
+	}
+}
+
 func TestAPI_SettingsGetTyped(t *testing.T) {
 	x := newSettingsServer(t)
 
@@ -228,71 +246,89 @@ func TestAPI_SettingsPatchValidation(t *testing.T) {
 	h := csrfHeaders(x.ts.URL)
 
 	bad := []struct {
-		name string
-		body map[string]any
+		name  string
+		body  any
+		field string // the settings key the 400 must name; "" = no field (plain shape)
 	}{
-		{"tick below 5s", map[string]any{"afk_tick_seconds": 3}},
-		{"schedule below 5s", map[string]any{"afk_schedule_seconds": 4}},
-		{"zero budget", map[string]any{"afk_budget_minutes": 0}},
-		{"zero cap", map[string]any{"max_instances": 0}},
-		{"non-integer", map[string]any{"max_instances": "abc"}},
-		{"fractional", map[string]any{"afk_budget_minutes": 1.5}},
-		{"negative dialog timeout", map[string]any{"dialog_timeout_minutes": -1}},
-		{"fractional dialog timeout", map[string]any{"dialog_timeout_minutes": 1.5}},
-		{"non-integer dialog timeout", map[string]any{"dialog_timeout_minutes": "abc"}},
-		{"null dialog timeout", map[string]any{"dialog_timeout_minutes": nil}},
-		{"unknown model", map[string]any{"spawn_model_default": "gpt-9"}},
-		{"blank model", map[string]any{"spawn_model_default": ""}},
-		{"unknown effort", map[string]any{"spawn_effort_default": "ultra"}},
-		{"unknown key", map[string]any{"warp_factor": 9}},
+		{"tick below 5s", map[string]any{"afk_tick_seconds": 3}, "afk_tick_seconds"},
+		{"schedule below 5s", map[string]any{"afk_schedule_seconds": 4}, "afk_schedule_seconds"},
+		{"zero budget", map[string]any{"afk_budget_minutes": 0}, "afk_budget_minutes"},
+		{"zero cap", map[string]any{"max_instances": 0}, "max_instances"},
+		{"non-integer", map[string]any{"max_instances": "abc"}, "max_instances"},
+		{"fractional", map[string]any{"afk_budget_minutes": 1.5}, "afk_budget_minutes"},
+		{"negative dialog timeout", map[string]any{"dialog_timeout_minutes": -1}, "dialog_timeout_minutes"},
+		{"fractional dialog timeout", map[string]any{"dialog_timeout_minutes": 1.5}, "dialog_timeout_minutes"},
+		{"non-integer dialog timeout", map[string]any{"dialog_timeout_minutes": "abc"}, "dialog_timeout_minutes"},
+		{"null dialog timeout", map[string]any{"dialog_timeout_minutes": nil}, "dialog_timeout_minutes"},
+		{"unknown model", map[string]any{"spawn_model_default": "gpt-9"}, "spawn_model_default"},
+		{"blank model", map[string]any{"spawn_model_default": ""}, "spawn_model_default"},
+		{"unknown effort", map[string]any{"spawn_effort_default": "ultra"}, "spawn_effort_default"},
+		// Refusals that blame no key keep the plain {"error"} shape: an unknown
+		// key, the two read-only fields, and a body that is not a JSON object.
+		{"unknown key", map[string]any{"warp_factor": 9}, ""},
+		{"read-only afk_prompt_default", map[string]any{"afk_prompt_default": "x"}, ""},
+		{"read-only dev_image_fallback", map[string]any{"dev_image_fallback": "x"}, ""},
+		{"body not an object", "nope", ""},
+		// Not-a-string refusals name the key on every string-valued setting.
+		{"model not a string", map[string]any{"spawn_model_default": 7}, "spawn_model_default"},
+		{"effort not a string", map[string]any{"spawn_effort_default": 7}, "spawn_effort_default"},
+		{"provider not a string", map[string]any{"provider_default": 7}, "provider_default"},
+		{"afk prompt not a string", map[string]any{"afk_prompt": 7}, "afk_prompt"},
+		{"afk prompt too long", map[string]any{"afk_prompt": strings.Repeat("a", afkPromptMaxBytes+1)}, "afk_prompt"},
+		{"git author name not a string", map[string]any{"git_author_name": 7}, "git_author_name"},
+		{"container memory not a string", map[string]any{"container_memory": 7}, "container_memory"},
+		{"runner default unknown", map[string]any{"runner_default": "podman"}, "runner_default"},
+		{"dev image default not a string", map[string]any{"dev_image_default": 7}, "dev_image_default"},
 		// AFK-override defaults (issue #19): a NON-empty value still validates
 		// against the provider catalogs; the options bag validates keys + values.
-		{"afk unknown model", map[string]any{"spawn_model_default_afk": "gpt-9"}},
-		{"afk unknown effort", map[string]any{"spawn_effort_default_afk": "ultra"}},
+		{"afk unknown model", map[string]any{"spawn_model_default_afk": "gpt-9"}, "spawn_model_default_afk"},
+		{"afk unknown effort", map[string]any{"spawn_effort_default_afk": "ultra"}, "spawn_effort_default_afk"},
 		// The lander-override defaults follow the AFK pair's rule exactly.
-		{"lander unknown model", map[string]any{"spawn_model_default_lander": "gpt-9"}},
-		{"lander unknown effort", map[string]any{"spawn_effort_default_lander": "ultra"}},
-		{"lander model not a string", map[string]any{"spawn_model_default_lander": 7}},
+		{"lander unknown model", map[string]any{"spawn_model_default_lander": "gpt-9"}, "spawn_model_default_lander"},
+		{"lander unknown effort", map[string]any{"spawn_effort_default_lander": "ultra"}, "spawn_effort_default_lander"},
+		{"lander model not a string", map[string]any{"spawn_model_default_lander": 7}, "spawn_model_default_lander"},
 		// The provider defaults (issue #66): the base key must always name a
 		// registered provider (no lower operator layer to inherit from); the
 		// AFK override allows "" (inherit) but rejects an unknown id.
-		{"unknown provider", map[string]any{"provider_default": "ghost"}},
-		{"blank provider", map[string]any{"provider_default": ""}},
-		{"afk unknown provider", map[string]any{"spawn_provider_default_afk": "ghost"}},
+		{"unknown provider", map[string]any{"provider_default": "ghost"}, "provider_default"},
+		{"blank provider", map[string]any{"provider_default": ""}, "provider_default"},
+		{"afk unknown provider", map[string]any{"spawn_provider_default_afk": "ghost"}, "spawn_provider_default_afk"},
 		// The container resource-limit defaults (issue #205): the two integer
 		// keys floor at 1, and container_memory must match podman's --memory
 		// value grammar.
-		{"container pids zero", map[string]any{"container_pids": 0}},
-		{"container nofile zero", map[string]any{"container_nofile": 0}},
-		{"bad container memory", map[string]any{"container_memory": "bogus"}},
+		{"container pids zero", map[string]any{"container_pids": 0}, "container_pids"},
+		{"container nofile zero", map[string]any{"container_nofile": 0}, "container_nofile"},
+		{"bad container memory", map[string]any{"container_memory": "bogus"}, "container_memory"},
 		// transcript_retention_days (issue #81): an integer 0..365, nothing else.
-		{"negative transcript retention", map[string]any{"transcript_retention_days": -1}},
-		{"transcript retention over cap", map[string]any{"transcript_retention_days": 366}},
-		{"fractional transcript retention", map[string]any{"transcript_retention_days": 1.5}},
-		{"non-integer transcript retention", map[string]any{"transcript_retention_days": "forever"}},
-		{"null transcript retention", map[string]any{"transcript_retention_days": nil}},
-		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}},
-		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}},
-		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}},
+		{"negative transcript retention", map[string]any{"transcript_retention_days": -1}, "transcript_retention_days"},
+		{"transcript retention over cap", map[string]any{"transcript_retention_days": 366}, "transcript_retention_days"},
+		{"fractional transcript retention", map[string]any{"transcript_retention_days": 1.5}, "transcript_retention_days"},
+		{"non-integer transcript retention", map[string]any{"transcript_retention_days": "forever"}, "transcript_retention_days"},
+		{"null transcript retention", map[string]any{"transcript_retention_days": nil}, "transcript_retention_days"},
+		{"unknown spawn option key", map[string]any{"spawn_options_afk": map[string]any{"warp_drive": "true"}}, "spawn_options_afk"},
+		{"bad spawn option value", map[string]any{"spawn_options_afk": map[string]any{"ultracode": "maybe"}}, "spawn_options_afk"},
+		{"spawn options not an object", map[string]any{"spawn_options_afk": "nope"}, "spawn_options_afk"},
 		// The boolean keys (issue #163) take a JSON bool and NOTHING else — a
 		// stringy "yes"/"true" or a 1/0 would leave "is it set?" ambiguous for a
 		// knob whose whole design turns on telling false apart from unset.
-		{"remote default as string", map[string]any{"spawn_remote_default": "yes"}},
-		{"remote default as bool string", map[string]any{"spawn_remote_default": "true"}},
-		{"remote default as number", map[string]any{"spawn_remote_default": 1}},
+		{"remote default as string", map[string]any{"spawn_remote_default": "yes"}, "spawn_remote_default"},
+		{"remote default as bool string", map[string]any{"spawn_remote_default": "true"}, "spawn_remote_default"},
+		{"remote default as number", map[string]any{"spawn_remote_default": 1}, "spawn_remote_default"},
 		// null is inherit — legal for the AFK override, but the base key has no
 		// lower layer to inherit from, so null is a 400 there.
-		{"remote default null", map[string]any{"spawn_remote_default": nil}},
-		{"afk remote default as string", map[string]any{"spawn_remote_default_afk": "true"}},
-		{"afk remote default as number", map[string]any{"spawn_remote_default_afk": 0}},
+		{"remote default null", map[string]any{"spawn_remote_default": nil}, "spawn_remote_default"},
+		{"afk remote default as string", map[string]any{"spawn_remote_default_afk": "true"}, "spawn_remote_default_afk"},
+		{"afk remote default as number", map[string]any{"spawn_remote_default_afk": 0}, "spawn_remote_default_afk"},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := x.do("PATCH", "/api/v1/settings", tt.body, h)
 			wantStatus(t, resp, http.StatusBadRequest)
-			if got := decodeBody(t, resp); got["error"] == "" {
+			got := decodeBody(t, resp)
+			if got["error"] == "" {
 				t.Error("400 without error message")
 			}
+			assertErrorField(t, got, tt.field)
 		})
 	}
 
@@ -591,7 +627,9 @@ func TestAPI_SettingsRunnerDefault(t *testing.T) {
 			store.SettingGitAuthorName: "Half Applied",
 		}, h)
 		wantStatus(t, resp, http.StatusBadRequest)
-		msg := fmt.Sprint(decodeBody(t, resp)["error"])
+		body := decodeBody(t, resp)
+		assertErrorField(t, body, store.SettingRunnerDefault)
+		msg := fmt.Sprint(body["error"])
 		for _, want := range []string{"runner_default", `"host"`, `"container"`} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("runner_default %#v: 400 error %q does not name %s", bad, msg, want)
@@ -712,9 +750,13 @@ func TestAPI_SettingsDevImageDefault(t *testing.T) {
 			store.SettingGitAuthorName:   "Half Applied",
 		}, h)
 		wantStatus(t, resp, http.StatusBadRequest)
-		if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, tc.reason) {
+		body := decodeBody(t, resp)
+		if msg := fmt.Sprint(body["error"]); !strings.Contains(msg, tc.reason) {
 			t.Errorf("PATCH %q: 400 error %q, want the pinner's reason %q", tc.ref, msg, tc.reason)
 		}
+		// The pin failure blames the settings key, not the repo field the
+		// shared pinner would name (issue #85).
+		assertErrorField(t, body, store.SettingDevImageDefault)
 		if v := stored(); v != already {
 			t.Errorf("dev_image_default = %q after the rejected %q, want the previous %q", v, tc.ref, already)
 		}
@@ -752,9 +794,11 @@ func TestAPI_SettingsDevImageDefaultPinnedLast(t *testing.T) {
 			store.SettingAFKTickSeconds:  1,
 		}, h)
 		wantStatus(t, resp, http.StatusBadRequest)
-		if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, "afk_tick_seconds") {
+		body := decodeBody(t, resp)
+		if msg := fmt.Sprint(body["error"]); !strings.Contains(msg, "afk_tick_seconds") {
 			t.Fatalf("400 error = %q, want the afk_tick_seconds floor", msg)
 		}
+		assertErrorField(t, body, store.SettingAFKTickSeconds)
 	}
 	if n := x.pin.callCount(); n != 0 {
 		t.Errorf("pinner called %d times for PATCHes failing a cheap check, want 0", n)
@@ -825,9 +869,11 @@ func TestAPI_SettingsDevImageFallback(t *testing.T) {
 
 			resp = x.do("PATCH", "/api/v1/settings", map[string]any{"dev_image_fallback": "x"}, h)
 			wantStatus(t, resp, http.StatusBadRequest)
-			if msg := fmt.Sprint(decodeBody(t, resp)["error"]); !strings.Contains(msg, `unknown setting "dev_image_fallback"`) {
+			body := decodeBody(t, resp)
+			if msg := fmt.Sprint(body["error"]); !strings.Contains(msg, `unknown setting "dev_image_fallback"`) {
 				t.Errorf("400 error = %q, want unknown setting", msg)
 			}
+			assertErrorField(t, body, "") // blames no settings key: plain shape
 			if _, err := x.st.GetSetting(context.Background(), "dev_image_fallback"); !errors.Is(err, store.ErrNotFound) {
 				t.Errorf("GetSetting(dev_image_fallback) = %v, want ErrNotFound (never a stored row)", err)
 			}
@@ -886,9 +932,11 @@ func TestAPI_SettingsTranscriptRetention(t *testing.T) {
 			store.SettingGitAuthorName:           "Half Applied",
 		}, h)
 		wantStatus(t, resp, http.StatusBadRequest)
-		if body := decodeBody(t, resp); body["error"] != tc.msg {
+		body := decodeBody(t, resp)
+		if body["error"] != tc.msg {
 			t.Errorf("PATCH %v error = %v, want %q", tc.value, body["error"], tc.msg)
 		}
+		assertErrorField(t, body, store.SettingTranscriptRetentionDays)
 	}
 	if v, err := x.st.TranscriptRetentionDays(ctx); err != nil || v != 14 {
 		t.Errorf("transcript_retention_days after rejected PATCHes = %d (%v), want 14", v, err)

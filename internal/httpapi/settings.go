@@ -14,7 +14,10 @@ package httpapi
 // after every cheap check of the body has passed, and a failed pin writes
 // nothing either. No event is published and no restart is needed: the
 // runtime loops re-read settings every tick (D12c), and spawn paths read them
-// per call.
+// per call. A refusal about ONE key answers {"error","field":<that key>} (issue
+// #85, the writeFieldError shape) so a form can pin the message under its
+// input; refusals with no key to blame — an undecodable body, an unknown or
+// read-only key — keep the plain {"error"}.
 
 import (
 	"context"
@@ -27,6 +30,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
+	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -174,15 +178,15 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if floor, isInt := settingsIntMin[key]; isInt {
 			n, err := parseSettingInt(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be an integer", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be an integer", key))
 				return
 			}
 			if n < floor {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at least %d", key, floor))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be at least %d", key, floor))
 				return
 			}
 			if ceil, capped := settingsIntMax[key]; capped && n > ceil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be at most %d", key, ceil))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be at most %d", key, ceil))
 				return
 			}
 			updates[key] = strconv.Itoa(n)
@@ -191,7 +195,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if nullable, isBool := settingsBoolNullable[key]; isBool {
 			v, err := parseSettingBool(raw, key, nullable)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
+				writeFieldError(w, http.StatusBadRequest, key, err.Error())
 				return
 			}
 			updates[key] = v
@@ -201,54 +205,54 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		case store.SettingSpawnModelDefault:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			if !s.spawnDefaultAllowed(v, true) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown model %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingSpawnEffortDefault:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			if !s.spawnDefaultAllowed(v, false) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown effort %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown effort %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingSpawnModelDefaultAFK, store.SettingSpawnModelDefaultLander:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			// Empty = inherit the base default (issue #19), so unlike the base
 			// key an empty AFK override is explicitly allowed. The lander
 			// override follows the identical rule.
 			if v != "" && !s.spawnDefaultAllowed(v, true) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown model %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown model %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingSpawnEffortDefaultAFK, store.SettingSpawnEffortDefaultLander:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			if v != "" && !s.spawnDefaultAllowed(v, false) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown effort %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown effort %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingProviderDefault:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			// The base provider default (issue #66) must always name a real
@@ -256,34 +260,34 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// an empty value could inherit from (the first-registered fallback
 			// is a resolution rule, not an operator setting).
 			if v == "" || !s.providerRegistered(v) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown provider %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingSpawnProviderDefaultAFK:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			// Empty = inherit the base provider chain (issue #66), mirroring
 			// the spawn_*_default_afk keys.
 			if v != "" && !s.providerRegistered(v) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider %q", v))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("unknown provider %q", v))
 				return
 			}
 			updates[key] = v
 		case store.SettingSpawnOptionsAFK:
 			v, err := s.parseSpawnOptionsBag(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
+				writeFieldError(w, http.StatusBadRequest, key, err.Error())
 				return
 			}
 			updates[key] = v
 		case store.SettingAFKPrompt:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			// Whitespace-only normalizes to "" = inherit the built-in (issue #52
@@ -293,14 +297,14 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(v) == "" {
 				v = ""
 			} else if len(v) > afkPromptMaxBytes {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("afk_prompt must be at most %d bytes", afkPromptMaxBytes))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("afk_prompt must be at most %d bytes", afkPromptMaxBytes))
 				return
 			}
 			updates[key] = v
 		case store.SettingGitAuthorName, store.SettingGitAuthorEmail:
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			updates[key] = v
@@ -310,11 +314,11 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// with the repo-level override's own validation in reposvc).
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			if !store.ValidContainerMemory(v) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must look like a podman --memory value, e.g. %q", key, "8g"))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must look like a podman --memory value, e.g. %q", key, "8g"))
 				return
 			}
 			updates[key] = v
@@ -326,7 +330,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// else, and a value it would refuse must never be stored.
 			v, err := parseSettingString(raw)
 			if err != nil || (v != store.RunnerHost && v != store.RunnerContainer) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be %q or %q", key, store.RunnerHost, store.RunnerContainer))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be %q or %q", key, store.RunnerHost, store.RunnerContainer))
 				return
 			}
 			updates[key] = v
@@ -337,7 +341,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			// pinned after the loop, once every cheap check has passed.
 			v, err := parseSettingString(raw)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("%s must be a string", key))
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
 				return
 			}
 			if strings.TrimSpace(v) == "" {
@@ -365,6 +369,14 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if devImageRef != nil {
 		pinned, err := s.pinDevImageDefault(r.Context(), *devImageRef)
 		if err != nil {
+			// The pinner's bad-ref rejection names no field of its own (it is
+			// shared with the repo image_ref path), so it is pinned to this key
+			// here; every other error maps as writeRepoError does.
+			var bad *reposvc.BadRequestError
+			if errors.As(err, &bad) {
+				writeFieldError(w, http.StatusBadRequest, store.SettingDevImageDefault, bad.Error())
+				return
+			}
 			s.writeRepoError(w, "pinning "+store.SettingDevImageDefault, err)
 			return
 		}
