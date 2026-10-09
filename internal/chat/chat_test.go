@@ -28,13 +28,14 @@ func newService(t *testing.T) (*Service, *store.Store, *providertest.Fake, *even
 		t.Fatal(err)
 	}
 	bus := events.NewBus()
-	// Per-run runtime dirs (issue #205), shaped like production's
-	// instancehome.RuntimePath — the seam-args tests re-derive the same path
-	// through svc.runtimeDir(runID).
+	// Per-run runtime dirs (issue #205) and instance HOMEs (issue #202), shaped
+	// like production's instancehome.RuntimePath/HomePath — the seam-args tests
+	// re-derive the same paths through svc.runtimeDir(runID)/svc.home(runID).
 	base := t.TempDir()
 	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
 		Poll:          5 * time.Millisecond,
-		RuntimeDirFor: func(runID string) string { return filepath.Join(base, runID, "runtime") }})
+		RuntimeDirFor: func(runID string) string { return filepath.Join(base, runID, "runtime") },
+		HomeFor:       func(runID string) string { return filepath.Join(base, runID, "home") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,13 +469,14 @@ func TestRead_spoolDialogForcesQuestion(t *testing.T) {
 	}
 }
 
-func TestRead_blockedMarkerForcesNeedsInput(t *testing.T) {
+func TestRead_liveWaitingForcesNeedsInput(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
-	// A tool is 'running' in the transcript, but the adapter's blocked marker
-	// says the agent is actually waiting (e.g. a permission prompt) →
-	// needs_input, composed inside ReadChat and forwarded by core.
+	// A tool is 'running' in the transcript, but the adapter's live signal
+	// (claude-code: the registry's status "waiting", issue #79) says the agent
+	// is actually waiting (e.g. a permission prompt) → needs_input, composed
+	// inside ReadChat and forwarded by core.
 	fake.SetChat(provider.Chat{State: provider.StateWorking})
 	fake.SetBlockedState(provider.StateNeedsInput, true)
 
@@ -487,7 +489,7 @@ func TestRead_blockedMarkerForcesNeedsInput(t *testing.T) {
 	}
 }
 
-func TestRead_pendingDialogBeatsBlockedMarker(t *testing.T) {
+func TestRead_pendingDialogBeatsLiveWaiting(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
@@ -500,14 +502,14 @@ func TestRead_pendingDialogBeatsBlockedMarker(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 	if v.State != provider.StateQuestion || v.PendingDialog == nil {
-		t.Errorf("view = {state:%q dialog:%+v}; want the dialog to win over the marker", v.State, v.PendingDialog)
+		t.Errorf("view = {state:%q dialog:%+v}; want the dialog to win over the waiting state", v.State, v.PendingDialog)
 	}
 }
 
 // A transcript-derived StateQuestion (the dormant flushed-tool_use fallback)
-// stands on its own: the adapter's blocked marker must not clobber it, and no
+// stands on its own: the adapter's live waiting state must not clobber it, and no
 // side-channel dialog is synthesized for it — the dialog stays in Messages.
-func TestRead_transcriptQuestionStandsOverMarker(t *testing.T) {
+func TestRead_transcriptQuestionStandsOverLiveWaiting(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
 	fake.SetTranscriptPath("/transcript.jsonl")
@@ -551,15 +553,54 @@ func TestRead_endedRunIgnoresSpool(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("ReadChat calls = %d; want 1", len(calls))
 	}
-	if calls[0].RuntimeDir != "" || calls[0].RunID != run.ID || calls[0].TranscriptPath != "/transcript.jsonl" {
-		t.Errorf("ended ReadChat call = %+v; want {RunID:%s RuntimeDir:\"\" TranscriptPath:/transcript.jsonl}", calls[0], run.ID)
+	// No HOME and no worktree either (issue #79): an ended read never consults
+	// the agent's state registry.
+	if calls[0].RuntimeDir != "" || calls[0].Home != "" || calls[0].Worktree != "" ||
+		calls[0].RunID != run.ID || calls[0].TranscriptPath != "/transcript.jsonl" {
+		t.Errorf("ended ReadChat call = %+v; want {RunID:%s RuntimeDir:\"\" Home:\"\" Worktree:\"\" TranscriptPath:/transcript.jsonl}", calls[0], run.ID)
+	}
+}
+
+// Issue #79 decision 4: the adapter's StateDetail rides the view verbatim for
+// an ACTIVE run, and core clears it with the StateEnded override for an ENDED
+// one — even when the adapter returned one (a transcript-only read never
+// should, but terminal state is core-owned regardless).
+func TestRead_stateDetailRidesActiveViewOnly(t *testing.T) {
+	svc, st, fake, _ := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	fake.SetTranscriptPath("/transcript.jsonl")
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	fake.SetBlockedState(provider.StateNeedsInput, true)
+	fake.SetStateDetail("Claude needs your permission to use Bash")
+
+	v, err := svc.Read(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if v.State != provider.StateNeedsInput || v.StateDetail != "Claude needs your permission to use Bash" {
+		t.Errorf("active view = {state:%q detail:%q}; want needs_input with the adapter's detail", v.State, v.StateDetail)
+	}
+
+	ended := seedRunID(t, st, "run2", store.RunOutcomeStopped)
+	if err := st.UpdateRunTranscriptPath(context.Background(), ended.ID, "/transcript.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	ended, _ = st.RunByID(context.Background(), ended.ID)
+	fake.SetChat(provider.Chat{State: provider.StateNeedsInput, StateDetail: "residue"})
+	v, err = svc.Read(context.Background(), ended)
+	if err != nil {
+		t.Fatalf("Read(ended): %v", err)
+	}
+	if v.State != provider.StateEnded || v.StateDetail != "" {
+		t.Errorf("ended view = {state:%q detail:%q}; want ended with no detail", v.State, v.StateDetail)
 	}
 }
 
 // Core's side of the #92 seam contract for an ACTIVE run: ReadChat gets the
 // run id (keys the adapter's spool), the run's PRIVATE runtime dir (issue
-// #205 — live signals on, resolved through RuntimeDirFor), and the resolved
-// transcript path.
+// #205 — live signals on, resolved through RuntimeDirFor), its instance HOME
+// and worktree (issue #79 — the adapter's state registry and its cwd key),
+// and the resolved transcript path.
 func TestRead_activeRunPassesSeamArgs(t *testing.T) {
 	svc, st, fake, _ := newService(t)
 	run := seedRun(t, st, store.RunOutcomeActive)
@@ -573,9 +614,10 @@ func TestRead_activeRunPassesSeamArgs(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("ReadChat calls = %d; want 1", len(calls))
 	}
-	want := providertest.ReadCall{RunID: run.ID, RuntimeDir: svc.runtimeDir(run.ID), TranscriptPath: "/transcript.jsonl"}
-	if want.RuntimeDir == "" {
-		t.Fatal("fixture wired no RuntimeDirFor — the per-run dir assertion would be vacuous")
+	want := providertest.ReadCall{RunID: run.ID, RuntimeDir: svc.runtimeDir(run.ID), Home: svc.home(run.ID),
+		Worktree: run.WorktreePath, TranscriptPath: "/transcript.jsonl"}
+	if want.RuntimeDir == "" || want.Home == "" || want.Worktree == "" {
+		t.Fatal("fixture wired no RuntimeDirFor/HomeFor/worktree — the per-run assertion would be vacuous")
 	}
 	if calls[0] != want {
 		t.Errorf("ReadChat call = %+v; want %+v", calls[0], want)
@@ -754,6 +796,119 @@ func TestTailer_followsTranscriptRotation(t *testing.T) {
 	got, _ = st.RunByID(context.Background(), run.ID)
 	if got.TranscriptPath == nil || *got.TranscriptPath != pathB {
 		t.Errorf("persisted path after rotation = %v; want B (%s)", got.TranscriptPath, pathB)
+	}
+}
+
+// A detail-only change (issue #79): the registry's waitingFor changes while
+// the state stays needs_input (one permission prompt replaced by another) —
+// the tailer must republish with the new detail, and the instance-list
+// source must serve state and detail as one pair.
+func TestTailer_republishesOnDetailOnlyChange(t *testing.T) {
+	svc, st, fake, bus := newService(t)
+	run := seedRun(t, st, store.RunOutcomeActive)
+	path := t.TempDir() + "/t.jsonl"
+	writeFile(t, path, "{}") // frozen transcript
+	fake.SetTranscriptPath(path)
+	fake.SetChat(provider.Chat{State: provider.StateWorking})
+	fake.SetBlockedState(provider.StateNeedsInput, true)
+	fake.SetStateDetail("input needed")
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no initial run.messages.changed")
+	}
+	if p.State != provider.StateNeedsInput || p.StateDetail != "input needed" {
+		t.Errorf("initial payload = {state:%q detail:%q}; want needs_input / input needed", p.State, p.StateDetail)
+	}
+	waitFor(t, func() bool {
+		s, d, ok := svc.ConversationState(run.SessionName)
+		return ok && s == provider.StateNeedsInput && d == "input needed"
+	}, "tailer to store the initial state + detail")
+
+	// Only the detail changes; the registry rewrite flips the sig.
+	fake.SetStateDetail("Claude needs your permission to use Bash")
+	fake.SetSpoolSig("sessions/1.json:2:300;")
+	p, ok = drainPayloadFor(sub, EventMessagesChanged, 2*time.Second)
+	if !ok {
+		t.Fatal("no run.messages.changed on the detail-only change")
+	}
+	if p.State != provider.StateNeedsInput || p.StateDetail != "Claude needs your permission to use Bash" {
+		t.Errorf("detail-only payload = {state:%q detail:%q}; want the same state with the new detail", p.State, p.StateDetail)
+	}
+	waitFor(t, func() bool {
+		_, d, _ := svc.ConversationState(run.SessionName)
+		return d == "Claude needs your permission to use Bash"
+	}, "tailer to store the new detail")
+}
+
+// The tailer passes the run's instance HOME to SpoolSig and ReadChat (issue
+// #79 decision 6) — and a HOME alone arms the change detector: with no
+// runtime dir wired, a registry status flip (the sig changing under the home)
+// still re-reads and republishes. Before #79 SpoolSig was gated on the
+// runtime dir and took no home, so this flip went unseen.
+func TestTailer_spoolSigCoversHome(t *testing.T) {
+	st := testutil.TempStore(t)
+	fake := providertest.New()
+	reg, err := provider.NewRegistry(fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus()
+	homeFor := func(runID string) string { return "/state/instances/" + runID + "/home" }
+	svc, err := New(Options{Store: st, Providers: reg, Bus: bus, Logger: logx.New(io.Discard),
+		Poll: 5 * time.Millisecond, HomeFor: homeFor}) // no RuntimeDirFor
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := seedRun(t, st, store.RunOutcomeActive)
+	path := t.TempDir() + "/t.jsonl"
+	writeFile(t, path, "{}") // frozen transcript
+	fake.SetTranscriptPath(path)
+	fake.SetChat(provider.Chat{State: provider.StateNeedsInput}) // the fold: turn ended
+
+	sub, cancel := bus.Subscribe(context.Background())
+	defer cancel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go svc.Run(ctx)
+
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateNeedsInput
+	}, "tailer to derive the initial needs_input")
+	drainFor(sub, EventMessagesChanged, 2*time.Second) // consume the initial publish
+
+	// The CLI reports busy (background agents still running): the registry
+	// file rewrite flips the sig; the adapter composes working.
+	fake.SetBlockedState(provider.StateWorking, true)
+	fake.SetSpoolSig("sessions/1.json:2:120;")
+	waitFor(t, func() bool {
+		s, ok := svc.State(run.SessionName)
+		return ok && s == provider.StateWorking
+	}, "tailer to re-read on the home-only sig flip")
+	if p, ok := drainPayloadFor(sub, EventMessagesChanged, 2*time.Second); !ok || p.State != provider.StateWorking {
+		t.Errorf("payload = %+v, %v; want a working republish", p, ok)
+	}
+
+	homes := fake.SpoolSigHomes()
+	if len(homes) == 0 {
+		t.Fatal("SpoolSig never ran with only a HOME wired")
+	}
+	for i, h := range homes {
+		if h != homeFor(run.ID) {
+			t.Errorf("SpoolSig call %d home = %q; want the run's instance home %q", i, h, homeFor(run.ID))
+		}
+	}
+	for i, c := range fake.ReadCalls() {
+		if c.Home != homeFor(run.ID) || c.Worktree != run.WorktreePath {
+			t.Errorf("tailer ReadChat call %d = %+v; want Home %q Worktree %q", i, c, homeFor(run.ID), run.WorktreePath)
+		}
 	}
 }
 
@@ -943,13 +1098,13 @@ func TestTailerSet_removeIsGenerationAware(t *testing.T) {
 	// The session name is reused (stop→start in the same minute): the
 	// successor registers before the predecessor goroutine finishes exiting.
 	ts.add("s", h2)
-	ts.setState("s", provider.StateWorking)
+	ts.setState("s", provider.StateWorking, "")
 
 	ts.remove("s", h1) // late-exiting predecessor
 	if ts.handles["s"] != h2 {
 		t.Error("stale remove deleted the successor's registration")
 	}
-	if _, ok := ts.state("s"); !ok {
+	if _, _, ok := ts.state("s"); !ok {
 		t.Error("stale remove deleted the successor's state")
 	}
 

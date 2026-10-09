@@ -349,6 +349,7 @@ function RunChatView() {
   const {
     messages,
     state,
+    stateDetail,
     transcript,
     pendingDialogField,
     contextUsage,
@@ -705,6 +706,7 @@ function RunChatView() {
         <Composer
           runID={params.id}
           state={state()}
+          stateDetail={stateDetail()}
           ended={ended()}
           transcript={transcript()}
           dialog={pendingDialog()}

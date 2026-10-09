@@ -372,9 +372,11 @@ type Service struct {
 
 // ConversationStater is the chat tailer's derived-state seam (issue #7): the
 // instance list annotates each live run with its conversational state
-// (working|needs_input|question|idle). Satisfied by *chat.Service; nil-safe.
+// (working|needs_input|question|idle) and, since issue #79, the adapter's
+// optional detail for it — one call, so the pair is always from the same
+// tailer tick. Satisfied by *chat.Service; nil-safe.
 type ConversationStater interface {
-	State(session string) (string, bool)
+	ConversationState(session string) (state, detail string, ok bool)
 }
 
 // SetChatState wires the conversational-state source (cmd/lab, once at

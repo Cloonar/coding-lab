@@ -131,12 +131,15 @@ func rolloutCwd(path string) string {
 	return rec.Payload.Cwd
 }
 
-// ReadChat implements provider.AgentProvider. spec.RunID and spec.RuntimeDir
-// are ignored — codex has no live-signal channel (no LiveSignals capability,
-// ADR-0037); the read is a pure rollout fold, so state composition needs
-// nothing beyond the transcript (issue #92). An empty spec.TranscriptPath is
+// ReadChat implements provider.AgentProvider. spec.RunID, spec.RuntimeDir,
+// spec.Home and spec.Worktree are ignored — codex has no live-signal channel
+// (no LiveSignals capability, ADR-0037) and no state registry (issue #79); the
+// read is a pure rollout fold, so state composition needs nothing beyond the
+// transcript (issue #92). An empty spec.TranscriptPath is
 // the pre-transcript read of an active run: an idle empty chat, never an error.
-// A vanished non-empty spec.TranscriptPath yields provider.ErrTranscriptGone;
+// A vanished non-empty spec.TranscriptPath yields provider.ErrTranscriptGone on
+// active and ended reads alike — codex creates its rollout before naming it,
+// so it never needs claude's not-yet-written-identity rule (issue #79);
 // any other read error is returned as-is. Malformed lines are skipped, never
 // fatal — a rollout is appended live and its tail can be a half-written line.
 func (p *Provider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {

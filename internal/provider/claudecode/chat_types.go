@@ -22,11 +22,13 @@ var lineNumPrefix = regexp.MustCompile(`^\s*\d+\t`)
 
 type tItem struct {
 	Type    string `json:"type"`    // user|assistant|system|attachment|queue-operation|…
-	Subtype string `json:"subtype"` // system: bridge_status|turn_duration|…
-	// Content is system bridge_status text AND a queue-operation's queued
-	// payload: a task-notification enqueue/dequeue/remove carries the full
-	// "<task-notification>…" text here (issue #159, compat §5 — mined live
-	// from 2.1.198–2.1.206; a payload-less dequeue leaves it empty).
+	Subtype string `json:"subtype"` // system: bridge_status|local_command|turn_duration|…
+	// Content is system bridge_status text, a system local_command's
+	// "<local-command-stdout>…" output (issue #79, live 2.1.284), AND a
+	// queue-operation's queued payload: a task-notification
+	// enqueue/dequeue/remove carries the full "<task-notification>…" text here
+	// (issue #159, compat §5 — mined live from 2.1.198–2.1.206; a payload-less
+	// dequeue leaves it empty).
 	Content           string       `json:"content"`
 	Timestamp         string       `json:"timestamp"` // ISO-8601
 	IsMeta            bool         `json:"isMeta"`
@@ -43,6 +45,47 @@ type tItem struct {
 	// proceed…"); ToolDenialKind is "user-rejected" on a decline.
 	ToolUseResult  json.RawMessage `json:"toolUseResult"`
 	ToolDenialKind string          `json:"toolDenialKind"`
+	// UUID / ParentUUID are the event's own id and its parent's (a JSON null
+	// parentUuid on a chain root decodes to ""). Read for one link only: a
+	// system/local_command event whose ParentUUID names a user command echo
+	// that already rendered the command line is not rendered twice (issue #79,
+	// compat §5 — live 2.1.284 /clear writes both).
+	UUID       string `json:"uuid"`
+	ParentUUID string `json:"parentUuid"`
+	// CommandRun is the system/local_command event's structured command
+	// ({"command":"clear","args":""} — live 2.1.284). Raw, decoded lazily by
+	// commandRunLine: an unexpected shape must never fail the whole line's
+	// decode (the event would vanish from the fold).
+	CommandRun json.RawMessage `json:"commandRun"`
+}
+
+// tCommandRun is the system/local_command event's commandRun object (live
+// 2.1.284, compat §5): the command name WITHOUT its slash, and the raw args.
+type tCommandRun struct {
+	Command string `json:"command"`
+	Args    string `json:"args"`
+}
+
+// commandRunLine renders a commandRun as the command line a user echo shows
+// ("/clear", "/foo bar"), or "" when the field is absent, not an object, or
+// names no command.
+func commandRunLine(raw json.RawMessage) string {
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var c tCommandRun
+	if json.Unmarshal(raw, &c) != nil {
+		return ""
+	}
+	cmd := strings.TrimPrefix(strings.TrimSpace(c.Command), "/")
+	if cmd == "" {
+		return ""
+	}
+	line := "/" + cmd
+	if args := strings.TrimSpace(c.Args); args != "" {
+		line += " " + args
+	}
+	return line
 }
 
 // tAttachment is the mid-turn injection envelope on type:"attachment" events.

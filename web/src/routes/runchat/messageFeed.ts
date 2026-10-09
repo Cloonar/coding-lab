@@ -51,6 +51,8 @@ export interface MessageFeedOptions {
 export interface MessageFeed {
   messages: Accessor<ChatMessage[]>;
   state: Accessor<ConversationState>;
+  /** The reason behind `state` (issue #79); '' when the server sent none. */
+  stateDetail: Accessor<string>;
   transcript: Accessor<TranscriptStatus>;
   pendingDialogField: Accessor<Dialog | null>;
   contextUsage: Accessor<ContextUsage | null>;
@@ -67,6 +69,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   // in-place tool-status updates both survive a refetch.
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [state, setState] = createSignal<ConversationState>('');
+  const [stateDetail, setStateDetail] = createSignal('');
   const [transcript, setTranscript] = createSignal<TranscriptStatus>('available');
   // The located transcript's opaque identity (issue #34). A change means the
   // run's transcript rotated (a /clear or /rewind → new sessionId → new file),
@@ -125,6 +128,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   // response brought a pending dialog this client hasn't shown yet.
   const applyEnvelope = (res: MessagesResponse, token: number): { newDialog: boolean } | null => {
     setState(res.state);
+    setStateDetail(res.state_detail ?? '');
     // Does this response bring a pending dialog this client hasn't shown
     // yet? Decided BEFORE the tracking id updates, and tracked regardless of
     // follow — a scrolled-up reader is never yanked (the jump pill covers
@@ -284,6 +288,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   const resetStream = () => {
     setMessages([]);
     setState('');
+    setStateDetail('');
     setPendingDialogField(null);
     setContextUsage(null);
     // A fresh stream forgets the seen dialog too: a run navigated back into
@@ -354,8 +359,9 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   onCleanup(
     opts.events.subscribe('run.messages.changed', (event) => {
       if (event.runID !== opts.runId()) return;
-      // event.state rides the envelope too; this view keeps reading state
-      // from the refetch responses so one source of truth feeds the composer.
+      // event.state / state_detail ride the envelope too (a same-state tick
+      // with a new detail just takes the light refetch below); this view
+      // keeps reading both from the refetch responses so one source of truth feeds the composer.
       if (typeof event.backpatchSeq === 'number') {
         pendingBackpatchSeq =
           pendingBackpatchSeq === undefined
@@ -412,6 +418,7 @@ export function createMessageFeed(opts: MessageFeedOptions): MessageFeed {
   return {
     messages,
     state,
+    stateDetail,
     transcript,
     pendingDialogField,
     contextUsage,

@@ -1,7 +1,8 @@
 package chat
 
 // The tailer keeps one goroutine per active run, polling its transcript file
-// (and live-signal spool) for changes and publishing a debounced
+// (and the adapter's live-signal digest — spool + state registry, issue #79)
+// for changes and publishing a debounced
 // run.messages.changed while tracking the run's adapter-composed
 // conversational state for the instance list. The set of tailers is
 // kept in sync with store.ActiveRuns: the service subscribes to the event bus
@@ -92,12 +93,14 @@ func (s *Service) arm(run store.Run) {
 
 // tail is one run's poll loop. Each tick it re-resolves the live transcript path
 // (following a /clear or /rewind rotation — locateActive, issue #34), then
-// re-stats the transcript AND the dialog spool (a pending dialog appears while
-// the transcript is byte-frozen — compat §5 — so watching only the file would
-// never notice it). On any change it re-reads through ReadChat — the adapter
+// re-stats the transcript AND the adapter's live-signal digest (SpoolSig: the
+// dialog spool, and since issue #79 the agent's state registry under the
+// run's HOME — a pending dialog or a busy→idle flip happens while the
+// transcript is byte-frozen, compat §5, so watching only the file would never
+// notice it). On any change it re-reads through ReadChat — the adapter
 // composes transcript + live signals itself (issue #92) — and publishes
-// run.messages.changed when the transcript changed OR the composed state
-// changed; the chat view refetches on both. On a rotation it resets the
+// run.messages.changed when the transcript changed OR the composed state or
+// state detail changed; the chat view refetches on all of them. On a rotation it resets the
 // file-change bookkeeping and forces a re-read + republish so the fresh
 // (cleared) transcript is served and the view resets its stream.
 func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
@@ -115,6 +118,10 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 	// whole life — the tailer is per-run, so it resolves once. "" (no closure
 	// wired) turns live signals off and every read transcript-only.
 	runtimeDir := s.runtimeDir(run.ID)
+	// Likewise the run's instance HOME (issue #202), where the adapter keeps
+	// its agent's state registry (issue #79): passed opaquely to SpoolSig and
+	// ReadChat, never read here. "" turns the registry half off.
+	home := s.home(run.ID)
 	// The notify gate exists only when cmd/lab injected the push seam (issue
 	// #99). It is owned by this one goroutine (not concurrency-safe by design)
 	// and dies with it: a run ending or the dead-session sweep cancels ctx, so an
@@ -133,7 +140,11 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 		lastSz    int64
 		lastSig   string
 		lastState string
-		first     = true
+		// lastDetail is the previous read's Chat.StateDetail (issue #79): a
+		// detail-only change (a second permission prompt replacing the first
+		// while the state stays needs_input) republishes like a state change.
+		lastDetail string
+		first      = true
 		// baseline maps seq → content hash of the previous SUCCESSFUL read —
 		// the backpatch detector (issue #175). Owned by this one goroutine and
 		// dying with it, like the notify gate: a re-armed tailer starts with no
@@ -178,21 +189,23 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 			}
 		}
 		var sig string
-		if signals != nil && runtimeDir != "" {
-			sig = signals.SpoolSig(run.ID, runtimeDir)
+		if signals != nil && (runtimeDir != "" || home != "") {
+			sig = signals.SpoolSig(run.ID, runtimeDir, home)
 		}
 		if first || transcriptChanged || sig != lastSig {
 			// The tailer only ever tails ACTIVE runs, so it always passes the
-			// run's runtime dir — composition (spool dialog / blocked-state
-			// precedence) lives inside the adapter since issue #92. That move retired the
-			// core-side parse cache, so a spool-only flip re-reads the transcript
-			// too — a deliberate trade: spool flips are rare (a dialog opening or
-			// resolving), and the common no-change tick still costs only stats.
+			// run's runtime dir, HOME and worktree — composition (spool dialog /
+			// registry status precedence, issue #79) lives inside the adapter
+			// since issue #92. That move retired the core-side parse cache, so a
+			// sig-only flip re-reads the transcript too — a deliberate trade: sig
+			// flips are rare (a dialog opening or resolving, a registry status
+			// transition), and the common no-change tick still costs only stats.
 			// A failed read updates NO bookkeeping (first/lastSig/lastState and
 			// the staged stat all stand), so the next tick re-detects the same
 			// change and retries the read instead of freezing on a half-observed
 			// change (e.g. the file vanishing mid-rotation).
-			chat, err := prov.ReadChat(provider.ReadSpec{RunID: run.ID, RuntimeDir: runtimeDir, TranscriptPath: path, Model: run.Model})
+			chat, err := prov.ReadChat(provider.ReadSpec{RunID: run.ID, RuntimeDir: runtimeDir, Home: home,
+				Worktree: run.WorktreePath, TranscriptPath: path, Model: run.Model})
 			if err == nil {
 				// Scan + mask FIRST — before setState and, critically, before
 				// gate.observe below: the needs-input push body is built from the
@@ -216,7 +229,7 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 				}
 				backpatch := lowestBackpatchSeq(baseline, chat.Messages)
 				baseline = hashesBySeq(chat.Messages)
-				s.tailers.setState(run.SessionName, chat.State)
+				s.tailers.setState(run.SessionName, chat.State, chat.StateDetail)
 				// Feed the state edge to the notify gate with the PREVIOUS state
 				// (lastState, before the reassignment below) so it edge-triggers on
 				// the transition INTO needs_input/question (issue #99).
@@ -229,10 +242,11 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 				// sig flip alone can still read a mid-tick mutation the stat
 				// predates. Skipping the publish would strand it — the baseline
 				// advances regardless, so no future tick names this seq again.
-				if first || transcriptChanged || chat.State != lastState || backpatch != 0 {
-					s.publishMessagesChanged(run, chat.State, backpatch)
+				if first || transcriptChanged || chat.State != lastState ||
+					chat.StateDetail != lastDetail || backpatch != 0 {
+					s.publishMessagesChanged(run, chat.State, chat.StateDetail, backpatch)
 				}
-				first, lastSig, lastState = false, sig, chat.State
+				first, lastSig, lastState, lastDetail = false, sig, chat.State, chat.StateDetail
 				lastMod, lastSz = mod, sz
 			}
 		}
@@ -258,13 +272,14 @@ func (s *Service) tail(ctx context.Context, run store.Run, h *tailerHandle) {
 }
 
 // publishMessagesChanged emits the run.messages.changed envelope with the
-// tick's composed state and backpatch seq (issue #175 — see
-// messagesChangedPayload for the field semantics; backpatch 0 = append-only).
-func (s *Service) publishMessagesChanged(run store.Run, state string, backpatch int64) {
+// tick's composed state, its optional detail (issue #79) and backpatch seq
+// (issue #175 — see messagesChangedPayload for the field semantics; backpatch
+// 0 = append-only).
+func (s *Service) publishMessagesChanged(run store.Run, state, detail string, backpatch int64) {
 	s.bus.Publish(events.Event{
 		Type: EventMessagesChanged,
 		Payload: messagesChangedPayload{Type: EventMessagesChanged, RepoID: run.RepoID, RunID: run.ID,
-			State: state, BackpatchSeq: backpatch},
+			State: state, StateDetail: detail, BackpatchSeq: backpatch},
 	})
 }
 
@@ -307,11 +322,18 @@ type tailerHandle struct {
 type tailerSet struct {
 	mu      sync.Mutex
 	handles map[string]*tailerHandle
-	states  map[string]string
+	states  map[string]convState
+}
+
+// convState is one tailer's last composed state and its optional detail
+// (issue #79), stored as a pair so the instance list never serves a detail
+// from a different tick than its state.
+type convState struct {
+	state, detail string
 }
 
 func newTailerSet() *tailerSet {
-	return &tailerSet{handles: map[string]*tailerHandle{}, states: map[string]string{}}
+	return &tailerSet{handles: map[string]*tailerHandle{}, states: map[string]convState{}}
 }
 
 // retain disarms tailers whose session is not in active, and calls arm for
@@ -361,17 +383,17 @@ func (ts *tailerSet) remove(session string, h *tailerHandle) {
 	delete(ts.states, session)
 }
 
-func (ts *tailerSet) setState(session, state string) {
+func (ts *tailerSet) setState(session, state, detail string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.states[session] = state
+	ts.states[session] = convState{state: state, detail: detail}
 }
 
-func (ts *tailerSet) state(session string) (string, bool) {
+func (ts *tailerSet) state(session string) (state, detail string, ok bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	st, ok := ts.states[session]
-	return st, ok
+	cs, ok := ts.states[session]
+	return cs.state, cs.detail, ok
 }
 
 func (ts *tailerSet) stopAll() {

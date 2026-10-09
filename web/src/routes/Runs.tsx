@@ -148,7 +148,7 @@ function RunsTable(props: { instances: Instance[] }) {
                     <tr class="runs-table-row" onClick={(event) => openRow(event, instance)}>
                       <td class="runs-table-runcell">
                         <A href={`/runs/${instance.id}`} class="runs-table-run">
-                          <StateDot state={instance.state} />
+                          <StateDot state={instance.state} detail={instance.state_detail} />
                           <span class="runs-table-title">{runDisplayTitle(instance)}</span>
                         </A>
                       </td>

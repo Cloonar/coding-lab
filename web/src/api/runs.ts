@@ -79,6 +79,12 @@ export interface Instance extends Run {
   live: boolean;
   connecting: boolean;
   state: ConversationState;
+  /**
+   * The human reason behind the state (issue #79) — the provider's own wording
+   * ("permission request", "input needed", a permission prompt's own text…).
+   * Omitted by the server when empty.
+   */
+  state_detail?: string;
 }
 
 export interface StartInstanceRequest {

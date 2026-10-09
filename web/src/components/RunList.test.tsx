@@ -132,6 +132,29 @@ describe('RunList', () => {
     expect(byHref('/runs/i').querySelector('.runlist-behind')).toBeNull();
   });
 
+  it('surfaces state_detail on the dot title and in the accessible name of a needs-input row', () => {
+    mount([
+      instance({ id: 'n', state: 'needs_input', state_detail: 'permission request' }),
+      instance({
+        id: 'w',
+        session_name: 'proj~w-20260706-1501',
+        state: 'working',
+        state_detail: 'stale',
+      }),
+    ]);
+    expect(byHref('/runs/n').getAttribute('aria-label')).toBe(
+      'dom · 15:00 — proj — needs input (permission request)',
+    );
+    expect(byHref('/runs/n').querySelector('.runlist-dot')?.getAttribute('title')).toBe(
+      'The agent is waiting for you · permission request',
+    );
+    // Only the waiting states carry a reason.
+    expect(byHref('/runs/w').getAttribute('aria-label')).toBe('w · 15:01 — proj — working');
+    expect(byHref('/runs/w').querySelector('.runlist-dot')?.getAttribute('title')).toBe(
+      'The agent is working',
+    );
+  });
+
   it('shows the AFK budget only on AFK rows', () => {
     const deadline = new Date(Date.now() + 30 * 60_000).toISOString();
     mount([

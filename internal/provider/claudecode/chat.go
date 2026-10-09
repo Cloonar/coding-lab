@@ -3,7 +3,8 @@ package claudecode
 // Chat surface: locate and read Claude Code's live JSONL transcript, mapped
 // into lab's provider-neutral universal schema (issue #7 / ADR-0016), and
 // compose the run's conversational state from the transcript plus the hook
-// spool's live signals (issue #92 — composition is adapter-owned). Every
+// spool's pending dialog and the session registry's status (issues #92/#79 —
+// composition is adapter-owned). Every
 // exact string here — the cwd→slug rule, the transcript path shape, and the
 // JSONL event field names — is a fragile Claude Code coupling pinned in
 // internal/compat (§5) against the installed version (2.1.198 at port time).
@@ -52,60 +53,68 @@ func SlugForDir(dir string) string {
 // LocateTranscript implements provider.AgentProvider: find the transcript
 // file for the session running in worktree UNDER the instance HOME home
 // (issue #202). It reuses the deep-link registry (<home>/.claude/sessions/
-// <pid>.json) — the newest live claude whose cwd matches worktree — to read
-// its sessionId, then builds
-// <home>/.claude/projects/<slug(worktree)>/<sessionId>.jsonl and returns it if
-// the file exists. A miss (no matching live process, or the file not yet
-// written) returns "" with no error, exactly like CaptureDeepLink; the caller
-// retries. An empty home is a miss too — a run with no per-run home has no
-// instance registry to read, and lab never falls back to the master store
-// (isolation by construction; a locate miss keeps the run's stored path, see
-// internal/chat/chat.go locateActive).
+// <pid>.json) — the newest live claude whose cwd matches worktree
+// (registryEntryForDir) — to read its sessionId, then returns
+// <home>/.claude/projects/<slug(worktree)>/<sessionId>.jsonl WHETHER OR NOT
+// that file exists yet (issue #79 decision 5): on 2.1.284 /clear rewrites the
+// registry's sessionId at clear time, but the fresh transcript is created only
+// with the next message. Waiting for the file (the old os.Stat gate) kept core
+// on the OLD transcript — whose tail is the assistant's last text, so the run
+// read needs_input on a just-cleared session until the operator typed again.
+// Returning the computed path lets core adopt the rotation at once, and
+// ReadChat reads the still-missing file of an ACTIVE run as the fresh, empty
+// conversation. A miss (no matching live process) returns "" with no error,
+// exactly like CaptureDeepLink; the caller retries. An empty home is a miss
+// too — a run with no per-run home has no instance registry to read, and lab
+// never falls back to the master store (isolation by construction; a locate
+// miss keeps the run's stored path, see internal/chat/chat.go locateActive).
 func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktree, home string) (string, error) {
 	if home == "" {
 		return "", nil
 	}
-	sessionID := sessionIDForDir(registryDirUnder(home), worktree)
-	if sessionID == "" {
+	e, ok := registryEntryForDir(registryDirUnder(home), worktree)
+	if !ok {
 		return "", nil
 	}
-	path := filepath.Join(projectsDirUnder(home), SlugForDir(worktree), sessionID+".jsonl")
-	if _, err := os.Stat(path); err != nil {
-		return "", nil
-	}
-	return path, nil
+	return transcriptPathFor(home, worktree, e.SessionID), nil
 }
 
-// sessionIDForDir is bridgeURLForDir's sibling: a single registry pass for the
-// sessionId of the newest live claude process whose cwd is dir, or "". Unlike
-// the deep link, sessionId is present from process start (it is the transcript
-// filename), so it needs no bridge-connect wait.
-func sessionIDForDir(registryDir, dir string) string {
-	files, err := os.ReadDir(registryDir)
-	if err != nil {
-		return ""
+// transcriptPathFor renders the transcript path shape (compat §5):
+// <home>/.claude/projects/<slug(worktree)>/<sessionId>.jsonl.
+func transcriptPathFor(home, worktree, sessionID string) string {
+	return filepath.Join(projectsDirUnder(home), SlugForDir(worktree), sessionID+".jsonl")
+}
+
+// Registry status values (issue #79, compat §2) — the CLI's own activity
+// status on the session registry entry, rewritten on every transition.
+const (
+	registryBusy    = "busy"    // a query is loading OR delegated agents are active
+	registryWaiting = "waiting" // a dialog/prompt is on screen; waitingFor names it
+	registryIdle    = "idle"    // neither
+)
+
+// registryStatus reads the usable registry status for the session in worktree
+// under home: the status and waitingFor of the very entry LocateTranscript
+// selects (registryEntryForDir — cwd match, live pid, newest startedAt), so
+// state and transcript come from one session (issue #79 decision 3). Unusable
+// — ok false — when home or worktree is "" (an ended read never consults the
+// registry), no live entry matches, or the status is empty or outside
+// {busy, waiting, idle} (an unknown future value degrades to the fold, never
+// guesses). No age bound on statusUpdatedAt: the status is event-driven, not a
+// heartbeat.
+func registryStatus(home, worktree string) (status, waitingFor string, ok bool) {
+	if home == "" || worktree == "" {
+		return "", "", false
 	}
-	var best RegistryEntry
-	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(registryDir, f.Name()))
-		if err != nil {
-			continue
-		}
-		var e RegistryEntry
-		if json.Unmarshal(b, &e) != nil {
-			continue
-		}
-		if e.SessionID == "" || e.Cwd != dir || !pidAlive(e.PID) {
-			continue
-		}
-		if best.SessionID == "" || e.StartedAt > best.StartedAt {
-			best = e
-		}
+	e, found := registryEntryForDir(registryDirUnder(home), worktree)
+	if !found {
+		return "", "", false
 	}
-	return best.SessionID
+	switch e.Status {
+	case registryBusy, registryWaiting, registryIdle:
+		return e.Status, strings.TrimSpace(e.WaitingFor), true
+	}
+	return "", "", false
 }
 
 // contextWindows maps a run's SPAWN-TIME model catalog value — exactly as
@@ -129,18 +138,21 @@ var contextWindows = map[string]int64{
 
 // ReadChat implements provider.AgentProvider: read the run's conversation and
 // compose its conversational state (issue #92 — "what state is my agent in"
-// is adapter-owned now; core keeps only the lifecycle StateEnded override).
+// is adapter-owned; core keeps only the lifecycle StateEnded override).
 //
 // Base read: the JSONL transcript at spec.TranscriptPath, folded into the
 // universal schema. spec.TranscriptPath == "" is an active run whose transcript
 // is not yet located — an idle empty chat, never an error, with the live
 // signals still consulted (a pending dialog can exist before
-// LocateTranscript first hits). A vanished file yields
-// provider.ErrTranscriptGone (the run ended and claude retired the file)
-// WITHOUT consulting the spool — a read error always precedes the overlay,
-// exactly as it did when core composed; any other open error is returned
-// as-is. Malformed lines are skipped, never fatal — a transcript is appended
-// live and its tail can be a half-written line.
+// LocateTranscript first hits). A non-existent file splits on the read kind
+// (issue #79 decision 5): on an ACTIVE read (spec.RuntimeDir or spec.Home
+// non-empty) it is the fresh post-/clear identity LocateTranscript names
+// before claude writes its first line — an idle empty chat (no messages,
+// cursor 0) that the overlays below still compose over; on an ENDED read
+// (both empty) it is a retired file — provider.ErrTranscriptGone, WITHOUT
+// consulting any signal. Any other open error is returned as-is. Malformed
+// lines are skipped, never fatal — a transcript is appended live and its tail
+// can be a half-written line.
 //
 // The base read also composes Chat.ContextUsage (issue #243 / ADR-0061): the
 // latest assistant line's prompt-side usage sum over spec.Model's window from
@@ -154,59 +166,99 @@ var contextWindows = map[string]int64{
 // in-memory, so a warning present before a lab restart disappears from parses
 // after it — accepted, the backstop is advisory-only (compat §5).
 //
-// Live-signal overlay (spec.RuntimeDir non-empty; "" degrades to the transcript
-// alone — ended runs, or no runtime dir configured), in the exact precedence
-// core's applyLiveSignals used to apply (ADR-0020): a live spool dialog
-// forces StateQuestion and rides Chat.PendingDialog — the side-channel field,
-// never a synthetic message, so seq numbers stay reparse-stable when the real
-// tool_use retro-flushes (issues #89/#90); else a pending dialog the
-// transcript itself shows stands on its own (the dormant flushed-tool_use
-// fallback); else a live blocked marker forces StateNeedsInput.
+// State composition, in layered precedence over the transcript fold (issue
+// #79 decision 1):
+//
+//  1. A live spool dialog (spec.RuntimeDir non-empty — pendingDialog) forces
+//     StateQuestion and rides Chat.PendingDialog — the side-channel field,
+//     never a synthetic message, so seq numbers stay reparse-stable when the
+//     real tool_use retro-flushes (issues #89/#90); else a pending dialog the
+//     transcript itself shows (fold State == question — the flushed-tool_use
+//     path every non-remote run takes, compat §12) stands on its own.
+//  2. Registry status "waiting" (registryStatus — read only when spec.Home
+//     and spec.Worktree are set) with no dialog composed above →
+//     StateNeedsInput: a prompt lab cannot render (a permission request, an
+//     elicitation) is on screen.
+//  3. Registry "busy" → StateWorking, OVERRIDING the fold: the CLI reports
+//     busy while delegated background agents run even after the main turn
+//     ended, the case the fold's assistant-text tail would misread as
+//     needs_input.
+//  4. Registry "idle" → the fold decides exactly as before (needs_input vs
+//     idle, the issue #159 pending-work hold kept). Never mapped straight to
+//     needs_input: idle cannot tell "turn just ended" from "fresh session".
+//  5. No usable registry status (no Home/Worktree, no live matching entry, an
+//     empty or unknown status) → the fold alone.
+//
+// Chat.StateDetail carries the registry's waitingFor whenever the status is
+// "waiting" and the composed state is question or needs_input — the reason
+// the operator is wanted, rendered after the status phrase and used by the
+// push body. The Notification hook's blocked marker this precedence replaces
+// is gone (issue #79 decision 2): it fired idle_prompt 60 s after any turn
+// end, background agents running or not, and outlived a /clear.
 func (p *Provider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
+	active := spec.RuntimeDir != "" || spec.Home != ""
 	chat := provider.Chat{State: provider.StateIdle}
 	if spec.TranscriptPath != "" {
 		f, err := os.Open(spec.TranscriptPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return provider.Chat{}, provider.ErrTranscriptGone
+		switch {
+		case err == nil:
+			var used int64
+			chat, used, err = parseTranscript(f, &p.intents)
+			_ = f.Close()
+			if err != nil {
+				return provider.Chat{}, err
 			}
+			// Compose the context-occupancy meter here, on the base chat, so
+			// EVERY return path below carries it (issue #243 / ADR-0061): the
+			// overlays mutate State/PendingDialog/StateDetail on this same chat
+			// value and never rebuild it, so a meter set here rides through
+			// untouched. A positive Used against a KNOWN model window is the only
+			// case that fills it; an unknown/empty Model, or no assistant usage at
+			// all (used == 0), leaves it nil and the meter hides.
+			if used > 0 {
+				if limit, ok := contextWindows[spec.Model]; ok {
+					chat.ContextUsage = &provider.ContextUsage{Used: used, Limit: limit}
+				}
+			}
+		case os.IsNotExist(err) && active:
+			// The fresh post-/clear identity, not written yet (issue #79
+			// decision 5): keep the idle empty base and compose the overlays.
+		case os.IsNotExist(err):
+			return provider.Chat{}, provider.ErrTranscriptGone
+		default:
 			return provider.Chat{}, err
 		}
-		var used int64
-		chat, used, err = parseTranscript(f, &p.intents)
-		_ = f.Close()
-		if err != nil {
-			return provider.Chat{}, err
-		}
-		// Compose the context-occupancy meter here, on the base chat, so EVERY
-		// return path below carries it (issue #243 / ADR-0061): the live-signal
-		// overlays mutate State/PendingDialog on this same chat value and never
-		// rebuild it, so a meter set here rides through untouched. A positive Used
-		// against a KNOWN model window is the only case that fills it; an
-		// unknown/empty Model, or no assistant usage at all (used == 0), leaves it
-		// nil and the meter hides.
-		if used > 0 {
-			if limit, ok := contextWindows[spec.Model]; ok {
-				chat.ContextUsage = &provider.ContextUsage{Used: used, Limit: limit}
-			}
-		}
 	}
-	if spec.RuntimeDir == "" {
-		return chat, nil // signals off — the transcript-only read
+	status, waitingFor, _ := registryStatus(spec.Home, spec.Worktree)
+	switch {
+	case spec.RuntimeDir != "" && p.composeSpoolDialog(&chat, spec):
+		// Layer 1: the live spool dialog.
+	case chat.State == provider.StateQuestion:
+		// Layer 1: a transcript-flushed pending dialog stands on its own.
+	case status == registryWaiting:
+		chat.State = provider.StateNeedsInput // layer 2
+	case status == registryBusy:
+		chat.State = provider.StateWorking // layer 3: delegated agents still run
+	default:
+		// Layers 4–5: registry idle or unusable — the fold decides.
 	}
-	if d, ok := p.pendingDialog(spec.RunID, spec.RuntimeDir, spec.TranscriptPath); ok {
-		dc := d
-		chat.State = provider.StateQuestion
-		chat.PendingDialog = &dc
-		return chat, nil
-	}
-	if chat.State == provider.StateQuestion {
-		return chat, nil // a transcript-flushed dialog stands on its own (dormant fallback)
-	}
-	if st, ok := p.blockedState(spec.RunID, spec.RuntimeDir, spec.TranscriptPath); ok {
-		chat.State = st
+	if status == registryWaiting &&
+		(chat.State == provider.StateQuestion || chat.State == provider.StateNeedsInput) {
+		chat.StateDetail = waitingFor
 	}
 	return chat, nil
+}
+
+// composeSpoolDialog applies a live spool dialog to chat (StateQuestion +
+// the side-channel PendingDialog), reporting whether one was pending.
+func (p *Provider) composeSpoolDialog(chat *provider.Chat, spec provider.ReadSpec) bool {
+	d, ok := p.pendingDialog(spec.RunID, spec.RuntimeDir, spec.TranscriptPath)
+	if !ok {
+		return false
+	}
+	chat.State = provider.StateQuestion
+	chat.PendingDialog = &d
+	return true
 }
 
 // ParseTranscript folds the JSONL lines of r into the universal schema. It is
@@ -280,6 +332,10 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		// the operator at turn end would be spurious. Session rotation (/clear,
 		// /rewind) needs no reset — folding restarts on the fresh transcript.
 		pending = map[string]struct{}{}
+		// echoed holds the uuids of user command-echo lines that rendered a
+		// command line, so a system/local_command event pointing at one
+		// (parentUuid) does not render the same command twice (issue #79).
+		echoed = map[string]struct{}{}
 	)
 	emit := func(m provider.Message) int {
 		seq++
@@ -310,8 +366,26 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 		}
 		switch it.Type {
 		case "system":
-			if it.Subtype == "bridge_status" && it.Content != "" {
+			switch {
+			case it.Subtype == "bridge_status" && it.Content != "":
 				emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: it.Content})
+			case it.Subtype == "local_command":
+				// The 2.1.284 local-command record (issue #79, compat §5): the
+				// command's output rides here (`content`), no longer a user
+				// `<local-command-stdout>` line. Rendered like the user echo
+				// below — the command line as user text (unless the user
+				// `<command-name>` echo this event's parentUuid names already
+				// showed it: /clear writes both, and must read as ONE "/clear"),
+				// then a non-empty stdout as a lifecycle — and, like it,
+				// state-neutral: it never touches lastKey.
+				if _, shown := echoed[it.ParentUUID]; !shown {
+					if cmd := commandRunLine(it.CommandRun); cmd != "" {
+						emit(provider.Message{Kind: provider.MessageText, Role: "user", Time: it.Timestamp, Text: cmd})
+					}
+				}
+				if out := strings.TrimSpace(tagContent(it.Content, "local-command-stdout")); out != "" {
+					emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: truncate(out, truncateLimit)})
+				}
 			}
 			continue
 		case "queue-operation":
@@ -402,6 +476,9 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 				if cmd, stdout, isEcho := commandEcho(text); isEcho {
 					if cmd != "" {
 						emit(provider.Message{Kind: provider.MessageText, Role: it.Message.Role, Time: it.Timestamp, Text: cmd})
+						if it.UUID != "" {
+							echoed[it.UUID] = struct{}{}
+						}
 					}
 					if stdout != "" {
 						emit(provider.Message{Kind: provider.MessageLifecycle, Time: it.Timestamp, Text: truncate(stdout, truncateLimit)})
@@ -509,7 +586,9 @@ func foldTranscript(sc *bufio.Scanner, intents *intentRegistry) (provider.Chat, 
 // value>]" (e.g. "/clear", "/foo args") — and a non-empty stdout maps to a
 // follow-up lifecycle message. An echo with no extractable command name (or
 // an empty stdout) yields empty strings and renders nothing, degrading to the
-// old drop.
+// old drop. On 2.1.284 the output moved to a `system`/`local_command` event
+// (foldTranscript's system case renders it, issue #79); the user
+// `<command-name>` echo is still written, and this function still parses it.
 func commandEcho(text string) (cmd, stdout string, isEcho bool) {
 	switch {
 	case strings.HasPrefix(text, "<local-command-stdout>"):
@@ -558,8 +637,9 @@ func tagContent(s, tag string) string {
 // the work completes — so assistant:text derives working instead of
 // needs_input and no spurious push fires. Only that one edge is softened: an
 // API error stays needs_input unconditionally (errors must surface past
-// pending work), and structured live signals (spool dialog, blocked marker —
-// ReadChat's overlay) already outrank whatever the transcript derives.
+// pending work), and structured live signals (spool dialog, registry
+// waiting/busy — ReadChat's layered overlay, issue #79) already outrank
+// whatever the transcript derives.
 func deriveState(msgs []provider.Message, lastKey string, pendingWork bool) string {
 	if len(msgs) == 0 {
 		return provider.StateIdle

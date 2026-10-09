@@ -189,6 +189,50 @@ func TestAPI_ChatMessages_pendingDialog(t *testing.T) {
 	}
 }
 
+// The messages response forwards the adapter's optional state_detail (issue
+// #79 decision 4 — claude-code: the registry's waitingFor) beside state, and
+// omits the key when there is none; an ENDED run never carries one.
+func TestAPI_ChatMessages_stateDetail(t *testing.T) {
+	x := newInstanceServer(t)
+	runID, session := startRun(t, x)
+	x.prov.SetTranscriptPath("/transcript.jsonl")
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking, Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "hi"}}})
+	x.prov.SetBlockedState(provider.StateNeedsInput, true)
+	x.prov.SetStateDetail("Claude needs your permission to use Bash")
+
+	resp := x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body := decodeBody(t, resp)
+	if body["state"] != provider.StateNeedsInput || body["state_detail"] != "Claude needs your permission to use Bash" {
+		t.Errorf("state/state_detail = %v/%v; want needs_input with the adapter's detail", body["state"], body["state_detail"])
+	}
+
+	// No detail → the key is omitted.
+	x.prov.SetStateDetail("")
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	if v, present := decodeBody(t, resp)["state_detail"]; present {
+		t.Errorf("state_detail = %v; want the key omitted when the adapter gives none", v)
+	}
+
+	// Ended: cleared with the StateEnded override, even if the adapter's
+	// transcript-only read returned one.
+	x.prov.SetChat(provider.Chat{State: provider.StateNeedsInput, StateDetail: "residue", Cursor: 1,
+		Messages: []provider.Message{{Seq: 1, Kind: provider.MessageText, Role: "assistant", Text: "hi"}}})
+	resp = x.do("DELETE", "/api/v1/instances/"+session, nil, csrfHeaders(x.ts.URL))
+	wantStatus(t, resp, http.StatusOK)
+	resp = x.do("GET", "/api/v1/runs/"+runID+"/messages", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	body = decodeBody(t, resp)
+	if body["state"] != provider.StateEnded {
+		t.Errorf("ended state = %v; want ended", body["state"])
+	}
+	if v, present := body["state_detail"]; present {
+		t.Errorf("ended state_detail = %v; want the key omitted", v)
+	}
+}
+
 // The messages response forwards the adapter-composed context-occupancy meter
 // (issue #243 / ADR-0061): a non-nil ContextUsage rides through as
 // context_usage, and a nil one serializes as an explicit null (no omitempty,

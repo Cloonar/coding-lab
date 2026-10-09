@@ -37,7 +37,7 @@ The provider-native session file the Chat reads through (Claude Code: the live J
 _Avoid_: log, history, raw output, session file (in UI copy)
 
 **Conversational state**:
-The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the **Runs page** and the runs rail and as the chat's status line above the composer (*Working*, *Waiting for you*, *Idle*). Distinct from `live` (tmux liveness) and the run's terminal outcome.
+The chat tailer's per-instance signal — *working*, *needs input*, *question pending*, or *idle* — read from the transcript tail plus the agent's own live status (a pending dialog, and for Claude Code the CLI's session-registry status, ADR-0078). Served on the instance list and shown as a live state dot on the **Runs page** and the runs rail and as the chat's status line above the composer (*Working*, *Waiting for you*, *Idle*). A run waiting on background agents reads *working* for the whole wait; when the agent says why it is waiting, the reason rides along as an optional `state_detail` ("Waiting for you · permission prompt"). Distinct from `live` (tmux liveness) and the run's terminal outcome.
 _Avoid_: status, activity, progress
 
 **Runs page**:

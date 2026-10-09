@@ -236,6 +236,30 @@ func TestNotifyGate_bodyPrecedenceAndTruncation(t *testing.T) {
 		t.Errorf("fallback: Body = %q; want needs your input", got)
 	}
 
+	// (c2) Slot 2 (issue #79): the adapter's StateDetail — what the agent is
+	// blocked on right now (a permission prompt lab cannot render) — beats the
+	// stale assistant text, but a live dialog prompt still beats it; a blank
+	// detail falls through to the assistant text.
+	withText := []provider.Message{{Kind: provider.MessageText, Role: "assistant", Text: "stale assistant text"}}
+	got = g.buildPayload(provider.Chat{State: provider.StateNeedsInput,
+		StateDetail: "  Claude needs your permission to use Bash ", Messages: withText}).Body
+	if got != "Claude needs your permission to use Bash" {
+		t.Errorf("detail precedence: Body = %q; want the trimmed state detail", got)
+	}
+	got = g.buildPayload(provider.Chat{State: provider.StateQuestion, StateDetail: "dialog open",
+		PendingDialog: &provider.Dialog{Prompt: "Which color?"}, Messages: withText}).Body
+	if got != "Which color?" {
+		t.Errorf("dialog over detail: Body = %q; want the dialog prompt", got)
+	}
+	got = g.buildPayload(provider.Chat{State: provider.StateNeedsInput, StateDetail: "   ", Messages: withText}).Body
+	if got != "stale assistant text" {
+		t.Errorf("blank detail: Body = %q; want the assistant text", got)
+	}
+	got = g.buildPayload(provider.Chat{State: provider.StateNeedsInput, StateDetail: "input needed"}).Body
+	if got != "input needed" {
+		t.Errorf("detail, no text: Body = %q; want the detail over the literal fallback", got)
+	}
+
 	// (d) A >150-rune MULTI-BYTE prompt truncates to exactly 150 runes ending in
 	// the ellipsis rune — asserted on []rune length to prove rune-safety.
 	long := strings.Repeat("ä", 200)

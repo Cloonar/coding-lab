@@ -223,6 +223,42 @@ func TestAPI_InstanceStartHappyPath(t *testing.T) {
 	}
 }
 
+// GET /instances serves the chat tailer's state AND its state_detail (issue
+// #79 decision 4) per live row — the Runs page renders "Waiting for you ·
+// <detail>" from it without opening the chat.
+func TestAPI_InstanceList_stateDetail(t *testing.T) {
+	x := newInstanceServer(t)
+	_, session := startRun(t, x)
+	x.prov.SetTranscriptPath(filepath.Join(t.TempDir(), "t.jsonl"))
+	x.prov.SetChat(provider.Chat{State: provider.StateWorking})
+	x.prov.SetBlockedState(provider.StateNeedsInput, true)
+	x.prov.SetStateDetail("input needed")
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go x.chatSvc.Run(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var inst map[string]any
+	for time.Now().Before(deadline) {
+		resp := x.do("GET", "/api/v1/instances", nil, nil)
+		wantStatus(t, resp, http.StatusOK)
+		items, _ := decodeBody(t, resp)["instances"].([]any)
+		for _, it := range items {
+			if m := it.(map[string]any); m["session_name"] == session {
+				inst = m
+			}
+		}
+		if inst != nil && inst["state"] == provider.StateNeedsInput {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if inst == nil || inst["state"] != provider.StateNeedsInput || inst["state_detail"] != "input needed" {
+		t.Fatalf("instance row = %v; want state needs_input with state_detail \"input needed\"", inst)
+	}
+}
+
 // The per-spawn provider pick (issue #66): POST /repos/{id}/instances
 // {provider} runs on the named provider with skip-layer model/effort; an
 // unknown pick is a strict 400; an absent pick inherits the repo/global chain

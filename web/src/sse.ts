@@ -61,7 +61,8 @@ export type LabEventType = (typeof EVENT_TYPES)[number];
 /**
  * One SSE envelope. Beyond `type`/`repoID`, event types carry small scoping
  * fields read through the index signature: `run.messages.changed` carries
- * `runID`, the run's conversational `state`, and — when a tailer read
+ * `runID`, the run's conversational `state`, its optional `state_detail`
+ * (the human reason, issue #79; omitted when empty) and — when a tailer read
  * back-patched earlier content — `backpatchSeq`, the LOWEST seq whose content
  * changed since the previous read (absent on pure appends, state-only flips,
  * the first tick, and rotation ticks — issue #175); `run.changed` carries

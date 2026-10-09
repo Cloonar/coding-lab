@@ -44,8 +44,26 @@ type RegistryEntry struct {
 	BridgeSessionID string `json:"bridgeSessionId"`
 	// SessionID is claude's transcript filename stem: the chat surface reads
 	// <projects>/<cwd-slug>/<SessionID>.jsonl (compat.md §5). Formerly one of
-	// the ignored registry keys; read since ADR-0016.
+	// the ignored registry keys; read since ADR-0016. /clear rewrites it in the
+	// same step that rotates the session — before the fresh transcript file
+	// exists (issue #79 decision 5).
 	SessionID string `json:"sessionId"`
+	// Status is the CLI-maintained activity status, rewritten on every
+	// transition (issue #79, compat §2): "busy" (a query is loading OR
+	// delegated agents are still active), "waiting" (a dialog/prompt is on
+	// screen; WaitingFor says which), or "idle" (neither). ReadChat composes
+	// it over the transcript fold (registryStatus); any other value — or none
+	// — is unusable and leaves the fold alone.
+	Status string `json:"status"`
+	// WaitingFor is the human reason accompanying Status "waiting" (observed:
+	// "input needed", "dialog open", "worker request", "sandbox request", or a
+	// permission prompt's own text) — surfaced as Chat.StateDetail.
+	WaitingFor string `json:"waitingFor"`
+	// StatusUpdatedAt is when Status last changed (unix millis). Read for the
+	// record only: the status is event-driven, not a heartbeat, so lab applies
+	// NO age bound (issue #79 decision 3) — a dead CLI is caught by its pid
+	// (pidAlive) and tmux liveness, never by a stale timestamp.
+	StatusUpdatedAt int64 `json:"statusUpdatedAt"`
 }
 
 // BridgeURL renders the claude.ai deep link for a bridge session id. The
@@ -60,19 +78,23 @@ func BridgeURL(id string) string {
 	return "https://claude.ai/code/" + id
 }
 
-// bridgeURLForDir is a single registry pass: the deep link of the newest
-// live claude process whose cwd is dir, or "". The cwd comparison is an
-// exact string match — claude records its kernel-reported
-// (symlink-resolved) cwd, and lab's worktree paths are absolute and
-// symlink-free by construction. Newest-alive wins because a worktree path
-// can be reused across runs and a SIGKILLed predecessor leaves its
-// registry file behind — claude cleans up on graceful exit only.
-func bridgeURLForDir(registryDir, dir string) string {
+// newestLiveEntry is the single registry pass both registry readers share:
+// the entry of the newest live claude process whose cwd is dir and that
+// passes want, or false. The cwd comparison is an exact string match —
+// claude records its kernel-reported (symlink-resolved) cwd, and lab's
+// worktree paths are absolute and symlink-free by construction. Newest-alive
+// wins because a worktree path can be reused across runs and a SIGKILLed
+// predecessor leaves its registry file behind — claude cleans up on graceful
+// exit only.
+func newestLiveEntry(registryDir, dir string, want func(RegistryEntry) bool) (RegistryEntry, bool) {
 	files, err := os.ReadDir(registryDir)
 	if err != nil {
-		return ""
+		return RegistryEntry{}, false
 	}
-	var best RegistryEntry
+	var (
+		best  RegistryEntry
+		found bool
+	)
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
 			continue
@@ -85,17 +107,35 @@ func bridgeURLForDir(registryDir, dir string) string {
 		if json.Unmarshal(b, &e) != nil {
 			continue // malformed sibling never poisons the scan
 		}
-		if e.BridgeSessionID == "" || e.Cwd != dir || !pidAlive(e.PID) {
+		if !want(e) || e.Cwd != dir || !pidAlive(e.PID) {
 			continue
 		}
-		if best.BridgeSessionID == "" || e.StartedAt > best.StartedAt {
-			best = e
+		if !found || e.StartedAt > best.StartedAt {
+			best, found = e, true
 		}
 	}
-	if best.BridgeSessionID == "" {
+	return best, found
+}
+
+// bridgeURLForDir is the deep-link registry pass: the link of the newest live
+// claude process in dir that has connected its bridge, or "".
+func bridgeURLForDir(registryDir, dir string) string {
+	e, ok := newestLiveEntry(registryDir, dir, func(e RegistryEntry) bool { return e.BridgeSessionID != "" })
+	if !ok {
 		return ""
 	}
-	return BridgeURL(best.BridgeSessionID)
+	return BridgeURL(e.BridgeSessionID)
+}
+
+// registryEntryForDir is the chat surface's registry pass: the entry of the
+// newest live claude process in dir that carries a sessionId. Unlike the deep
+// link, sessionId is present from process start (it is the transcript
+// filename), so it needs no bridge-connect wait. LocateTranscript (the
+// transcript identity) and ReadChat (the status overlay) both select through
+// this one function, so transcript and state always come from the SAME
+// session entry (issue #79 decision 3).
+func registryEntryForDir(registryDir, dir string) (RegistryEntry, bool) {
+	return newestLiveEntry(registryDir, dir, func(e RegistryEntry) bool { return e.SessionID != "" })
 }
 
 // pidAlive reports whether pid is a live process. Signal 0 probes

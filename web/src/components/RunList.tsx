@@ -22,7 +22,7 @@ import { A } from '@solidjs/router';
 import { For, Show, createSignal, onCleanup } from 'solid-js';
 import type { ConversationState, Instance } from '../api';
 import { budgetRemaining, parseAFKLabel } from '../lib/afk';
-import { stateBadge } from '../lib/conversation';
+import { stateBadge, stateReason } from '../lib/conversation';
 import { runDisplayTitle, sessionLabel } from '../lib/instanceLabel';
 import { railGroup } from '../lib/railOrder';
 import { groupLive, liveAge, statePhrase } from '../lib/runGroups';
@@ -63,8 +63,15 @@ export default function RunList(props: { instances: Instance[]; variant: RunList
   );
 }
 
+/** The dot's tooltip: the state's title, plus the reason (issue #79) when named. */
+function dotTitle(state: ConversationState, detail: string | undefined): string | undefined {
+  const title = stateBadge(state)?.title;
+  const reason = stateReason(state, detail);
+  return title === undefined || reason === '' ? title : `${title} · ${reason}`;
+}
+
 /** The colour-only state dot, shared with the desktop Runs table. */
-export function StateDot(props: { state: ConversationState }) {
+export function StateDot(props: { state: ConversationState; detail?: string }) {
   return (
     <span
       class="runlist-dot"
@@ -73,7 +80,7 @@ export function StateDot(props: { state: ConversationState }) {
         'needs-input': props.state === 'needs_input',
         question: props.state === 'question',
       }}
-      title={stateBadge(props.state)?.title}
+      title={dotTitle(props.state, props.detail)}
     />
   );
 }
@@ -92,7 +99,9 @@ export function afkBudget(instance: Instance, nowMs: number): string | null {
 export function runAriaLabel(instance: Instance): string {
   const base = `${runDisplayTitle(instance)} — ${instance.repo_name}`;
   const badge = stateBadge(instance.state);
-  const withBadge = badge === null ? base : `${base} — ${badge.label}`;
+  const reason = stateReason(instance.state, instance.state_detail);
+  const withBadge =
+    badge === null ? base : `${base} — ${badge.label}${reason === '' ? '' : ` (${reason})`}`;
   const behind = instance.commits_behind ?? 0;
   return behind > 0 ? `${withBadge} — ${behind} behind` : withBadge;
 }
@@ -113,7 +122,7 @@ function RunRow(props: { instance: Instance; variant: RunListVariant; now: numbe
         class="runlist-row"
         aria-label={runAriaLabel(props.instance)}
       >
-        <StateDot state={state()} />
+        <StateDot state={state()} detail={props.instance.state_detail} />
         <span class="runlist-body">
           <span class="runlist-top">
             <span class="runlist-title">{title()}</span>

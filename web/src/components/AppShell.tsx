@@ -91,14 +91,16 @@ function ShellFrame(props: ParentProps) {
       if (typeof event.runID !== 'string' || typeof event.state !== 'string') return;
       const runID = event.runID;
       const state = event.state as ConversationState;
+      // state_detail (issue #79) is omitted when empty — absent clears it.
+      const detail = typeof event.state_detail === 'string' ? event.state_detail : '';
       mutateInstances((prev) => {
         if (prev === undefined) return prev;
         const idx = prev.findIndex((row) => row.id === runID);
         if (idx === -1) return prev;
         const row = prev[idx]!;
-        if (row.state === state) return prev;
+        if (row.state === state && (row.state_detail ?? '') === detail) return prev;
         const next = prev.slice();
-        next[idx] = { ...row, state };
+        next[idx] = { ...row, state, state_detail: detail };
         return next;
       });
     }),

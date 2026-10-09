@@ -95,6 +95,13 @@ type messagesResponse struct {
 	// (no omitempty, mirroring PendingDialog) when the adapter can't say — no
 	// assistant turn yet, unknown model, or an unsupporting provider.
 	ContextUsage *provider.ContextUsage `json:"context_usage"`
+	// StateDetail is the adapter's optional human reason for State (issue #79
+	// decision 4 — claude-code: the registry's waitingFor, e.g. a permission
+	// prompt's text), forwarded verbatim from the chat read; the status line
+	// renders it after the state phrase ("Waiting for you · permission
+	// request"). Omitted when none — always for an ended run, whose view core
+	// clears.
+	StateDetail string `json:"state_detail,omitempty"`
 }
 
 // handleRunMessages is GET /api/v1/runs/{id}/messages?after=&before=&limit=.
@@ -137,6 +144,7 @@ func (s *Server) handleRunMessages(w http.ResponseWriter, r *http.Request) {
 	resp.PendingDialog = chatData.PendingDialog
 	resp.TranscriptID = chatData.TranscriptID
 	resp.ContextUsage = chatData.ContextUsage
+	resp.StateDetail = chatData.StateDetail
 	if len(chatData.Messages) == 0 && chatData.PendingDialog == nil && run.Outcome == store.RunOutcomeActive {
 		resp.Transcript = "locating"
 	}

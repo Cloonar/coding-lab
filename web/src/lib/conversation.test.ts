@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ConversationState } from '../api';
-import { stateBadge } from './conversation';
+import { stateBadge, stateReason } from './conversation';
 
 describe('stateBadge', () => {
   it('maps working to the working chip', () => {
@@ -36,5 +36,19 @@ describe('stateBadge', () => {
     for (const state of badgeless) {
       expect(stateBadge(state)).toBeNull();
     }
+  });
+});
+
+describe('stateReason', () => {
+  it('returns the trimmed detail for needs_input and question only', () => {
+    expect(stateReason('needs_input', ' permission request ')).toBe('permission request');
+    expect(stateReason('question', 'dialog open')).toBe('dialog open');
+    expect(stateReason('working', 'permission request')).toBe('');
+    expect(stateReason('idle', 'x')).toBe('');
+  });
+
+  it('is empty when the server sent none', () => {
+    expect(stateReason('needs_input', undefined)).toBe('');
+    expect(stateReason('needs_input', '  ')).toBe('');
   });
 });

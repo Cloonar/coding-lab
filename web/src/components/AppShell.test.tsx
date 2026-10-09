@@ -70,7 +70,11 @@ function Probe() {
         <ul id="probe" data-loaded={String(ctx().loaded())}>
           <For each={ctx().all()}>
             {(instance) => (
-              <li data-id={instance.id} data-state={instance.state}>
+              <li
+                data-id={instance.id}
+                data-state={instance.state}
+                data-detail={instance.state_detail ?? ''}
+              >
                 {instance.id}
               </li>
             )}
@@ -239,6 +243,29 @@ describe('AppShell instances: run.messages.changed patches in place (issue #175)
     expect(probeRow(OTHER_RUN_ID)).toBe(untouched);
     // The attention count flips: live && state is needs_input|question.
     expect(runsBadge()?.textContent).toBe('1');
+  });
+
+  it('patches state_detail in place, also on a same-state tick, and clears it when omitted', async () => {
+    await mount();
+
+    emitMessagesChanged({ runID: RUN_ID, state: 'needs_input', state_detail: 'input needed' });
+    await settle();
+    expect(probeRow(RUN_ID)?.dataset.state).toBe('needs_input');
+    expect(probeRow(RUN_ID)?.dataset.detail).toBe('input needed');
+
+    emitMessagesChanged({
+      runID: RUN_ID,
+      state: 'needs_input',
+      state_detail: 'permission request',
+    });
+    await settle();
+    expect(probeRow(RUN_ID)?.dataset.detail).toBe('permission request');
+
+    emitMessagesChanged({ runID: RUN_ID, state: 'working' });
+    await settle();
+    expect(probeRow(RUN_ID)?.dataset.state).toBe('working');
+    expect(probeRow(RUN_ID)?.dataset.detail).toBe('');
+    expect(instancesFetchCount).toBe(1); // never a refetch
   });
 
   it('run.changed refetches the whole instances list exactly once', async () => {

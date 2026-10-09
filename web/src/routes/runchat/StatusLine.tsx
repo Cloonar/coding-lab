@@ -7,8 +7,11 @@
 //
 //   working     pulsing dot · "Working" · the running tool call's title ·
 //               elapsed since the turn began — right: one-tap Interrupt
-//   needs_input dot · "Waiting for you" (the in-stream "…is waiting for your
-//               reply." line stays)
+//   needs_input dot · "Waiting for you" · the reason when the server names
+//               one (state_detail, issue #79: "permission request", a
+//               permission prompt's own text…; ellipsis-clipped like the
+//               tool title) (the in-stream "…is waiting for your reply."
+//               line stays)
 //   idle / ''   hollow dot · "Idle" · how long ago the last message arrived —
 //               right: "Pull base · N behind" while the run is behind its base
 //
@@ -100,6 +103,8 @@ const IDLE_TICK_MS = 30_000;
 export function StatusLine(props: {
   runID: string;
   state: ConversationState;
+  /** The reason behind `state` (issue #79); '' or absent renders nothing. */
+  stateDetail?: string;
   messages: readonly ChatMessage[];
   /** Run.commits_behind — 0 when absent (nothing to report, issue #149). */
   commitsBehind: number;
@@ -142,6 +147,12 @@ export function StatusLine(props: {
     mode() === 'working' ? 'Working' : mode() === 'waiting' ? 'Waiting for you' : 'Idle';
   // Working: what runs right now. Clipped first when the row is tight.
   const title = (): string | null => (mode() === 'working' ? toolTitle() : null);
+  // Waiting: why (issue #79). Only when non-empty, so no dangling separator.
+  const reason = (): string | null => {
+    if (mode() !== 'waiting') return null;
+    const d = (props.stateDetail ?? '').trim();
+    return d === '' ? null : d;
+  };
   // The time part — elapsed while working, "4m ago" while idle — never clips.
   const time = (): string | null => {
     if (mode() === 'working') {
@@ -172,6 +183,14 @@ export function StatusLine(props: {
         <b class="chat-status-label">{label()}</b>
         <Show when={title()}>
           {(t) => <span class="chat-status-detail chat-status-title"> · {t()}</span>}
+        </Show>
+        <Show when={reason()}>
+          {(r) => (
+            <span class="chat-status-detail chat-status-title chat-status-reason" title={r()}>
+              {' · '}
+              {r()}
+            </span>
+          )}
         </Show>
         <Show when={time()}>
           {(t) => <span class="chat-status-detail chat-status-time"> · {t()}</span>}

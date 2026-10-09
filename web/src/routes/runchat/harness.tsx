@@ -384,7 +384,7 @@ export function withAssistantText(text: string): void {
 
 export function emitMessagesChanged(
   runID: string = RUN_ID,
-  extra: { state?: string; backpatchSeq?: number } = {},
+  extra: { state?: string; state_detail?: string; backpatchSeq?: number } = {},
 ): void {
   FakeEventSource.instances[0]?.emit('run.messages.changed', {
     type: 'run.messages.changed',
@@ -407,7 +407,7 @@ export const MESSAGES_DEBOUNCE_MS = 300;
  */
 export async function emitMessagesChangedSettled(
   runID: string = RUN_ID,
-  extra: { state?: string; backpatchSeq?: number } = {},
+  extra: { state?: string; state_detail?: string; backpatchSeq?: number } = {},
 ): Promise<void> {
   vi.useFakeTimers();
   emitMessagesChanged(runID, extra);
