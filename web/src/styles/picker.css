@@ -4,7 +4,7 @@
    measured desktop placement as --picker-* custom properties; only the
    >=1024px rules read them. A picker without an anchor is a centered dialog
    on desktop (the issue action sheet). Same layer as the Dialog (50/51):
-   above the drawer, the rail, the install sheet and the toast. */
+   above the tab bar, the rail, the install sheet and the toast. */
 
 .picker-scrim {
   position: fixed;

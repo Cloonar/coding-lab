@@ -9,6 +9,7 @@
 @import './styles/type.css';
 @import './styles/layout.css';
 @import './styles/shell.css';
+@import './styles/tabbar.css';
 @import './styles/cards.css';
 @import './styles/chips.css';
 @import './styles/buttons.css';
@@ -17,6 +18,7 @@
 @import './styles/instances.css';
 @import './styles/parked.css';
 @import './styles/runs.css';
+@import './styles/runlist.css';
 @import './styles/issues.css';
 @import './styles/crs.css';
 @import './styles/afk.css';
@@ -45,3 +47,4 @@
 @import './styles/newrun-repos.css';
 @import './styles/newrun-issues.css';
 @import './styles/newrun-composer.css';
+@import './styles/more.css';

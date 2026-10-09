@@ -1,7 +1,11 @@
-// SideNav (issue #41): the ACTIVE rail renders from the instances prop —
-// attention rows first (see lib/railOrder), each an <A> to /runs/:id with the
-// current route highlighted via aria-current. Only live instances appear, and
-// rows carry no Stop control (that lives in the chat header + Repos page).
+// SideNav (issue #41, reshaped by issue #76): the rail's run list renders from
+// the instances prop as RunList's grouped rows — Needs you / Working / Idle
+// labels, attention rows first (see lib/railOrder), each an <A> to /runs/:id
+// with the current route highlighted via aria-current. Only live instances
+// appear, and rows carry no Stop control (that lives in the chat header +
+// Repos page). The section nav leads with Runs (lit on / and /history), has
+// no History link (History is the Runs page's Ended side), and `+ New run`
+// opens the composer at /new.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
@@ -86,7 +90,7 @@ function mount(instances: Instance[], path = '/'): void {
 }
 
 function railRows(): HTMLAnchorElement[] {
-  return Array.from(container.querySelectorAll<HTMLAnchorElement>('a.rail-row'));
+  return Array.from(container.querySelectorAll<HTMLAnchorElement>('a.runlist-row'));
 }
 
 beforeEach(() => {
@@ -112,7 +116,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('SideNav ACTIVE list', () => {
+describe('SideNav run list', () => {
   it('renders a row per live instance, each linking to /runs/:id', async () => {
     mount([
       instance({ id: 'run_a', session_name: 'proj~a-20260706-1500' }),
@@ -158,7 +162,7 @@ describe('SideNav ACTIVE list', () => {
       '/runs/run_b',
     );
     await settle();
-    const current = container.querySelectorAll('a.rail-row[aria-current="page"]');
+    const current = container.querySelectorAll('a.runlist-row[aria-current="page"]');
     expect(current).toHaveLength(1);
     expect(current[0]?.getAttribute('href')).toBe('/runs/run_b');
   });
@@ -190,7 +194,7 @@ describe('SideNav ACTIVE list', () => {
     ]);
     await settle();
     const row = railRows()[0]!;
-    expect(row.querySelector('.rail-row-title')?.textContent).toBe('Fix the tests');
+    expect(row.querySelector('.runlist-title')?.textContent).toBe('Fix the tests');
     expect(row.textContent).not.toContain('15:00'); // the title ALONE, no raw label
     expect(row.getAttribute('aria-label')).toBe('Fix the tests — proj');
   });
@@ -222,10 +226,76 @@ describe('SideNav ACTIVE list', () => {
     const byHref = (href: string) => railRows().find((r) => r.getAttribute('href') === href)!;
 
     const behindRow = byHref('/runs/run_behind');
-    expect(behindRow.querySelector('.rail-behind-chip')?.textContent).toBe('2 behind');
+    expect(behindRow.querySelector('.runlist-behind')?.textContent).toBe('2 behind');
     expect(behindRow.getAttribute('aria-label')).toBe('a · 15:00 — proj — 2 behind');
 
-    expect(byHref('/runs/run_current').querySelector('.rail-behind-chip')).toBeNull();
-    expect(byHref('/runs/run_unset').querySelector('.rail-behind-chip')).toBeNull();
+    expect(byHref('/runs/run_current').querySelector('.runlist-behind')).toBeNull();
+    expect(byHref('/runs/run_unset').querySelector('.runlist-behind')).toBeNull();
+  });
+});
+
+describe('SideNav section nav (issue #76)', () => {
+  const navLinks = () =>
+    Array.from(container.querySelectorAll<HTMLAnchorElement>('.rail-nav a.rail-nav-link'));
+  const runsLink = () => navLinks().find((a) => a.textContent === 'Runs')!;
+
+  it('leads with a Runs link to / and has no History link', async () => {
+    mount([]);
+    await settle();
+    expect(navLinks().map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Runs', '/'],
+      ['Repos', '/repos'],
+      ['Credentials', '/credentials'],
+      ['Tokens', '/tokens'],
+      ['Settings', '/settings'],
+    ]);
+    expect(container.querySelector('a[href="/history"]')).toBeNull();
+  });
+
+  it('lights Runs on / and on /history, and not elsewhere', async () => {
+    mount([], '/');
+    await settle();
+    expect(runsLink().classList.contains('active')).toBe(true);
+    dispose?.();
+    container.remove();
+
+    mount([], '/history');
+    await settle();
+    expect(runsLink().classList.contains('active')).toBe(true);
+    dispose?.();
+    container.remove();
+
+    mount([], '/repos');
+    await settle();
+    expect(runsLink().classList.contains('active')).toBe(false);
+    const repos = navLinks().find((a) => a.textContent === 'Repos')!;
+    expect(repos.classList.contains('active')).toBe(true);
+  });
+
+  it('points + New run at the composer on /new', async () => {
+    mount([]);
+    await settle();
+    expect(container.querySelector('a.rail-newrun')?.getAttribute('href')).toBe('/new');
+  });
+
+  it('groups the run list with labels and the attention count', async () => {
+    mount([
+      instance({ id: 'run_q', session_name: 'proj~q-20260706-1500', state: 'question' }),
+      instance({ id: 'run_n', session_name: 'proj~n-20260706-1501', state: 'needs_input' }),
+      instance({ id: 'run_idle', session_name: 'proj~i-20260706-1502', state: 'idle' }),
+    ]);
+    await settle();
+    const labels = Array.from(container.querySelectorAll('.runlist-label')).map(
+      (l) => l.textContent,
+    );
+    expect(labels).toEqual(['Needs you2', 'Idle1']);
+    expect(container.querySelector('.runlist-count.attn')?.textContent).toBe('2');
+  });
+
+  it('reads "No live runs." with nothing live', async () => {
+    mount([]);
+    await settle();
+    expect(railRows()).toHaveLength(0);
+    expect(container.textContent).toContain('No live runs.');
   });
 });

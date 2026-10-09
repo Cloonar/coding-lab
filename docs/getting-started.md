@@ -18,11 +18,13 @@ Open the web UI. With no users in the database, lab shows a **first-run setup pa
 
 Declarative deployments can skip the wizard and seed the operator account from config instead (`--seed-user` + a password hash from `lab hash-password`); see [`ops.md` § Seeding the initial operator user](ops.md#seeding-the-initial-operator-user).
 
-The UI is a PWA — add it to your phone's home screen; that's the intended way to drive lab day to day.
+The UI is a PWA — add it to your phone's home screen; that's the intended way to drive lab day to day. (**More** → **Install app** offers it when your browser can; installed, the app icon shows how many runs are waiting for you where your device supports badges.)
+
+**Getting around.** Lab opens on **Runs**, your live runs grouped as *Needs you*, *Working* and *Idle*; tap one to open its chat. On a phone a tab bar runs along the bottom: **Runs** (with a count when runs need you), **New** (start a run), **Repos**, and **More** (Credentials, Tokens, Settings, Install app, and Log out). The bar steps aside while you are in a chat or the schedule editor; the chat's back arrow returns to where you came from, or to Runs. On a wide screen the same places are a side rail instead — the grouped runs, **+ New run**, and links to **Runs**, **Repos**, **Credentials**, **Tokens** and **Settings** (Ctrl/Cmd+B collapses it) — and the browser tab reads `(N) lab` while N runs need you. Finished runs are under **Runs** → **Ended**.
 
 ## 3. Log in the agent provider
 
-Lab spawns agent CLIs (Claude Code, Codex) on your behalf, so the provider needs to be authenticated once, machine-level. The UI surfaces each provider's auth status and drives its login flow (for Claude Code: start login → open the OAuth URL → paste the code back). On a container-runner host the login itself also runs containerized — no provider CLI needed on the host at all.
+Lab spawns agent CLIs (Claude Code, Codex) on your behalf, so the provider needs to be authenticated once, machine-level. The UI surfaces each provider's auth status (on **Credentials**; a dot on the phone's **More** tab and a banner on the More page warn you when the default agent is logged out) and drives its login flow (for Claude Code: start login → open the OAuth URL → paste the code back). On a container-runner host the login itself also runs containerized — no provider CLI needed on the host at all.
 
 ## 4. Add a credential
 
@@ -62,7 +64,7 @@ The same page's **SSH targets** card is the SSH counterpart: with the [Warpgate 
 
 ## 7. Start a manual instance
 
-Open **New run** (the start page, **+ New run** in the side menu). Pick the repository from the pills at the top: your recently used repos, the last one preselected, each with a readiness dot (green when it can run, red when a check fails); **All N** opens a searchable picker of every repo. Describe the task in the box and send (Enter with a mouse or trackpad, Cmd/Ctrl+Enter everywhere; an empty box starts a plain session). Lab starts an **instance** (an interactive agent session in its own fresh git worktree on its own branch, forked from the repo's default branch) and opens its chat.
+Open **New run** (the **New** tab on a phone, **+ New run** in the side rail on a wide screen). Pick the repository from the pills at the top: your recently used repos, the last one preselected, each with a readiness dot (green when it can run, red when a check fails); **All N** opens a searchable picker of every repo. Describe the task in the box and send (Enter with a mouse or trackpad, Cmd/Ctrl+Enter everywhere; an empty box starts a plain session). Lab starts an **instance** (an interactive agent session in its own fresh git worktree on its own branch, forked from the repo's default branch) and opens its chat.
 
 The chips in the box's bottom bar apply to this run only. **Model** and **Effort** open their picker on the first tap, with the inherited default marked *default* (defaults are configurable globally and per repo; recommendations in [`model-selection.md`](model-selection.md)); a chip you changed is outlined. **⋯** (More options) holds the agent (only with two or more providers set up), the remote-control switch, an optional label, and a line naming the Runner the run will use, linked to the repo's Runner settings.
 
@@ -86,7 +88,7 @@ The unattended loop:
 4. **The done-signal is a PR** (or change request on built-in-tracker repos) whose head branch is the run's branch, with `Closes #N` in the body. Session death without a PR counts as a failure; each run also has a budget clock (default 2 h). Three consecutive failures pause AFK on that repo until you press **Reset** — on the repo's Overview, on the Issues card's AFK line on New run, or in the **Needs you** block on Repositories.
 5. **Review and merge** — a forge PR on your forge, or a change request right in lab's UI with a live diff and one-tap merge; merging a CR closes the linked issue.
 
-Everything is observable from the phone throughout: the runs rail shows each instance's live conversational state, run history records every outcome, and Web Push can notify you when a session needs input.
+Everything is observable from the phone throughout: the **Runs** page shows each instance's live conversational state (the side rail on a wide screen shows the same list), **Runs** → **Ended** records every outcome, the Runs tab and the browser tab title count the runs waiting for you, and Web Push can notify you when a session needs input.
 
 ## 9. Schedule recurring runs (optional)
 

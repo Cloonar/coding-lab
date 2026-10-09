@@ -15,7 +15,7 @@
 //   container: a bottom sheet below 1024px, an anchored popover at and above.
 
 import { Show, createUniqueId, type JSX } from 'solid-js';
-import type { ContextUsage, Repo, Run } from '../../api';
+import type { ContextUsage, Provider, Repo, Run } from '../../api';
 import Icon from '../../components/Icon';
 
 export interface ContextMeter {
@@ -51,6 +51,27 @@ export interface ModelLabels {
   model: string;
   /** '' when the run carries no effort. */
   effort: string;
+}
+
+/** A run's spawn-time model and effort (issue #68) as the provider catalog's
+ *  labels, the raw id as fallback; null for a legacy row with no model. A
+ *  mid-session /model switch is knowingly not reflected — spawn-time truth.
+ *  Shared by the chat header and the desktop Runs table (issue #76). */
+export function runModelLabels(
+  run: Pick<Run, 'provider' | 'model' | 'effort'>,
+  providers: Provider[] | undefined,
+): ModelLabels | null {
+  if (run.model === '') return null;
+  const p = providers?.find((x) => x.id === run.provider);
+  const model = p?.models.find((o) => o.value === run.model)?.label ?? run.model;
+  if (run.effort === '') return { model, effort: '' };
+  const effort = p?.efforts.find((o) => o.value === run.effort)?.label ?? run.effort;
+  return { model, effort };
+}
+
+/** `Model · Effort`, or the model alone when the run carries no effort. */
+export function modelLabelText(labels: ModelLabels): string {
+  return labels.effort === '' ? labels.model : `${labels.model} · ${labels.effort}`;
 }
 
 /** The meter's ring glyph: a track plus an arc filled to `pct` (clamped to
@@ -102,8 +123,8 @@ export function RunDetails(props: {
   const behind = () => props.run.commits_behind ?? 0;
 
   const card = (): JSX.Element => (
-    // The card stops touchstart like ToolPanel's sheet: AppShell's window-wide
-    // drawer gesture must never haul the nav drawer out from under a modal.
+    // The card stops touchstart like ToolPanel's sheet: window-level touch
+    // listeners behind a modal must not see touches that land on it.
     <section
       classList={{
         'chat-details': true,

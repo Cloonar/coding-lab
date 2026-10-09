@@ -341,7 +341,10 @@ describe('AddRepo has no Agent pick', () => {
 
     expect(container.querySelector('[name="provider"]')).toBeNull();
     expect(container.textContent).not.toContain('Agent A');
-    expect(requests).not.toContain('GET /api/v1/providers');
+    // The page asks for no catalog. The one GET /providers here is the app
+    // shell's own (its More-tab logged-out dot, issue #76); a request from the
+    // form would make it two.
+    expect(requests.filter((r) => r === 'GET /api/v1/providers')).toHaveLength(1);
   });
 
   it('omits provider entirely from the POST body', async () => {

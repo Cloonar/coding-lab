@@ -22,5 +22,21 @@
       "type": "image/png",
       "purpose": "maskable"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "New run",
+      "short_name": "New run",
+      "description": "Start a run from the composer",
+      "url": "/new",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Repos",
+      "short_name": "Repos",
+      "description": "Your repositories",
+      "url": "/repos",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
   ]
 }

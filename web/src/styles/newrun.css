@@ -4,23 +4,27 @@
    style themselves (newrun-repos.css, newrun-issues.css, newrun-composer.css,
    composer.css for the field); this file places them.
 
-   Phone (<1024px): the pills row at the top, the Issues card, and the
-   composer docked at the bottom edge (CSS `order` moves it last). The page
-   is a flex column that fills the content area under the top strip, so the
+   Phone (<1024px): the "New run" page header (issue #76), the pills row, the
+   Issues card, and the composer docked at the bottom edge (CSS `order` moves
+   it last). The page is a flex column that fills the content area, so the
    dock sits at the bottom edge even when the card is short, and sticks there
-   while a long card scrolls under it. The page has no side padding of its
-   own: each part takes the 16px gutter, which lets the pills scroll out to
-   the screen edge.
+   while a long card scrolls under it. The bottom edge is the top of the tab
+   bar while it shows (issue #76): the shell keeps the content clear of the
+   bar and publishes its height as --tabbar-space (0px without a bar), so the
+   sticky dock offsets by it and only pads for the home indicator when no bar
+   covers it. The page has no side padding of its own: each part takes the
+   16px gutter, which lets the pills scroll out to the screen edge.
 
    Desktop (>=1024px): a centered 720px column — pills, composer, Issues
-   card — top-aligned with the old composer's clamp(1.5rem, 8vh, 5rem).
+   card, no page header (NewRun renders it below 1024px only) — top-aligned
+   with the old composer's clamp(1.5rem, 8vh, 5rem).
 
    All of it applies while the page has repositories (`.newrun-docked`): the
    repos load error and the zero-repositories empty state keep the plain
    `.page` look they always had. */
 
-/* The flex chain that lets the page fill the viewport under the phone top
-   strip (the shell is a plain block there and the document scrolls): only
+/* The flex chain that lets the page fill the viewport on the phone (the
+   shell is a plain block there and the document scrolls): only
    while this page is mounted. Without :has() the dock still docks, it just
    rides up under a short card. */
 @media (max-width: 1023.98px) {
@@ -47,10 +51,26 @@
   padding: 0;
 }
 
+.newrun-head {
+  flex: none;
+  min-width: 0;
+}
+
+/* Docked, the page has no padding: the header takes the gutter itself, and
+   the pills row below it drops its own top spacing (SectionHead's margin
+   already separates them). */
+.newrun-docked .newrun-head {
+  padding: var(--space-3) var(--space-4) 0;
+}
+
 .newrun-pills {
   flex: none;
   min-width: 0;
   padding-top: var(--space-3);
+}
+
+.newrun-head + .newrun-pills {
+  padding-top: 0;
 }
 
 .newrun .repo-pills {
@@ -66,16 +86,19 @@
 }
 
 /* The dock: the Chat's shape — the field sits on the page background at the
-   bottom edge, clear of the home indicator; content scrolling under it
-   fades out above the field. */
+   bottom edge, above the tab bar while it shows and clear of the home
+   indicator; content scrolling under it fades out above the field. The bar
+   (when present) already covers the safe area — --tabbar-space includes the
+   inset — so max() pads for the indicator only when no bar is there. */
 .newrun-dock {
   order: 1;
   position: sticky;
-  bottom: 0;
+  bottom: var(--tabbar-space, 0px);
   z-index: 3;
   flex: none;
   min-width: 0;
-  padding: var(--space-2) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  padding: var(--space-2) var(--space-4)
+    calc(var(--space-3) + max(0px, env(safe-area-inset-bottom, 0px) - var(--tabbar-space, 0px)));
   background: linear-gradient(to bottom, transparent, var(--bg) 35%);
 }
 
@@ -105,9 +128,10 @@
   flex: none;
 }
 
-/* The AFK toast clears a one-line dock on the phone. */
+/* The AFK toast clears a one-line dock on the phone — and the tab bar under
+   it, which covers the safe area itself when it shows. */
 .newrun .toast {
-  bottom: calc(7.5rem + env(safe-area-inset-bottom, 0px));
+  bottom: calc(7.5rem + max(env(safe-area-inset-bottom, 0px), var(--tabbar-space, 0px)));
 }
 
 @media (min-width: 1024px) {

@@ -1,4 +1,10 @@
-// History's escalated-run re-arm affordance (issue #188):
+// History — the Runs page's Ended side (issue #76): ended runs only (outcome
+// 'active' rows are the Live side's, and 'active' is no filter option), grouped
+// by the local day they ended (Today / Yesterday / short date, newest first),
+// each row one <A> to /runs/:id carrying the outcome chip word, the repo name
+// mapped from repo_id, and `PR #n` or the branch; the outcome filter narrows.
+//
+// The escalated-run re-arm affordance (issue #188):
 // - the Re-arm button and the "Autoland is ignoring PR #N" note appear only
 //   on a run whose outcome is 'escalated' AND whose pull_number is set — not
 //   on any other outcome, and not on an escalated run with pull_number: null
@@ -11,7 +17,8 @@
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from '../App';
+import { AuthProvider } from '../auth';
+import { EventsProvider } from '../events';
 import History from './History';
 
 const REPO_ID = 'repo_1';
@@ -93,11 +100,6 @@ function stubApi(): void {
       if (url === '/api/v1/repos' && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { repos: [{ id: REPO_ID, name: 'coding-lab' }] }));
       }
-      // AppShell mounts the side rail once authenticated; it fetches the
-      // instance list for the ACTIVE rail + attention badge.
-      if (url === '/api/v1/instances' && method === 'GET') {
-        return Promise.resolve(jsonResponse(200, { instances: [] }));
-      }
       if (url === '/api/v1/runs?limit=50' && method === 'GET') {
         runFetchCount += 1;
         return Promise.resolve(jsonResponse(200, { runs: runsOnServer }));
@@ -129,29 +131,46 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 5; i += 1) await flush();
 }
 
-async function mountHistory(): Promise<void> {
+async function mountHistory(path = '/history'): Promise<void> {
   container = document.createElement('div');
   document.body.appendChild(container);
   const history = createMemoryHistory();
-  history.set({ value: '/history' });
+  history.set({ value: path });
   dispose = render(
     () => (
-      <MemoryRouter history={history} root={App}>
-        <Route path="/history" component={History} />
-        <Route path="*" component={() => null} />
-      </MemoryRouter>
+      <AuthProvider>
+        <EventsProvider>
+          <MemoryRouter history={history}>
+            <Route path="/history" component={History} />
+            <Route path="*" component={() => null} />
+          </MemoryRouter>
+        </EventsProvider>
+      </AuthProvider>
     ),
     container,
   );
   await settle();
 }
 
-/** The one run card whose "Open chat" link points at this run id. */
+/** The one ended-run row (link + anything under it) for this run id. */
 function cardFor(runID: string): HTMLElement {
-  const cards = Array.from(container.querySelectorAll<HTMLElement>('.run-card'));
+  const cards = Array.from(container.querySelectorAll<HTMLElement>('.ended-run'));
   const el = cards.find((c) => c.querySelector(`a[href="/runs/${runID}"]`) !== null);
-  if (!el) throw new Error(`missing run card for ${runID}`);
+  if (!el) throw new Error(`missing run row for ${runID}`);
   return el;
+}
+
+/** ISO string for a LOCAL wall-clock time `daysAgo` days before today. */
+function localDay(daysAgo: number, h: number, m = 0, s = 0): string {
+  const now = new Date();
+  return new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - daysAgo,
+    h,
+    m,
+    s,
+  ).toISOString();
 }
 
 function rearmButton(card: HTMLElement): HTMLButtonElement | null {
@@ -254,5 +273,86 @@ describe('History escalated-run re-arm', () => {
     expect(card.textContent).toContain('not found');
     expect(rearmButton(card)?.disabled).toBe(false); // not stuck busy after the error
     expect(runFetchCount).toBe(1); // a failed rearm must not have refetched
+  });
+});
+
+describe('History as the Ended view (issue #76)', () => {
+  it('excludes live (active) runs and offers no active filter', async () => {
+    runsOnServer = [
+      runFixture({ id: 'run_live', outcome: 'active', ended_at: null }),
+      runFixture({ id: 'run_done', kind: 'manual', outcome: 'success' }),
+    ];
+    await mountHistory();
+
+    expect(container.querySelector('a[href="/runs/run_live"]')).toBeNull();
+    expect(container.querySelector('a[href="/runs/run_done"]')).not.toBeNull();
+    const options = Array.from(
+      container.querySelectorAll<HTMLOptionElement>('select[name="outcome-filter"] option'),
+    ).map((o) => o.value);
+    expect(options).toEqual(['', 'success', 'death', 'timeout', 'stopped', 'escalated']);
+  });
+
+  it('reads "No ended runs yet." when only live runs exist', async () => {
+    runsOnServer = [runFixture({ id: 'run_live', outcome: 'active', ended_at: null })];
+    await mountHistory();
+    expect(container.textContent).toContain('No ended runs yet.');
+  });
+
+  it('groups rows by the day they ended, newest first', async () => {
+    runsOnServer = [
+      runFixture({ id: 'run_old', outcome: 'stopped', ended_at: localDay(9, 12) }),
+      runFixture({ id: 'run_y', outcome: 'death', ended_at: localDay(1, 12) }),
+      runFixture({ id: 'run_t', outcome: 'success', ended_at: localDay(0, 0, 0, 1) }),
+    ];
+    await mountHistory();
+
+    const groups = Array.from(container.querySelectorAll('.runlist-group'));
+    expect(groups).toHaveLength(3);
+    expect(groups[0]?.querySelector('.runlist-label')?.textContent).toBe('Today');
+    expect(groups[1]?.querySelector('.runlist-label')?.textContent).toBe('Yesterday');
+    const hrefs = Array.from(container.querySelectorAll('a.runlist-row')).map((a) =>
+      a.getAttribute('href'),
+    );
+    expect(hrefs).toEqual(['/runs/run_t', '/runs/run_y', '/runs/run_old']);
+  });
+
+  it('shows the outcome word, the repo name and PR #n or the branch', async () => {
+    runsOnServer = [
+      runFixture({ id: 'run_pr', outcome: 'escalated', pull_number: 42 }),
+      runFixture({ id: 'run_br', kind: 'manual', outcome: 'death', branch: 'lab/x' }),
+    ];
+    await mountHistory();
+
+    const pr = cardFor('run_pr');
+    expect(pr.querySelector('.outcome-chip')?.textContent).toBe('escalated');
+    expect(pr.querySelector('.outcome-chip')?.classList.contains('outcome-escalated')).toBe(true);
+    expect(pr.querySelector('.runlist-sub')?.textContent).toBe('coding-lab · PR #42 · 10m');
+    // The Re-arm button sits under the row, never inside its link.
+    expect(pr.querySelector('a.runlist-row button')).toBeNull();
+    expect(rearmButton(pr)).not.toBeNull();
+
+    const br = cardFor('run_br');
+    expect(br.querySelector('.outcome-chip')?.textContent).toBe('died');
+    expect(br.querySelector('.runlist-sub')?.textContent).toBe('coding-lab · lab/x · 10m');
+  });
+
+  it('narrows to the ?outcome= filter', async () => {
+    runsOnServer = [
+      runFixture({ id: 'run_done', kind: 'manual', outcome: 'success' }),
+      runFixture({ id: 'run_died', kind: 'manual', outcome: 'death' }),
+    ];
+    await mountHistory('/history?outcome=death');
+
+    expect(container.querySelector('a[href="/runs/run_done"]')).toBeNull();
+    expect(container.querySelector('a[href="/runs/run_died"]')).not.toBeNull();
+  });
+
+  it('selects the Ended side of the Live / Ended switch', async () => {
+    runsOnServer = [];
+    await mountHistory();
+    const ended = container.querySelector('.runs-switch a[href="/history"]');
+    const live = container.querySelector('.runs-switch a[href="/"]');
+    expect(ended?.getAttribute('aria-current')).toBe('page');
+    expect(live?.getAttribute('aria-current')).toBeNull();
   });
 });

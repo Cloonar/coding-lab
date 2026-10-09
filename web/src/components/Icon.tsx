@@ -12,7 +12,6 @@
 import type { JSX } from 'solid-js';
 
 export type IconName =
-  | 'menu'
   | 'x'
   | 'arrow-left'
   | 'send'
@@ -36,7 +35,6 @@ export type IconName =
   | 'chevron-right'
   | 'chevrons-left'
   | 'chevrons-right'
-  | 'history'
   | 'git-branch'
   | 'share'
   | 'square-plus'
@@ -70,7 +68,8 @@ export type IconName =
   | 'zap'
   | 'arrow-down-to-line'
   | 'sliders-horizontal'
-  | 'loader-circle';
+  | 'loader-circle'
+  | 'inbox';
 
 // name -> the svg children for that glyph. Functions (not shared nodes) so a
 // glyph used in several places produces its own DOM each time. Each returned
@@ -78,13 +77,6 @@ export type IconName =
 // Solid compiler namespaces it correctly even though it is created here rather
 // than lexically inside the <svg> below.
 const GLYPHS: Record<IconName, () => JSX.Element> = {
-  menu: () => (
-    <>
-      <path d="M4 12h16" />
-      <path d="M4 6h16" />
-      <path d="M4 18h16" />
-    </>
-  ),
   x: () => (
     <>
       <path d="M18 6 6 18" />
@@ -187,13 +179,6 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     <>
       <path d="m6 17 5-5-5-5" />
       <path d="m13 17 5-5-5-5" />
-    </>
-  ),
-  history: () => (
-    <>
-      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
-      <path d="M12 7v5l4 2" />
     </>
   ),
   'git-branch': () => (
@@ -428,6 +413,13 @@ const GLYPHS: Record<IconName, () => JSX.Element> = {
     <path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4" />
   ),
   'loader-circle': () => <path d="M21 12a9 9 0 1 1-6.219-8.56" />,
+  // The Runs destination (issue #76): the tab bar's Runs tab and the rail's Runs link.
+  inbox: () => (
+    <>
+      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </>
+  ),
 };
 
 /** Every vendored glyph name, in declaration order (the Icon suite iterates it). */

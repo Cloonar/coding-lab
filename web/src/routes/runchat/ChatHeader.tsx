@@ -12,8 +12,11 @@
 //   row can't hold (open affordance, two-step Stop).
 // The conversational state badge and the "N behind" chip left the header: the
 // dock's status line (issue #58 §2) and Run details replace them.
+// The back arrow (issue #76) returns to the page the chat was opened from —
+// it pops the in-app history (lib/navHistory) — and to Runs (`/`) when the
+// chat is the app's first entry (a deep link, PWA shortcut, notification).
 
-import { A } from '@solidjs/router';
+import { A, useNavigate } from '@solidjs/router';
 import { Match, Show, Switch, createSignal, onCleanup, type JSX } from 'solid-js';
 import {
   errorMessage,
@@ -34,10 +37,18 @@ import {
 } from '../../lib/deepLink';
 import { runDisplayTitle, sessionRepo } from '../../lib/instanceLabel';
 import { createMediaQuery } from '../../lib/media';
+import { canGoBack } from '../../lib/navHistory';
 import { forgeWebUrl } from '../../lib/repoName';
 import { createInterrupt } from './Composer';
 import { createPullBase } from './pullBase';
-import { ContextRing, RunDetails, contextMeter, type ModelLabels } from './RunDetails';
+import {
+  ContextRing,
+  RunDetails,
+  contextMeter,
+  modelLabelText,
+  runModelLabels,
+  type ModelLabels,
+} from './RunDetails';
 
 // The `•••` menu is an anchored dropdown from the header's own >=640px layout
 // up, a bottom sheet below it (where the row is a single line, issue #35 §1).
@@ -146,21 +157,13 @@ export function ChatHeader(props: {
   };
   const live = () => props.run !== undefined && props.run.outcome === 'active';
   // The run's spawn-time model and effort (issue #68): catalog pretty labels
-  // with the raw id as fallback, null for a legacy row with no model. A
-  // mid-session /model switch is knowingly not reflected — spawn-time truth.
-  const modelLabels = (): ModelLabels | null => {
-    const r = props.run;
-    if (r === undefined || r.model === '') return null;
-    const p = props.providers?.find((x) => x.id === r.provider);
-    const model = p?.models.find((o) => o.value === r.model)?.label ?? r.model;
-    if (r.effort === '') return { model, effort: '' };
-    const effort = p?.efforts.find((o) => o.value === r.effort)?.label ?? r.effort;
-    return { model, effort };
-  };
+  // with the raw id as fallback, null for a legacy row with no model — see
+  // runModelLabels (shared with the desktop Runs table).
+  const modelLabels = (): ModelLabels | null =>
+    props.run === undefined ? null : runModelLabels(props.run, props.providers);
   const modelInfo = (): string | null => {
     const m = modelLabels();
-    if (m === null) return null;
-    return m.effort === '' ? m.model : `${m.model} · ${m.effort}`;
+    return m === null ? null : modelLabelText(m);
   };
   // The context meter (issue #243 / ADR-0061, issue #58 §1): null — no meter —
   // when the adapter sent no usage or a limit it can't divide by. Its own
@@ -322,15 +325,29 @@ export function ChatHeader(props: {
     />
   );
 
+  // Back pops the in-app history when there is an entry to pop; a cold open
+  // has none (or a foreign one), so it replaces itself with Runs instead.
+  const navigate = useNavigate();
+  const goBack = (): void => {
+    if (canGoBack()) navigate(-1);
+    else navigate('/', { replace: true });
+  };
+
   return (
     <>
       <header
         ref={props.headerRef}
         classList={{ 'chat-header': true, 'chat-header--hidden': props.hidden }}
       >
-        <A href="/" class="crumb chat-back icon-btn" aria-label="Back to home" title="Back to home">
+        <button
+          type="button"
+          class="crumb chat-back icon-btn"
+          aria-label="Back"
+          title="Back"
+          onClick={goBack}
+        >
           <Icon name="arrow-left" />
-        </A>
+        </button>
         {/* The two-line title block (issue #58 §1): line 1 the click-to-edit
             title button (or rename form); line 2 the secondary line — project
             link, forge git-icon link, and the spawn-time model · effort. The

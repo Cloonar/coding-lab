@@ -411,6 +411,13 @@ export interface RepoSettingsHarnessState {
 }
 export const h = {} as RepoSettingsHarnessState;
 
+/** What the app shell itself reads on mount, whatever page is open: the
+ *  provider catalog and the global defaults, for the More tab's logged-out dot
+ *  (issue #76). Counts of GET /providers and GET /settings include these, so a
+ *  test that asks "does this PAGE request it?" compares against them. */
+export const SHELL_PROVIDERS_GETS = 1;
+export const SHELL_SETTINGS_GETS = 1;
+
 let dispose: (() => void) | undefined;
 // Eagerly initialized so a test that never mounts (a pure data check) still
 // has a valid — empty, detached — container for queries and afterEach.

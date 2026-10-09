@@ -232,7 +232,7 @@ function PickerPanel(props: PickerProps) {
 
   // Scrim and panel are siblings (the Dialog/InstallSheet idiom): the close
   // handler lives on the scrim alone. Both stop touchstart, like RunDetails'
-  // sheet, so AppShell's window-wide drawer swipe never starts from a picker.
+  // sheet, so window-level touch listeners behind the picker never see its touches.
   return (
     <>
       <div

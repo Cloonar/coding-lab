@@ -1,4 +1,4 @@
-import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
+import { MemoryRouter, Route, createMemoryHistory, type MemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
 import type { ChatMessage, MessagesResponse, Provider, Repo, Run, RunCommand } from '../../api';
@@ -139,6 +139,8 @@ export const h = {} as ChatHarnessState;
 
 let dispose: (() => void) | undefined;
 export let container: HTMLDivElement;
+/** The mounted chat's memory history, for asserting where Back went (issue #76). */
+export let chatHistory: MemoryHistory;
 
 export function jsonResponse(status: number, body: unknown) {
   const text = JSON.stringify(body);
@@ -243,11 +245,15 @@ export async function settle(): Promise<void> {
   for (let i = 0; i < 6; i += 1) await flush();
 }
 
-export async function mountChat(): Promise<void> {
+/** Mounts the chat at /runs/run_1; `from` first pushes the page it was opened
+ *  from (the memory history always starts with `/`). */
+export async function mountChat(from?: string): Promise<void> {
   container = document.createElement('div');
   document.body.appendChild(container);
   const history = createMemoryHistory();
+  if (from !== undefined) history.set({ value: from });
   history.set({ value: `/runs/${RUN_ID}` });
+  chatHistory = history;
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>

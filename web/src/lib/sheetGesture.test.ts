@@ -6,8 +6,8 @@
 // flick within the velocity window beats position in whichever direction it
 // points; a stale/held release is never a flick; a drag of exactly
 // COMMIT_FRACTION dismisses). Time only enters via the point timestamps — the
-// module never reads a clock. The tuning constants are imported from
-// './drawerGesture' because the two gestures deliberately share feel.
+// module never reads a clock. The tuning constants were shared with the retired
+// drawer gesture (issue #140) and moved into './sheetGesture' with it (#76).
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -15,10 +15,9 @@ import {
   FLICK_VELOCITY_PX_MS,
   INTENT_PX,
   VELOCITY_WINDOW_MS,
-} from './drawerGesture';
-import type { GesturePoint } from './drawerGesture';
-import { createSheetGesture } from './sheetGesture';
-import type { SheetGestureDecision, SheetGestureEnv } from './sheetGesture';
+  createSheetGesture,
+} from './sheetGesture';
+import type { GesturePoint, SheetGestureDecision, SheetGestureEnv } from './sheetGesture';
 
 // Test-local sheet height. Picked at 100 so a translateY reads directly as a
 // percentage of dismissed-ness; it is unrelated to VELOCITY_WINDOW_MS (also 100).

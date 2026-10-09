@@ -269,8 +269,8 @@ button.switch:disabled {
 
 /* Dialog ----------------------------------------------------------------------- */
 /* A bottom sheet below 1024px, a centered dialog from 1024px (centered over
-   the content column while the side rail shows). Above the drawer (25/30), the
-   install sheet (40/41) and the toast (20). */
+   the content column while the side rail shows). Above the bottom tab bar
+   (15), the side rail (30), the install sheet (40/41) and the toast (20). */
 
 .dialog-scrim {
   position: fixed;
@@ -405,9 +405,10 @@ button.switch:disabled {
 }
 
 /* The repo home's toast rides above the settings save bar while both show
-   (the save bar is the region's preceding sibling in the frame). */
+   (the save bar is the region's preceding sibling in the frame) — and above
+   the bottom tab bar the save bar itself sits on (--tabbar-space, #76). */
 .settings-savebar ~ .toast-region > .toast {
-  bottom: calc(5rem + env(safe-area-inset-bottom));
+  bottom: calc(5rem + env(safe-area-inset-bottom) + var(--tabbar-space, 0px));
 }
 
 /* Toast action ------------------------------------------------------------------ */

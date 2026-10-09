@@ -1,0 +1,456 @@
+/* Run list (issue #76): grouped live runs on the Runs page and in the rail. ---- */
+/* One row anatomy for three homes: RunList's 'page' variant (the phone's Runs
+   page, 56px rows), its 'rail' variant (the 260px desktop rail, compact), and
+   History's ended rows (routes/History reuses .runlist-row). Then the Runs
+   page's head + Live / Ended switch (components/RunsHead) and the desktop Runs
+   table (routes/Runs). Tokens only; the attention tints are colour-mixed from
+   --accent like crs.css does. */
+
+.runlist {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.runlist-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0.25rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.runlist-group:first-child .runlist-label {
+  margin-top: var(--space-2);
+}
+
+/* A group's count; Needs you's is the attention count, accent-tinted. Also
+   used by the desktop table's group header rows. */
+.runlist-count {
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  font-size: 0.7rem;
+  letter-spacing: 0;
+}
+
+.runlist-count.attn {
+  background: color-mix(in srgb, var(--accent) 16%, var(--card));
+  color: var(--link);
+}
+
+.runlist-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.runlist-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 56px;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.runlist-row:hover,
+.runlist-row[aria-current='page'] {
+  background: var(--hover);
+  text-decoration: none;
+}
+
+/* The colour-only state dot (the row link's accessible name carries the
+   word): attention = accent with a halo, working = the convo amber, the rest a
+   faded muted dot. */
+.runlist-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+.runlist-dot.needs-input,
+.runlist-dot.question {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.runlist-dot.working {
+  background: var(--banner-text);
+}
+
+.runlist-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.3;
+}
+
+/* Title plus the optional "N behind" chip (issue #149) on one line. */
+.runlist-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.runlist-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runlist-top .chip {
+  flex: none;
+}
+
+/* Small and muted — metadata, not a call to action (issue #149). */
+.runlist-behind {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.runlist-sub {
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "waiting for you" / "asking a question" read in the link colour. */
+.runlist-state.attn {
+  color: var(--link);
+  font-weight: 500;
+}
+
+/* AFK budget countdown past its deadline. */
+.runlist-budget.over {
+  color: var(--danger);
+}
+
+.runlist-age {
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.runlist-empty {
+  margin: 0;
+  padding: 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Rail variant: the same rows compacted for the 260px rail. */
+.runlist-rail .runlist-label {
+  margin: var(--space-2) 0.2rem 2px;
+}
+
+.runlist-rail .runlist-row {
+  min-height: 44px;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.runlist-rail .runlist-top {
+  font-weight: 500;
+}
+
+.runlist-rail .runlist-row[aria-current='page'] .runlist-top {
+  font-weight: 600;
+}
+
+.runlist-rail .runlist-sub {
+  font-size: 0.78rem;
+}
+
+.runlist-rail .runlist-dot {
+  width: 8px;
+  height: 8px;
+  box-shadow: none;
+}
+
+/* Runs page head (components/RunsHead) ----------------------------------------- */
+
+.runs-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  margin: 0 0 var(--space-2);
+}
+
+.runs-head h1 {
+  margin: 0;
+  min-width: 0;
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+.runs-brand {
+  font-size: 1.2rem;
+}
+
+/* Live / Ended: two links drawn as Segmented's pill (controls.css) — a
+   chip-bg track, the current side raised on the card colour. 44px touch
+   targets below 1024px, as Segmented's segments. */
+.runs-switch {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--chip-bg);
+}
+
+.runs-switch-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.25rem 1rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.runs-switch-link:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.runs-switch-link[aria-current='page'] {
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 650;
+  box-shadow: var(--shadow);
+}
+
+@media (min-width: 1024px) {
+  .runs-head {
+    margin-bottom: var(--space-4);
+  }
+
+  .runs-head .runs-switch {
+    align-self: center;
+  }
+
+  .runs-switch-link {
+    min-height: 36px;
+  }
+}
+
+/* Empty Runs page (routes/Runs): title, hint, the New run button and the way
+   to the ended runs, inside EmptyState's dashed box. */
+.runs-empty-title,
+.runs-empty-hint,
+.runs-empty-ended {
+  display: block;
+}
+
+.runs-empty-title {
+  margin-bottom: var(--space-2);
+  font-family: var(--font-serif);
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* A link drawn as button.primary (buttons.css) — it navigates to /new. */
+.runs-empty-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin: var(--space-4) 0;
+  padding: 0 1.25rem;
+  border-radius: var(--radius-control);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.runs-empty-new:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+  text-decoration: none;
+}
+
+.runs-empty-new:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.runs-empty-ended {
+  font-size: 0.85rem;
+}
+
+/* Desktop Runs table (routes/Runs, >=1024px) ------------------------------------ */
+
+.runs-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  overflow: hidden;
+}
+
+.runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+/* Column sizing: an auto-layout table where every column but Run sizes to
+   its content (one line, so Base's "N behind" chip and Last's "18 min" never
+   clip, rail open or not), State holds a fixed width and wraps to two lines,
+   and Run takes what is left — `width: 100%; max-width: 0` is the table idiom
+   that lets its title ellipsise instead of pushing the table wider. Repo,
+   model and branch clamp long values (an inner span; td max-width is not
+   honoured in auto layout) with the full text in the title attribute. */
+.runs-table td.runs-table-runcell {
+  width: 100%;
+  max-width: 0;
+}
+
+.runs-clamp {
+  display: block;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.runs-table-branch .runs-clamp {
+  max-width: 13rem;
+}
+
+.runs-table th,
+.runs-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-table thead th {
+  height: 36px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.runs-table-group th {
+  height: 34px;
+  padding-top: 0.6rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.runs-table-group .runlist-count {
+  margin-left: var(--space-2);
+}
+
+.runs-table-row {
+  cursor: pointer;
+}
+
+.runs-table-row td {
+  height: 58px;
+  border-bottom: 1px solid var(--border);
+}
+
+.runs-table tbody:last-child .runs-table-row:last-child td {
+  border-bottom: 0;
+}
+
+.runs-table-row:hover {
+  background: var(--hover);
+}
+
+/* The row's link: dot + title, the keyboard and screen-reader path into the
+   chat (a click elsewhere on the row navigates too). */
+.runs-table-run {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.runs-table-run:hover {
+  text-decoration: none;
+}
+
+.runs-table-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-table-muted {
+  color: var(--muted);
+}
+
+/* The State cell wraps ("Working · ~1h 12m left" on two lines, as the
+   mockup does) rather than ellipsising; every other cell stays one line. */
+.runs-table td.runs-table-state {
+  min-width: 10rem;
+  width: 10rem;
+  color: var(--muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+
+.runs-table td.runs-table-state.attn {
+  color: var(--link);
+  font-weight: 500;
+}
+
+.runs-table-branch {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.runs-table .runs-last {
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
