@@ -180,7 +180,7 @@ try {
       const errors = [];
       page.on('pageerror', (error) => errors.push(String(error)));
       const { misses } = await stubApi(page, api(view.scenario ?? {}), EVENTS);
-      await page.goto(`${server.url}/`);
+      await page.goto(`${server.url}/new`);
       await page.waitForSelector('.newrun-dock', { timeout: 10_000 });
       // Rows (or the card's note) in, so a shot never catches "Loading issues…".
       await page

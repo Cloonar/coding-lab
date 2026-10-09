@@ -25,6 +25,11 @@ stored recent list), and two agents are configured. Agents and models carry plac
 | Tracker check failing, field enabled    | [tracker-failing-390.png](tracker-failing-390.png) | [tracker-failing-1280.png](tracker-failing-1280.png) | (failing tracker, no state) |
 | Host Runner warning                     | [host-390.png](host-390.png)                       | [host-1280.png](host-1280.png)                       | (cloonar-nixos, no state)   |
 
+At 390 px the repository pills ride inside the docked composer as its first row, above the
+blockers and the field, and the "New run" header carries the selected repository's name as a
+subtitle (issue #87); the 390 px set was retaken for that. At 1280 px the pills stay in the page
+body and the 1280 px set is unchanged.
+
 The mockup state is the URL hash that opens it: `new-run-mockup.html#model` at a phone width,
 `#desktop.model` for the desktop frame. A repository that cannot run yet is only preselected when
 no repository can, so the cloning and clone-failed views are a lab with that one repository (the
@@ -41,8 +46,8 @@ node docs/reference/new-run-screenshots/shots/shots.mjs
 The script builds `web/` into a temporary directory, serves it with every `/api/v1` call answered
 from [`shots/data.mjs`](shots/data.mjs), refuses any other network request, and overwrites the PNGs
 here. It prints each file's size and checks that no 390 px view scrolls sideways; at 390 px it also
-prints the docked composer's bottom edge and how many controls are shorter than 44 px. The static
-server and the API stub are the ones of
+prints the docked composer's bottom edge (the pills row is part of it) and how many controls are
+shorter than 44 px. The static server and the API stub are the ones of
 [`../repo-settings-screenshots/shots/stubs.mjs`](../repo-settings-screenshots/shots/stubs.mjs).
 Optional environment: `SHOTS_DIST` (serve an existing build instead), `CHROMIUM` (the browser
 binary, default `/usr/bin/chromium`), `SHOTS_OUT` (another output folder), `SHOTS_SCHEME=dark`.
