@@ -7,12 +7,29 @@
    sit beside it. Inside the app shell (issue #41) the rail sits BESIDE the
    chat (a width, never a height), and the phone's tab bar is not rendered on
    /runs/:id (issue #76), so this 100dvh fill still equals the viewport at
-   every breakpoint — a flex/height chain, no magic offset for chrome. */
+   every breakpoint — a flex/height chain, no magic offset for chrome.
+
+   The on-screen keyboard (issue #82) must shrink this page to the space above
+   it, in two layers. Android Chrome 108+ resizes only the VISUAL viewport by
+   default; the viewport meta's interactive-widget=resizes-content (index.html)
+   makes it resize the layout viewport again, so the 100dvh fallback follows the
+   keyboard with no script. iOS Safari ignores that key and never resizes the
+   layout viewport, so RunChat binds window.visualViewport's height and offsetTop
+   onto this element as --vv-height / --vv-top (lib/visualViewport.ts). The
+   height takes --vv-height; top: var(--vv-top) shifts the page down by however
+   far iOS panned the visual viewport inside the layout viewport, so the header
+   is not left off-screen. position:relative + top (never transform, which would
+   become the containing block of fixed descendants such as the tool sheet and
+   dropdowns) does that. Without visualViewport (jsdom, old browsers), or while
+   pinch-zoomed, both vars are unset and the page is 100dvh at top 0 as before. */
 .chat-page {
   display: flex;
   flex-direction: row;
   height: 100vh;
   height: 100dvh;
+  height: var(--vv-height, 100dvh);
+  position: relative;
+  top: var(--vv-top, 0px);
   padding-bottom: 0;
 }
 

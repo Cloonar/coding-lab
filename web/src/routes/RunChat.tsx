@@ -66,6 +66,7 @@ import {
 } from '../lib/chatStream';
 import { remoteGated } from '../lib/deepLink';
 import { resourceValue } from '../lib/resource';
+import { bindVisualViewport } from '../lib/visualViewport';
 import { groupMessages, reconcileRenderItems, type RenderItem } from '../lib/toolGroups';
 import { useEvents } from '../events';
 import { ChatHeader } from './runchat/ChatHeader';
@@ -308,6 +309,10 @@ function RunChatView() {
   };
 
   onMount(() => {
+    // Size the page to the visible area above the on-screen keyboard (issue
+    // #82): writes --vv-height/--vv-top on .chat-page, a no-op without
+    // visualViewport. Before the streamEl guard so it is never skipped.
+    if (pageEl !== undefined) bindVisualViewport(pageEl);
     const el = streamEl;
     if (el === undefined) return;
     el.addEventListener('scroll', onScroll, { passive: true });
