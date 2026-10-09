@@ -12,13 +12,16 @@ import (
 // actually running, from tmuxx NOT the DB — the DB row is history), connecting
 // (the provider's in-flight deep-link capture state), and state (the chat
 // tailer's derived conversational state: working|needs_input|question|idle, ""
-// when no tailer has reported one yet).
+// when no tailer has reported one yet), plus state detail (the adapter's
+// optional human reason for that state, issue #79 — e.g. a permission
+// prompt's text while needs_input; "" when none).
 type InstanceView struct {
-	Run        store.Run
-	RepoName   string
-	Live       bool
-	Connecting bool
-	State      string
+	Run         store.Run
+	RepoName    string
+	Live        bool
+	Connecting  bool
+	State       string
+	StateDetail string
 }
 
 // List returns every active run joined with live tmux liveness and the
@@ -49,26 +52,29 @@ func (s *Service) List(ctx context.Context) ([]InstanceView, error) {
 
 	views := make([]InstanceView, 0, len(active))
 	for _, run := range active {
+		state, detail := s.conversationState(run.SessionName)
 		views = append(views, InstanceView{
-			Run:        run,
-			RepoName:   repoName[run.RepoID],
-			Live:       liveSet[run.SessionName],
-			Connecting: s.connecting(run.Provider, run.SessionName),
-			State:      s.conversationState(run.SessionName),
+			Run:         run,
+			RepoName:    repoName[run.RepoID],
+			Live:        liveSet[run.SessionName],
+			Connecting:  s.connecting(run.Provider, run.SessionName),
+			State:       state,
+			StateDetail: detail,
 		})
 	}
 	return views, nil
 }
 
-// conversationState reports the chat tailer's derived state for a session, when
-// a state source is wired (design: the ConversationStater seam, set at startup
-// like the AFK stopper). "" when unset or the tailer has no state yet.
-func (s *Service) conversationState(session string) string {
+// conversationState reports the chat tailer's derived state and its detail
+// (issue #79) for a session, when a state source is wired (design: the
+// ConversationStater seam, set at startup like the AFK stopper). "" when unset
+// or the tailer has no state yet.
+func (s *Service) conversationState(session string) (state, detail string) {
 	if s.chatState == nil {
-		return ""
+		return "", ""
 	}
-	st, _ := s.chatState.State(session)
-	return st
+	state, detail, _ = s.chatState.ConversationState(session)
+	return state, detail
 }
 
 // LiveCounts is the scrape-time source of the lab_instances_active gauge

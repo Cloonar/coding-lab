@@ -12,9 +12,9 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-// writeFileWithModTime writes body to path and sets its mtime, so the marker
-// staleness check (transcript mtime vs marker mtime) can be exercised
-// deterministically.
+// writeFileWithModTime writes body to path and sets its mtime, so the spool's
+// legacy mtime staleness backstop (transcript mtime vs spool mtime) can be
+// exercised deterministically.
 func writeFileWithModTime(t *testing.T, path, body string, mod time.Time) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -81,8 +81,15 @@ func TestSetup_shapeAndArgs(t *testing.T) {
 	if len(s.Hooks.PostToolUse) != 1 || s.Hooks.PostToolUse[0].Matcher != "AskUserQuestion|ExitPlanMode" {
 		t.Errorf("PostToolUse matcher = %+v", s.Hooks.PostToolUse)
 	}
-	if len(s.Hooks.Notification) != 1 || s.Hooks.Notification[0].Matcher != "" {
-		t.Errorf("Notification matcher = %+v; want empty (match all)", s.Hooks.Notification)
+	// Exactly the two dialog-capture events (issue #79 decision 2): no
+	// Notification hook is armed — its idle_prompt marker read needs_input
+	// while background agents still ran; the registry status replaced it.
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatalf("hooks block not an object: %v", err)
+	}
+	if len(hooks) != 2 || hooks["PreToolUse"] == nil || hooks["PostToolUse"] == nil {
+		t.Errorf("hooks keys = %v; want exactly PreToolUse + PostToolUse", keysOf(hooks))
 	}
 	// PreToolUse spools to dialogs/<runID>.json via an atomic temp+rename; the
 	// command must reference the run's spool path and be observational (no exit 2).
@@ -322,48 +329,64 @@ func TestPendingDialog_legacyPayloadFallsBackToMtime(t *testing.T) {
 	}
 }
 
-func TestBlockedState_markerAndStaleness(t *testing.T) {
-	p := spoolTestProvider(t)
-	dir := t.TempDir()
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-
-	// No transcript → the marker is current.
-	if st, ok := p.blockedState("run_1", dir, ""); !ok || st != provider.StateNeedsInput {
-		t.Fatalf("blockedState = (%q,%v); want (needs_input,true)", st, ok)
+// keysOf lists a JSON object's keys, for assertion messages.
+func keysOf(m map[string]json.RawMessage) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
 	}
-
-	marker := markerPath(dir, "run_1")
-	mi, _ := os.Stat(marker)
-
-	// A transcript written BEFORE the marker → still blocked.
-	older := filepath.Join(dir, "older.jsonl")
-	writeFileWithModTime(t, older, "x", mi.ModTime().Add(-time.Hour))
-	if _, ok := p.blockedState("run_1", dir, older); !ok {
-		t.Error("transcript older than the marker → still blocked")
-	}
-
-	// A transcript written AFTER the marker → the block resolved (next activity).
-	newer := filepath.Join(dir, "newer.jsonl")
-	writeFileWithModTime(t, newer, "x", mi.ModTime().Add(time.Hour))
-	if _, ok := p.blockedState("run_1", dir, newer); ok {
-		t.Error("transcript newer than the marker → stale, want not blocked")
-	}
+	return ks
 }
 
-func TestSpoolSig_changesWithFiles(t *testing.T) {
+// SpoolSig digests the dialog spool under dir AND the session registry under
+// home (issue #79 decision 6): a registry status flip — the CLI rewriting its
+// entry busy → idle while the transcript is byte-frozen — must change the sig
+// so the tailer re-reads. No blocked-marker file feeds it any more.
+func TestSpoolSig_changesWithSpoolAndRegistry(t *testing.T) {
 	p := spoolTestProvider(t)
-	dir := t.TempDir()
-	if p.SpoolSig("run_1", dir) != "" {
-		t.Error("no spool/marker → empty sig")
+	dir, home := t.TempDir(), t.TempDir()
+	if p.SpoolSig("run_1", dir, home) != "" {
+		t.Error("no spool, no registry → empty sig")
 	}
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	sig := p.SpoolSig("run_1", dir)
-	if sig == "" {
+	spoolOnly := p.SpoolSig("run_1", dir, home)
+	if spoolOnly == "" {
 		t.Fatal("spool present → non-empty sig")
 	}
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"idle_prompt"}`)
-	if p.SpoolSig("run_1", dir) == sig {
-		t.Error("adding a marker must change the sig")
+
+	// A registry entry appearing changes the sig.
+	t0 := time.Now().Add(-time.Hour)
+	entry := filepath.Join(registryDirUnder(home), "4242.json")
+	if err := os.MkdirAll(filepath.Dir(entry), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFileWithModTime(t, entry, `{"pid":4242,"status":"busy"}`, t0)
+	withBusy := p.SpoolSig("run_1", dir, home)
+	if withBusy == spoolOnly {
+		t.Error("a registry entry appearing must change the sig")
+	}
+	// The CLI rewriting the entry (busy → idle) changes it again.
+	writeFileWithModTime(t, entry, `{"pid":4242,"status":"idle"}`, t0.Add(time.Second))
+	if p.SpoolSig("run_1", dir, home) == withBusy {
+		t.Error("a registry status rewrite must change the sig")
+	}
+
+	// Each half is skipped when its location is "": no registry half without a
+	// home (an ended read), no spool half without a runtime dir — never a
+	// relative-path stat against the process cwd.
+	if got := p.SpoolSig("run_1", dir, ""); got != spoolOnly {
+		t.Errorf("SpoolSig(home \"\") = %q; want the spool-only digest %q", got, spoolOnly)
+	}
+	if got := p.SpoolSig("run_1", "", home); got == "" || strings.Contains(got, "run_1.json") {
+		t.Errorf("SpoolSig(dir \"\") = %q; want the registry-only digest", got)
+	}
+
+	// A file in the runtime dir's old state/ subdir — where the Notification
+	// marker used to spool — no longer feeds the sig.
+	before := p.SpoolSig("run_1", dir, home)
+	writeSpool(t, dir, "state", "run_1", `{"notification_type":"idle_prompt"}`)
+	if p.SpoolSig("run_1", dir, home) != before {
+		t.Error("a state/ marker file must not change the sig (the Notification marker is gone)")
 	}
 }
 
@@ -412,12 +435,6 @@ func TestHookCommands_endToEndThroughSh(t *testing.T) {
 	runSh(s.Hooks.PostToolUse[0].Hooks[0].Command, "")
 	if _, err := os.Stat(dialogSpoolPath(dir, "run_e2e")); !os.IsNotExist(err) {
 		t.Errorf("PostToolUse hook did not clear the spool: %v", err)
-	}
-
-	// Notification: the marker spools and drives blockedState.
-	runSh(s.Hooks.Notification[0].Hooks[0].Command, `{"notification_type":"permission_prompt"}`)
-	if st, ok := p.blockedState("run_e2e", dir, ""); !ok || st != provider.StateNeedsInput {
-		t.Errorf("Notification hook marker = (%q,%v); want (needs_input,true)", st, ok)
 	}
 }
 

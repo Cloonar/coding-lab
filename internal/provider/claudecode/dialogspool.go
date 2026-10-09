@@ -13,14 +13,16 @@ package claudecode
 // Seam split (issue #92): the provider.LiveSignals capability carries only the
 // spool LIFECYCLE plumbing lab genuinely owns — Setup (arming the hooks at
 // spawn) and SpoolSig (the tailer's change detector). What the spooled
-// signals MEAN — the pending dialog, the blocked marker — is adapter-private:
-// pendingDialog and blockedState below are the composition inputs ReadChat
-// consults, never read across the seam. There is no GC method (issue #205):
-// every file this adapter spools lives in the run's PRIVATE runtime dir
-// (<state>/instances/<runID>/runtime), so spools, marker, settings file, and
-// any crash-orphaned atomic-write temp sibling are all wiped with the run's
-// tree at stop/rollback (instancehome.Wipe) or reaped by the orphan sweep
-// (instancehome.SweepAll).
+// signals MEAN — the pending dialog — is adapter-private: pendingDialog below
+// is the composition input ReadChat consults, never read across the seam. The
+// Notification hook and its blocked marker are gone (issue #79 decision 2):
+// "is the agent waiting / busy" now comes from the CLI's own session registry
+// status (registryStatus, chat.go), which SpoolSig digests alongside the
+// spool. There is no GC method (issue #205): every file this adapter spools
+// lives in the run's PRIVATE runtime dir (<state>/instances/<runID>/runtime),
+// so spools, settings file, and any crash-orphaned atomic-write temp sibling
+// are all wiped with the run's tree at stop/rollback (instancehome.Wipe) or
+// reaped by the orphan sweep (instancehome.SweepAll).
 //
 // Every exact string here is a fragile Claude Code coupling pinned in
 // internal/compat §9 (the hook payload shapes + the spool protocol), live-
@@ -42,15 +44,14 @@ import (
 var _ provider.LiveSignals = (*Provider)(nil)
 
 // Runtime spool layout under the run's private runtime dir (lab-owned; the
-// provider owns the per-run names). One dialog spool and one marker per run —
-// only one dialog can be pending per session, so a single overwritten file
-// per run suffices. Atomic-write temp siblings a crash orphans here
+// provider owns the per-run names). One dialog spool per run — only one
+// dialog can be pending per session, so a single overwritten file per run
+// suffices. Atomic-write temp siblings a crash orphans here
 // (`<runID>.json.tmp` from a hook, `.settings.tmp-*` from lab's settings
 // write) need no adapter-side GC: since issue #205 the whole dir is wiped
 // with the run's tree.
 const (
 	dialogsSubdir  = "dialogs" // <dir>/dialogs/<runID>.json  — the PreToolUse dialog spool
-	stateSubdir    = "state"   // <dir>/state/<runID>.json    — the Notification blocked marker
 	spoolExt       = ".json"
 	settingsPrefix = "settings." // <dir>/settings.<runID>.json — the per-run --settings file
 )
@@ -80,10 +81,6 @@ func dialogSpoolPath(dir, runID string) string {
 	return filepath.Join(dir, dialogsSubdir, runID+spoolExt)
 }
 
-func markerPath(dir, runID string) string {
-	return filepath.Join(dir, stateSubdir, runID+spoolExt)
-}
-
 func settingsFilePath(dir, runID string) string {
 	return filepath.Join(dir, settingsPrefix+runID+spoolExt)
 }
@@ -101,10 +98,13 @@ type hookSettings struct {
 	Env map[string]string `json:"env,omitempty"`
 }
 
+// hookGroups is the hooks block: the two dialog-capture events only. No
+// Notification group since issue #79 (decision 2) — its idle_prompt fired 60 s
+// after every turn end, background agents running or not, so its marker read
+// needs_input mid-wait; the session registry's status replaces it.
 type hookGroups struct {
-	PreToolUse   []hookMatcher `json:"PreToolUse,omitempty"`
-	PostToolUse  []hookMatcher `json:"PostToolUse,omitempty"`
-	Notification []hookMatcher `json:"Notification,omitempty"`
+	PreToolUse  []hookMatcher `json:"PreToolUse,omitempty"`
+	PostToolUse []hookMatcher `json:"PostToolUse,omitempty"`
 }
 
 type hookMatcher struct {
@@ -118,7 +118,7 @@ type hookCmd struct {
 }
 
 // Setup implements provider.LiveSignals: the per-run settings file that
-// arms the three dialog-capture hooks, plus the --settings flag pointing at it.
+// arms the two dialog-capture hooks, plus the --settings flag pointing at it.
 // The hook commands self-create their spool subdirs (mkdir -p) so a dialog that
 // opens after a lab restart still spools with no re-arming.
 //
@@ -128,8 +128,6 @@ type hookCmd struct {
 //     is never blocked (compat §9: only a PreToolUse exit code 2 blocks).
 //   - PostToolUse (same matcher): delete the dialog spool the instant the
 //     question resolves by any route (TUI, chat send-keys, or claude.ai).
-//   - Notification: atomic-write stdin (carrying notification_type) to the
-//     blocked marker, so residual blocked states drive the badge (decision 7).
 //
 // When opts.DialogTimeout > 0 the payload additionally carries an env block
 // setting CLAUDE_AFK_TIMEOUT_MS (compat §11) — the picker's auto-dismiss
@@ -137,7 +135,6 @@ type hookCmd struct {
 // CLI's own 60s default untouched (AFK runs).
 func (p *Provider) Setup(runID, dir string, opts provider.SetupOpts) (settings []byte, settingsPath string, args []string) {
 	spool := dialogSpoolPath(dir, runID)
-	marker := markerPath(dir, runID)
 	s := hookSettings{Hooks: hookGroups{
 		PreToolUse: []hookMatcher{{
 			Matcher: dialogMatcher,
@@ -146,9 +143,6 @@ func (p *Provider) Setup(runID, dir string, opts provider.SetupOpts) (settings [
 		PostToolUse: []hookMatcher{{
 			Matcher: dialogMatcher,
 			Hooks:   []hookCmd{{Type: "command", Command: removeCmd(spool)}},
-		}},
-		Notification: []hookMatcher{{
-			Hooks: []hookCmd{{Type: "command", Command: atomicWriteCmd(marker)}},
 		}},
 	}}
 	if opts.DialogTimeout > 0 {
@@ -216,8 +210,8 @@ func DialogFromHookPayload(payload []byte) (provider.Dialog, bool) {
 }
 
 // pendingDialog reads the dialog spool, maps it through the shared mapper, and
-// suppresses it once resolved or stale — one of the two adapter-private
-// composition inputs ReadChat consults (issue #92; no longer a seam method). A
+// suppresses it once resolved or stale — the spool's adapter-private
+// composition input ReadChat consults (issue #92; no longer a seam method). A
 // spool whose tool_use_id is already present in the transcript is answered (the
 // tool_use is flushed only on resolution) — return false so a stale spool never
 // re-opens an answered picker.
@@ -287,46 +281,32 @@ func transcriptSessionID(path string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// spooledNotification is the Notification payload subset the marker carries.
-type spooledNotification struct {
-	NotificationType string `json:"notification_type"`
-}
-
-// blockedState maps a live Notification marker's blocked notification_type to
-// StateNeedsInput — ReadChat's other adapter-private composition input (issue
-// #92; no longer a seam method), consulted only when no dialog is pending. The
-// marker is stale — the block resolved — once the transcript is written after
-// it (next activity), so a transcript mtime past the marker mtime suppresses
-// it.
-func (p *Provider) blockedState(runID, dir, transcriptPath string) (string, bool) {
-	mi, err := os.Stat(markerPath(dir, runID))
-	if err != nil {
-		return "", false
-	}
-	b, err := os.ReadFile(markerPath(dir, runID))
-	if err != nil {
-		return "", false
-	}
-	var n spooledNotification
-	if json.Unmarshal(b, &n) != nil || n.NotificationType == "" {
-		return "", false
-	}
-	if transcriptPath != "" {
-		if ti, err := os.Stat(transcriptPath); err == nil && ti.ModTime().After(mi.ModTime()) {
-			return "", false // the transcript advanced past the block
+// SpoolSig implements provider.LiveSignals: a cheap existence+mtime+size
+// digest of the dialog spool under dir AND of every session registry file
+// under home (<home>/.claude/sessions/*.json, compat §2), so the tailer
+// republishes when a dialog appears or the CLI flips its registry status
+// (busy → idle as background agents finish, a waiting prompt opening) while
+// the transcript stays byte-frozen (issue #79 decision 6). The whole registry
+// dir is digested rather than the selected entry: it is per-run (one live
+// claude, plus at most a SIGKILLed predecessor's leftover), a ReadDir is as
+// cheap as a selection, and a new entry appearing (a restarted CLI) must
+// republish too. An empty dir or home skips that half; "" when nothing exists.
+func (p *Provider) SpoolSig(runID, dir, home string) string {
+	var b strings.Builder
+	if dir != "" {
+		if fi, err := os.Stat(dialogSpoolPath(dir, runID)); err == nil {
+			fmt.Fprintf(&b, "%s:%d:%d;", filepath.Base(dialogSpoolPath(dir, runID)), fi.ModTime().UnixNano(), fi.Size())
 		}
 	}
-	return provider.StateNeedsInput, true
-}
-
-// SpoolSig implements provider.LiveSignals: a cheap existence+mtime+size digest
-// of the dialog spool and the marker, so the tailer republishes when a dialog
-// appears while the transcript stays byte-frozen. "" when neither file exists.
-func (p *Provider) SpoolSig(runID, dir string) string {
-	var b strings.Builder
-	for _, path := range []string{dialogSpoolPath(dir, runID), markerPath(dir, runID)} {
-		if fi, err := os.Stat(path); err == nil {
-			fmt.Fprintf(&b, "%s:%d:%d;", filepath.Base(path), fi.ModTime().UnixNano(), fi.Size())
+	if home != "" {
+		entries, _ := os.ReadDir(registryDirUnder(home)) // sorted by name: a stable digest
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			if fi, err := e.Info(); err == nil {
+				fmt.Fprintf(&b, "sessions/%s:%d:%d;", e.Name(), fi.ModTime().UnixNano(), fi.Size())
+			}
 		}
 	}
 	return b.String()

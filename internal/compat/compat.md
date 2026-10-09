@@ -31,7 +31,8 @@ provider-owned model/effort catalogs — is solved structurally in
 by issue #7 / ADR-0016 (transcript location + JSONL schema, the reply,
 dialog, and interrupt send-keys recipes), the hook contract §9 added by
 issue #17 / ADR-0020 (the PreToolUse/PostToolUse/Notification hook payloads +
-the spool protocol that captures a pending dialog live), the builtin
+the spool protocol that captures a pending dialog live — the Notification hook
+removed by issue #79 in favour of the §2 registry `status`), the builtin
 slash-command catalog §10 added by issue #51 (which also live-re-verified §7
 against 2.1.198 on 2026-07-08, generalizing the dialog recipes to
 multi-question forms and plan approval and fixing three live recipe bugs), the
@@ -543,17 +544,94 @@ Provenance legend:
   coupling; the snapshot (`TestCompat_SpawnArgvUltracodeSnapshot`) guards only
   that the builder still prepends it as one trailing positional.
 
-## 2. Deep-link registry (`~/.claude/sessions/<pid>.json`) — live (2.1.198)
+## 2. Deep-link registry (`~/.claude/sessions/<pid>.json`) — live (2.1.198); status live (2.1.284, 2026-10-09)
 
 - One file per live claude process; observed 2.1.198 shape captured in
   `testdata/registry-2.1.198.json` (pid/ids/timestamps anonymized, keys
   and value shapes verbatim). live.
 - Fields lab reads: `pid` (int), `cwd` (absolute string, kernel-reported),
-  `startedAt` (unix millis int64), `bridgeSessionId` (string). All present
-  on 2.1.198; all extra fields (`sessionId`, `procStart`, `version`,
-  `peerProtocol`, `kind`, `entrypoint`, `name`, `nameSource`, `status`,
-  `updatedAt`, `statusUpdatedAt`) are ignored. live; parse pinned by
-  `TestCompat_RegistryFixture_parses`.
+  `startedAt` (unix millis int64), `bridgeSessionId` (string), `sessionId`
+  (the transcript stem, §5 — read since ADR-0016) and, since issue #79,
+  `status`, `waitingFor` and `statusUpdatedAt` (below). All other keys are
+  ignored. live; parse pinned by `TestCompat_RegistryFixture_parses` (2.1.198
+  shape) and `TestCompat_RegistryFixtures284_parse` (2.1.284 shape).
+- **Session status (issue #79) — live 2.1.284, 2026-10-09.** One anonymized
+  capture per observed status in `testdata/registry-{busy,idle,waiting,waiting-question,shell}-2.1.284.json`
+  (pid/ids/paths/timestamps anonymized, keys and value shapes verbatim),
+  sampled every ~0.5 s off a real no-remote 2.1.284 session (haiku) driven
+  through a permission prompt, an `AskUserQuestion`, `/clear`, and background
+  `Agent` launches. Full 2.1.284 key set: `pid`, `sessionId`, `cwd`,
+  `startedAt`, `procStart`, `version`, `peerProtocol`, `peerFeatures`, `kind`,
+  `entrypoint`, `pidDomain`, `messagingSocketPath`, `name`, `nameSource`,
+  `nameSince`, `status`, `updatedAt`, `statusUpdatedAt`, `waitingFor` (no
+  `bridgeSessionId` — the capture ran without `--remote-control`, §12).
+  - `status` is CLI-maintained and rewritten on every transition. Observed
+    values: `busy` — a query is loading **or** delegated agents are still
+    active (a background `Agent` whose main turn already ended held `busy`
+    for its whole ~100 s wait, no flicker, `idle` only after the
+    task-notification turn finished; independently, a lab run's own entry
+    stayed `busy` for 565 consecutive 1 s samples while its turn had ended
+    with subagents pending); `waiting` — a prompt/dialog is on screen;
+    `idle` — neither; and a fourth, **`shell`** — only a background Bash shell
+    is still running (no turn, no agent). Sequences: permission prompt
+    `busy → waiting → busy → idle`; `AskUserQuestion`
+    `busy → waiting → busy → idle`; a background subagent's own permission
+    prompt raised after the main turn ended opens a `waiting` window inside
+    the `busy` wait.
+  - The **very first** write at startup carries **no `status` key** (`idle`
+    ~0.5 s later). The bundle's `working` key (query active) **never
+    appeared** on 2.1.284.
+  - `waitingFor` is **absent** (not null) unless `status` is `waiting`.
+    Observed: `"permission prompt"` (a permission dialog — also when a
+    background subagent raises it after the main turn ended) and
+    `"input needed"` (the `AskUserQuestion` picker). The bundle names more
+    (`"dialog open"`, `"worker request"`, `"sandbox request"`); lab treats the
+    value as free display text and never branches on it.
+  - `statusUpdatedAt` moves on **every** status write (including a busy→busy
+    re-entry); `updatedAt` also moves on non-status edits (e.g. the `/clear`
+    `sessionId` rotation, which leaves `statusUpdatedAt` untouched).
+  - **Lab's consumption** (`registryStatus` → `Provider.ReadChat`, issue #79
+    decision 1): (1) a spool or transcript-flushed pending dialog →
+    `question`; (2) `waiting` → `needs_input` with `waitingFor` as
+    `Chat.StateDetail`; (3) `busy` → `working`, **overriding** the fold;
+    (4) `idle` → the transcript fold decides, the issue #159 pending-work
+    hold kept — `idle` is never mapped straight to `needs_input` (it cannot
+    tell "turn just ended" from "fresh session"); (5) unusable → the fold
+    alone. **Unusable** = no live matching entry, `status` missing (the
+    first write) or outside {`busy`, `waiting`, `idle`} — which includes
+    `shell`: a background Bash (a dev server never exits) must not pin
+    `working`, exactly the issue #159 rule that keeps background Bash out of
+    the pending-work hold.
+  - **No age bound** on `statusUpdatedAt`: the status is event-driven, not a
+    heartbeat (an idle session legitimately keeps a minutes-old timestamp); a
+    dead CLI is caught by the pid filter and tmux liveness, never by a stale
+    timestamp.
+  - **Entry selection** = the very entry `LocateTranscript` uses
+    (`registryEntryForDir`: cwd match, live pid, newest `startedAt`, non-empty
+    `sessionId`), so transcript and state always come from one session. Only
+    the ACTIVE read consults it (`ReadSpec.Home` set); an ended run is
+    transcript-only. `SpoolSig` digests every `*.json` under the sessions dir
+    (mtime+size) so a status flip republishes while the transcript is
+    byte-frozen.
+  - 2.1.284 also writes a `<pid>.<sha256>.key` sibling (a peer-token secret)
+    beside each entry. Lab reads `*.json` only and **never** opens it; pinned
+    by the rig in `TestCompat_RegistryStatus_composesReadChat`, which plants a
+    `.key` file whose JSON body would select a louder entry if read.
+  - Composition pinned through the real `claudecode.New(...).ReadChat` by
+    `TestCompat_RegistryStatus_composesReadChat` (busy over a working fold and
+    over an assistant-text tail → working; the subagent sequence over
+    `transcript-asyncagent-live-2.1.204.jsonl` — busy + hold → working, idle +
+    hold → the fold's working, busy over the finished file → working, idle
+    over it → needs_input; waiting → needs_input + `"permission prompt"`;
+    waiting-question with no spool → needs_input + `"input needed"`; shell →
+    the fold alone; the status-less first write → the fold).
+  - **Container-namespace note (recorded, NOT fixed — issue #79 Notes).**
+    `pidAlive` (`deeplink.go`) runs `kill -0` on the host against the entry's
+    `pid`; for a container run that pid lives in the container's PID
+    namespace (observed `pid:2`) and happens to match a host kernel thread,
+    so the check passes by accident. Harmless because each run has its own
+    HOME and therefore its own registry dir; `pidDomain` (new on 2.1.284)
+    names the namespace if this ever needs fixing.
 - `bridgeSessionId` arrives already `session_`-prefixed on 2.1.198 (live);
   the `cse_` → `session_` normalization is kept for tolerance (claude's
   own `toCompatSessionId`; transcripts carry the `cse_` spelling).
@@ -815,13 +893,17 @@ section in one commit (issue #222).
 The embedded chat (issue #7 / ADR-0016) reads claude's live session
 transcript. Seven coupled facts, all in `internal/provider/claudecode`
 (`chat.go`, `chat_types.go`), pinned by `TestCompat_SlugForDir`,
-`TestCompat_TranscriptFixture_maps`, and `TestCompat_RegistryFixture_hasSessionID`:
+`TestCompat_TranscriptFixture_maps`, `TestCompat_RegistryFixture_hasSessionID`,
+and (2.1.284, issue #79) `TestCompat_TranscriptClear284_rendersOnce` +
+`TestCompat_ClearRotation_missingTranscript`:
 
 - **Transcript path**: `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`.
   The `sessionId` is read from the **same** registry file the deep link
   comes from (`~/.claude/sessions/<pid>.json`, §2) — formerly one of the
   ignored keys, now a fifth field on `RegistryEntry`. Located by the same
-  newest-live-cwd-match as the deep link (`sessionIDForDir`), so the chat
+  newest-live-cwd-match as the deep link (`registryEntryForDir` since issue
+  #79, formerly `sessionIDForDir` — the same entry the §2 status is read
+  from), so the chat
   reuses the proven capture pattern. live (2.1.198): the directories claude
   created under `~/.claude/projects` during the M3 probe matched the slug
   rule exactly.
@@ -831,7 +913,8 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   real observed directory names. live.
 - **JSONL event grammar**: one event per line; the fields lab maps are a
   small subset (`type`, `subtype`, `content`, `timestamp`, `isMeta`,
-  `isApiErrorMessage`, `message.{role,content}` where content is a
+  `isApiErrorMessage`, `uuid`/`parentUuid` + `commandRun` (the 2.1.284
+  local-command record, below — issue #79), `message.{role,content}` where content is a
   string or a `[]block` of `text|thinking|tool_use|tool_result`, and
   `message.usage` on assistant events — the context meter, next bullet). A
   failed tool is flagged by `is_error` **on the `tool_result` block itself**
@@ -907,11 +990,30 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   text + stdout lifecycle pair, `TestCompat_TranscriptFixture_maps`;
   the state edges in `TestCompat_TranscriptEcho_stateNeutral` and
   `claudecode.TestParseTranscript_commandEchoNeverDrivesState`).
+
+  **2.1.284: the output moved to a `system`/`local_command` event (issue #79,
+  live 2026-10-09).** A local command now writes the user `<command-name>`
+  echo (unchanged, still parsed by `commandEcho`) followed by
+  `{"type":"system","subtype":"local_command","content":"<local-command-stdout>…</local-command-stdout>","commandRun":{"command":"clear","args":""},"parentUuid":<the echo's uuid>,"uuid":…,"level":"info","isMeta":false,…}`
+  — `commandRun.command` carries NO slash; the output rides in top-level
+  `content`, no longer in a user line. Lab renders it in `foldTranscript`'s
+  `system` case, state-neutral exactly like the user echo (never touches
+  `lastKey`): a non-empty trimmed `<local-command-stdout>` body → a
+  (truncated) lifecycle message; the command line (`"/" + command` [+
+  `" " + args`]) → a user text message **only when** the event's
+  `parentUuid` does not name a user echo that already rendered it — so
+  `/clear` reads as exactly one `/clear` line, and a command whose only trace
+  is the system event still shows. A non-object `commandRun` never drops the
+  line (decoded lazily). Pinned by `TestCompat_TranscriptClear284_rendersOnce`
+  (the live 5-line capture `testdata/transcript-clear-live-2.1.284.jsonl`)
+  and `claudecode.TestParseTranscript_localCommandSystemEcho_{clearSequence,lone}`.
 - **Read-through only**: the transcript file is the source of truth; lab
   persists only `runs.transcript_path` (captured async by cwd-match, the
   `deep_link_url` pattern) so ended runs stay readable while claude retains
-  the file. A vanished file is `provider.ErrTranscriptGone` → the UI's
-  "transcript no longer available" state.
+  the file. A vanished file on an ENDED read is `provider.ErrTranscriptGone`
+  → the UI's "transcript no longer available" state; on an ACTIVE read a
+  missing file is the fresh post-`/clear` identity not yet written (rotation
+  bullet below, issue #79) — an empty idle chat, never an error.
 - **Flush-on-resolve (pending dialogs are invisible live)**: a pending
   `AskUserQuestion` / `ExitPlanMode` `tool_use` is **not** written to the JSONL
   while it is pending; the `tool_use` **and** its `tool_result` are flushed
@@ -1014,6 +1116,28 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
   is absent from the new file), so `PendingDialog` also treats a spool older than
   the current transcript as stale (§9). `/compact` keeps the **same** sessionId
   and appends to the same file, so it is **unaffected** (issue #34).
+
+  **2.1.284 `/clear` sequence + the rotation rule (issue #79 decision 5, live
+  2026-10-09).** The registry's `sessionId` rotates **at clear time** —
+  within ~250 ms of the Enter, before any next message — with `status`
+  staying `idle` (`statusUpdatedAt` unchanged, `updatedAt` moved; §2), so no
+  SessionStart hook is needed. On that capture the NEW transcript existed at
+  once with five lines: `mode`, `file-history-snapshot`, an `isMeta` user
+  `<local-command-caveat>` line, the user `<command-name>/clear</command-name>`
+  echo, and the `system`/`local_command` event (empty stdout, `parentUuid` →
+  the echo) — `testdata/transcript-clear-live-2.1.284.jsonl`; the OLD
+  transcript got a single `cost-state` line appended. The diagnosed field case
+  saw the fresh file **not exist** until the next message, so lab tolerates
+  both: **`sessionId` rotates at clear time; the fresh transcript may not
+  exist yet — `LocateTranscript` returns the computed path regardless (no
+  `os.Stat` gate any more; the old gate kept core on the old file, whose
+  assistant-text tail read `needs_input`), an ACTIVE read
+  (`RuntimeDir`/`Home` set) of a missing file is an empty idle chat, an ENDED
+  read is `ErrTranscriptGone`.** Pinned by
+  `TestCompat_ClearRotation_missingTranscript` (rotation → fresh path →
+  active idle-empty / ended ErrTranscriptGone) and
+  `TestCompat_TranscriptClear284_rendersOnce` (the 5 lines + registry idle →
+  idle, one `/clear`).
 - **Async background tasks (Agent/Workflow) + task-notification delivery —
   live (2.1.206, 2026-07-13; wild-verified 2.1.198/2.1.204; issue #159).**
   Claude Code runs background work whose completion re-invokes the model, so
@@ -1073,9 +1197,13 @@ transcript. Seven coupled facts, all in `internal/provider/claudecode`
     or delivered notification means the CLI is about to re-invoke the model,
     the same "(about to be) working" philosophy user:text encodes — closing
     the needs_input micro-window between enqueue and delivery. Break-through
-    stays STRUCTURED-ONLY: a live spool dialog or blocked marker (§9, via
-    `ReadChat`'s overlay) outranks the hold, so a waiting permission prompt
-    or question never hides behind "working on background tasks".
+    stays STRUCTURED-ONLY: a live spool dialog (§9) or the registry's
+    `waiting` status (§2 — the blocked marker's successor since issue #79),
+    via `ReadChat`'s layered overlay, outranks the hold, so a waiting
+    permission prompt or question never hides behind "working on background
+    tasks". The registry's `busy` likewise covers the hold's blind spots (it
+    stays `busy` for the whole background-agent wait, §2); under `idle` the
+    hold still decides.
   - **Provenance + canary.** Captured fixtures — field names, key sets, ids,
     and event order verbatim, long values elided:
     `transcript-asyncagent-live-2.1.204.jsonl` (wild, mined from a real
@@ -1512,15 +1640,38 @@ both are recorded so the next sweep does not re-investigate them):
   interrupt that does NOT auto-resume, this env knob is the seam, and it only
   honors falsy values from 2.1.221 onward.
 
-## 9. Dialog-capture hook contract — live end-to-end (2.1.198)
+## 9. Dialog-capture hook contract — live end-to-end (2.1.198); Notification hook removed (issue #79, 2026-10-09)
 
 Because a pending dialog is invisible in the transcript live (§5,
 flush-on-resolve), lab captures it from Claude Code **hooks** injected per run.
 This is issue #17 / ADR-0020's fifth pinned coupling. Implementation:
 `internal/provider/claudecode/dialogspool.go`; pinned by
-`TestCompat_HookPayload_maps` against the Appendix fixtures. Verified end-to-end
-live in a throwaway 2.1.198 session on 2026-07-07 (the throwaway session is the
-§9 fixture ground truth).
+`TestCompat_HookPayload_maps` against the Appendix fixtures and
+`TestCompat_HookSettings_noNotification` (the settings shape below). Verified
+end-to-end live in a throwaway 2.1.198 session on 2026-07-07 (the throwaway
+session is the §9 fixture ground truth).
+
+**Notification hook + blocked marker REMOVED (issue #79, 2026-10-09).** Lab
+used to arm a third hook, `Notification`, atomically spooling its payload to a
+blocked marker (`<runtime>/state/<runID>.json`) that forced `needs_input` for
+any non-empty `notification_type`. Dropped entirely — no hook, no marker, no
+whitelisted fallback — because on the pinned CLI it was wrong in three ways:
+(1) `idle_prompt` fires **60 s after any turn end, background agents running
+or not** (reproduced live inside a lab run: turn ended 11:46:42 with a
+subagent pending, the fold held `working`, the marker landed at 11:47:41 and
+flipped the run to `needs_input` + a spurious push; the CLI's idle gate only
+suppresses for `/loop` wakeups); (2) the 2.1.284 `notification_type` list is
+far wider than the two values this section pinned (`permission_prompt,
+idle_prompt, auth_success, elicitation_dialog, agent_needs_input,
+agent_completed, elicitation_url_dialog, worker_permission_prompt,
+push_notification, …`), and a non-empty type was all the marker checked;
+(3) it **outlived `/clear`** — the clear handler does not reset the CLI's
+last-query time, so a clear within 60 s of the last turn still got an
+`idle_prompt` marker newer than the fresh transcript → `needs_input` on an
+empty conversation. Replaced by the registry's own `status`/`waitingFor` (§2),
+composed in `ReadChat`; `SpoolSig` digests the registry instead of the marker.
+`messageIdleNotifThresholdMs` (the CLI's idle-notification tuning) is
+irrelevant now that the hook is gone.
 
 **Injection.** `claude --settings <file>` accepts a **file path** and merges the
 file's `hooks` block **additively** over the repo-shipped `.claude` settings
@@ -1540,18 +1691,20 @@ auto-dismiss override, §11), merged the same way.
     "PreToolUse":  [{ "matcher": "AskUserQuestion|ExitPlanMode",
                       "hooks": [{ "type": "command", "command": "mkdir -p <dir> && cat > <spool>.tmp && mv <spool>.tmp <spool>" }] }],
     "PostToolUse": [{ "matcher": "AskUserQuestion|ExitPlanMode",
-                      "hooks": [{ "type": "command", "command": "rm -f <spool>" }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "mkdir -p <dir> && cat > <marker>.tmp && mv <marker>.tmp <marker>" }] }]
-  }
+                      "hooks": [{ "type": "command", "command": "rm -f <spool>" }] }]
+  },
+  "env": { "CLAUDE_AFK_TIMEOUT_MS": "<ms>" }
 }
 ```
 
+`hooks` carries exactly `PreToolUse` + `PostToolUse` (no `Notification` since
+issue #79); `env` is present only when a dialog timeout is set (§11).
+
 - The `matcher` is a regex over the **tool name** for Pre/PostToolUse;
-  `AskUserQuestion|ExitPlanMode` is an alternation. The Notification matcher (a
-  filter over `notification_type`) is omitted → matches all notification types.
+  `AskUserQuestion|ExitPlanMode` is an alternation.
 - Each `command` runs under `/bin/sh`, receiving the hook event JSON on
-  **stdin**. The Pre/Notification commands atomically write stdin (temp +
-  rename) to a per-run spool; the Post command deletes it.
+  **stdin**. The Pre command atomically writes stdin (temp + rename) to a
+  per-run spool; the Post command deletes it.
 - **The PreToolUse hook is purely observational**: it exits 0 with no stdout, so
   the tool proceeds normally and the local operator's TUI picker still shows.
   Only a PreToolUse **exit code 2** (or a JSON `permissionDecision:"deny"`)
@@ -1565,8 +1718,6 @@ auto-dismiss override, §11), merged the same way.
   overwritten (one dialog pending per session). Fields lab reads: `tool_name`,
   `tool_use_id`, `tool_input` (the exact structured input `dialogFromToolUse`
   also reads from a transcript `tool_use` block — one mapper, two sources).
-- Blocked marker: `<runtime>/state/<runID>.json` — the whole Notification
-  payload; field lab reads: `notification_type`.
 - Per-run settings: `<runtime>/settings.<runID>.json` — the `--settings` target.
 - **Answer guard / resolution.** A spooled dialog is suppressed once its
   `tool_use_id` appears in the transcript (the retro-flush landed = resolved);
@@ -1581,8 +1732,10 @@ auto-dismiss override, §11), merged the same way.
   — the former spool-older-than-transcript mtime rule suppressed a genuinely
   pending dialog the moment the operator queued a message (found live
   2026-07-10). A payload with no session identity degrades to the old mtime
-  backstop. The chat GCs the three per-run files once the run is no longer
-  active (an active run's spool survives a lab restart — the file persists).
+  backstop. The per-run files die with the run's private tree at
+  stop/rollback (issue #205); an active run's spool survives a lab restart —
+  the file persists. (The former blocked marker, `<runtime>/state/<runID>.json`,
+  is gone since issue #79 — see above.)
 
 **Appendix payloads (2.1.198 live, ids/paths anonymized — the fixture ground
 truth):**
@@ -1598,7 +1751,8 @@ PreToolUse:
        {"label":"Option B","description":"The second test option."},
        {"label":"Option C","description":"The third test option."}]}]}}
 
-Notification:
+Notification (HISTORICAL — no longer armed since issue #79; kept as the
+2.1.198 record of what the removed blocked marker carried):
   {"hook_event_name":"Notification","notification_type":"permission_prompt",
    "message":"Claude needs your permission","session_id":"…","transcript_path":"…","cwd":"…"}
 
@@ -1611,7 +1765,7 @@ PostToolUse:
 Provenance: hook schema + `--settings` semantics read from the 2.1.198 docs and
 `claude --help`; the payload shapes captured live in the throwaway session.
 When a Claude Code upgrade breaks live dialog capture, re-verify: the settings
-`hooks` shape, the three payload field names, the observational exit-0 contract,
+`hooks` shape, the PreToolUse/PostToolUse payload field names, the observational exit-0 contract,
 and that `--settings` still merges additively — then update the port, the
 fixtures, the tests, and this section in one commit.
 
@@ -2123,7 +2277,7 @@ run B (control) — same shape PLUS: "bridgeSessionId":"session_01GpkNSJvnpoL7uD
 resolved run A to
 `~/.claude/projects/-tmp-…-scratchpad-spike163-wtA/3ae51d23-ce25-470d-a474-2f2fb096970c.jsonl`
 — the §5 rule (`<projects>/<cwd-slug>/<sessionId>.jsonl`) verbatim, located by
-the same `sessionIDForDir` registry pass, with no bridge and no deep link in
+the same `sessionIDForDir` registry pass (`registryEntryForDir` since issue #79), with no bridge and no deep link in
 play. The JSONL line-type sequence differs from the control only by the
 **two remote-only lines** the bridge adds — a `bridge-session` line and the
 `system` line lab renders as the `/remote-control is active · Continue here…`
@@ -2152,7 +2306,9 @@ run A (a mid-session reply pasted with lab's §6 recipe, prompting an
    "tool_use_id":"toolu_01SC5vUxD8M6tCjftn114ALX"}
   ```
 
-- **Notification → blocked marker**, in BOTH arms: each run's
+- **Notification → blocked marker** (historical — the hook and marker were
+  removed by issue #79, §9; this `idle_prompt` landing a minute after the turn
+  end is the very behavior that made it wrong), in BOTH arms: each run's
   `runtime/state/<runID>.json` was written unprompted within a minute of its
   seed turn ending (turn end 00:46:55 +02:00, marker mtime 00:47) carrying
   `{"notification_type":"idle_prompt","message":"Claude is waiting for your
@@ -2327,6 +2483,27 @@ left byte-identical (no rotate-on-every-call regression). The unit tests
 `CredentialsSig`-based rotation-detection path against a stubbed binary, but the
 trigger itself is a live coupling — re-run this by hand when the poke stops
 refreshing a near-expiry store or starts churning a valid one.
+
+**Registry status + `/clear` rotation re-verification (issue #79).** No
+automated live test — re-verified BY HAND after a Claude Code upgrade, the way
+the 2.1.284 pin was (2026-10-09): spawn a no-remote claude (haiku) in a
+scratch dir under tmux and sample `~/.claude/sessions/<pid>.json` plus the
+`projects/<slug>/` listing every ~0.5 s while driving (1) a Bash call WITHOUT
+`--permission-mode auto` (expect `busy → waiting("permission prompt") → busy →
+idle`), (2) an `AskUserQuestion` (`waiting("input needed")`), (3) `/clear`
+(expect `sessionId` to rotate within ~1 s with `status` unchanged; note
+whether the fresh `<sessionId>.jsonl` exists before the next message and what
+its lines are), and (4) a background `Agent` whose main turn ends at once
+(expect `busy` for the whole wait, `idle` only after the notification turn).
+A new `status` value, a renamed `waitingFor`, a lagging `sessionId`
+rotation, or a reshaped `system`/`local_command` line means: update the
+fixtures (`registry-*-2.1.284.json`, `transcript-clear-live-*.jsonl`), the
+port (`registryStatus`, `foldTranscript`), `TestCompat_RegistryFixtures284_parse`
+/ `TestCompat_RegistryStatus_composesReadChat` /
+`TestCompat_TranscriptClear284_rendersOnce` /
+`TestCompat_ClearRotation_missingTranscript`, and §2/§5 together. If the
+rotation ever lags the clear, the issue #79 fallback is a SessionStart hook on
+the `clear` source (payload `session_id`/`transcript_path`), pinned in §9.
 
 When any pin above breaks: update the claudecode port, the fixture, the
 affected tests, and this document in the same commit.

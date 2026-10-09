@@ -122,18 +122,27 @@ func (g *notifyGate) buildPayload(chat provider.Chat) Notification {
 	}
 }
 
-// notifyBody picks the notification body by the issue #99 precedence:
+// notifyBody picks the notification body by the issue #99 precedence,
+// extended by issue #79:
 //  1. the live PendingDialog prompt, when non-blank;
-//  2. else the newest VISIBLE assistant text (backward scan, mirroring
+//  2. else the adapter's Chat.StateDetail, when non-blank (issue #79 decision
+//     4 — claude-code: the registry's waitingFor, e.g. a permission prompt's
+//     own text): it names what the agent is blocked on RIGHT NOW, which a
+//     prompt lab cannot render (a permission request, an elicitation) has no
+//     other way to say, and the stale assistant text below would misdescribe;
+//  3. else the newest VISIBLE assistant text (backward scan, mirroring
 //     lastDialog's style in chat.go) — thinking blocks are hidden-by-default
 //     chain-of-thought and must never reach a lock screen, and the text-kind
 //     pin keeps any future non-text kind that carries a Role out too;
-//  3. else the literal fallback.
+//  4. else the literal fallback.
 func notifyBody(chat provider.Chat) string {
 	if chat.PendingDialog != nil {
 		if p := strings.TrimSpace(chat.PendingDialog.Prompt); p != "" {
 			return p
 		}
+	}
+	if d := strings.TrimSpace(chat.StateDetail); d != "" {
+		return d
 	}
 	for i := len(chat.Messages) - 1; i >= 0; i-- {
 		m := chat.Messages[i]

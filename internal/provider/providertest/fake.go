@@ -104,16 +104,19 @@ type Fake struct {
 	// LiveSignals lifecycle capability (issue #17 / ADR-0020, narrowed in
 	// issue #92 and again in #205 — no GC method; the per-run runtime dir is
 	// wiped with the run). hookArgs/hookSettings script Setup; spoolSig
-	// scripts the change digest; pendingDialog/blocked script the live
-	// signals ReadChat composes (the fake's adapter-private state, like
-	// claudecode's spool); hookCalls records Setup runIDs, setupOpts its
-	// received opts (issue #124).
+	// scripts the change digest and spoolSigHomes records the home each
+	// SpoolSig call received (issue #79); pendingDialog/blocked/stateDetail
+	// script the live signals ReadChat composes (the fake's adapter-private
+	// state, like claudecode's spool + registry status); hookCalls records
+	// Setup runIDs, setupOpts its received opts (issue #124).
 	hookSettings  []byte
 	hookArgs      []string
 	pendingDialog *provider.Dialog
 	blocked       string
 	blockedOK     bool
+	stateDetail   string
 	spoolSig      string
+	spoolSigHomes []string
 	hookCalls     []string
 	setupOpts     []provider.SetupOpts
 }
@@ -121,10 +124,14 @@ type Fake struct {
 // ReadCall is one recorded ReadChat invocation — the assertion surface for
 // what core passes down the seam (issue #92: runtime dir only for active
 // runs, the resolved transcript path, the run id keying the spool; issue #243:
-// the run's spawn-time model, carried for context-usage composition).
+// the run's spawn-time model, carried for context-usage composition; issue
+// #79: the instance HOME and worktree, active runs only, keying the agent's
+// state registry).
 type ReadCall struct {
 	RunID          string
 	RuntimeDir     string
+	Home           string
+	Worktree       string
 	TranscriptPath string
 	Model          string
 }
@@ -546,17 +553,21 @@ func (f *Fake) LocateTranscript(_ context.Context, _, _, home string) (string, e
 
 // ReadChat returns the scripted transcript base composed with the scripted
 // live signals, mirroring the adapter-owned precedence a real adapter applies
-// (issue #92): a scripted pending dialog → StateQuestion + Chat.PendingDialog;
-// else a scripted question state stands on its own (the dormant transcript
-// fallback); else a scripted blocked state overrides. transcriptPath "" is
-// the pre-transcript read (an idle empty base, never an error, per the seam
-// contract); runtimeDir "" turns the signals off (transcript-only). The
-// scripted readErr (e.g. provider.ErrTranscriptGone) fires only for a
-// non-empty path, like a real adapter's vanished-file open.
+// (issues #92/#79): a scripted pending dialog → StateQuestion +
+// Chat.PendingDialog; else a scripted question state stands on its own (the
+// dormant transcript fallback); else a scripted blocked state overrides (the
+// stand-in for claudecode's registry waiting/busy layers). A scripted state
+// detail rides any composed question/needs_input (claudecode's waitingFor).
+// transcriptPath "" is the pre-transcript read (an idle empty base, never an
+// error, per the seam contract); runtimeDir AND home "" turn the signals off
+// (the transcript-only ended read). The scripted readErr (e.g.
+// provider.ErrTranscriptGone) fires only for a non-empty path, like a real
+// adapter's vanished-file open.
 func (f *Fake) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.readCalls = append(f.readCalls, ReadCall{RunID: spec.RunID, RuntimeDir: spec.RuntimeDir, TranscriptPath: spec.TranscriptPath, Model: spec.Model})
+	f.readCalls = append(f.readCalls, ReadCall{RunID: spec.RunID, RuntimeDir: spec.RuntimeDir,
+		Home: spec.Home, Worktree: spec.Worktree, TranscriptPath: spec.TranscriptPath, Model: spec.Model})
 	var chat provider.Chat
 	switch {
 	case spec.TranscriptPath == "":
@@ -566,20 +577,20 @@ func (f *Fake) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	default:
 		chat = f.chat
 	}
-	if spec.RuntimeDir == "" {
+	if spec.RuntimeDir == "" && spec.Home == "" {
 		return chat, nil
 	}
-	if f.pendingDialog != nil {
+	switch {
+	case f.pendingDialog != nil:
 		d := *f.pendingDialog
 		chat.State = provider.StateQuestion
 		chat.PendingDialog = &d
-		return chat, nil
-	}
-	if chat.State == provider.StateQuestion {
-		return chat, nil
-	}
-	if f.blockedOK {
+	case chat.State == provider.StateQuestion:
+	case f.blockedOK:
 		chat.State = f.blocked
+	}
+	if chat.State == provider.StateQuestion || chat.State == provider.StateNeedsInput {
+		chat.StateDetail = f.stateDetail
 	}
 	return chat, nil
 }
@@ -647,11 +658,21 @@ func (f *Fake) Setup(runID, dir string, opts provider.SetupOpts) ([]byte, string
 	return settings, path, args
 }
 
-// SpoolSig returns the scripted spool signature.
-func (f *Fake) SpoolSig(_, _ string) string {
+// SpoolSig records the home it was passed and returns the scripted spool
+// signature.
+func (f *Fake) SpoolSig(_, _, home string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.spoolSigHomes = append(f.spoolSigHomes, home)
 	return f.spoolSig
+}
+
+// SpoolSigHomes returns the home argument of every SpoolSig call, in order
+// (issue #79: the tailer digests the agent's registry under the run's HOME).
+func (f *Fake) SpoolSigHomes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.spoolSigHomes...)
 }
 
 // SetPendingDialog scripts the live pending dialog ReadChat composes when a
@@ -663,13 +684,22 @@ func (f *Fake) SetPendingDialog(d *provider.Dialog) {
 	f.pendingDialog = d
 }
 
-// SetBlockedState scripts the blocked state ReadChat composes when a runtime
-// dir is passed and no dialog wins — the stand-in for claudecode's
-// Notification marker.
+// SetBlockedState scripts the state ReadChat composes over the base when
+// live signals are on and no dialog wins — the stand-in for claudecode's
+// registry status layers (waiting → needs_input, busy → working; issue #79).
 func (f *Fake) SetBlockedState(state string, ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.blocked, f.blockedOK = state, ok
+}
+
+// SetStateDetail scripts the Chat.StateDetail ReadChat attaches to a composed
+// question/needs_input when live signals are on — the stand-in for
+// claudecode's registry waitingFor (issue #79). "" → none.
+func (f *Fake) SetStateDetail(detail string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stateDetail = detail
 }
 
 // SetSpoolSig scripts the spool change-detector signature.

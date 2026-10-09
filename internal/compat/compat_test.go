@@ -1,21 +1,29 @@
 package compat
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
 
-// Registry-file coupling (compat.md §2): the parser must extract exactly
-// the four fields lab reads from a real 2.1.198-shaped registry file and
-// ignore every observed extra.
+// Registry-file coupling (compat.md §2): the parser must extract the deep-link
+// fields lab reads from a real 2.1.198-shaped registry file and ignore every
+// observed extra (the 2.1.284 status fields are pinned by
+// TestCompat_RegistryFixtures284_parse).
 func TestCompat_RegistryFixture_parses(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("testdata", "registry-2.1.198.json"))
 	if err != nil {
@@ -52,6 +60,245 @@ func TestCompat_BridgeURLNormalization(t *testing.T) {
 	}
 	if got, want := claudecode.BridgeURL("session_abc123"), "https://claude.ai/code/session_abc123"; got != want {
 		t.Errorf("BridgeURL(session_) = %q; want %q", got, want)
+	}
+}
+
+// Registry status coupling (compat.md §2, issue #79): one live 2.1.284
+// registry capture per observed status (2026-10-09, anonymized — pid, ids,
+// paths, timestamps; keys and value shapes verbatim) parses into
+// RegistryEntry with the status/waitingFor/sessionId lab composes state from.
+// waitingFor is ABSENT (not null) unless waiting; the full key set is pinned
+// on the waiting capture so a renamed or dropped field fails here first.
+func TestCompat_RegistryFixtures284_parse(t *testing.T) {
+	cases := []struct {
+		file, status, waitingFor, sessionID string
+	}{
+		{"registry-busy-2.1.284.json", "busy", "", "33333333-3333-4333-8333-333333333333"},
+		{"registry-idle-2.1.284.json", "idle", "", "11111111-1111-4111-8111-111111111111"},
+		{"registry-waiting-2.1.284.json", "waiting", "permission prompt", "11111111-1111-4111-8111-111111111111"},
+		{"registry-waiting-question-2.1.284.json", "waiting", "input needed", "22222222-2222-4222-8222-222222222222"},
+		{"registry-shell-2.1.284.json", "shell", "", "33333333-3333-4333-8333-333333333333"},
+	}
+	for _, tc := range cases {
+		b, err := os.ReadFile(filepath.Join("testdata", tc.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e claudecode.RegistryEntry
+		if err := json.Unmarshal(b, &e); err != nil {
+			t.Fatalf("%s does not parse: %v", tc.file, err)
+		}
+		if e.Status != tc.status || e.WaitingFor != tc.waitingFor || e.SessionID != tc.sessionID {
+			t.Errorf("%s = {status:%q waitingFor:%q sessionId:%q}; want {%q %q %q}",
+				tc.file, e.Status, e.WaitingFor, e.SessionID, tc.status, tc.waitingFor, tc.sessionID)
+		}
+		if e.PID == 0 || e.Cwd == "" || e.StartedAt == 0 || e.StatusUpdatedAt == 0 {
+			t.Errorf("%s = %+v; want pid/cwd/startedAt/statusUpdatedAt all present", tc.file, e)
+		}
+		if e.BridgeSessionID != "" {
+			t.Errorf("%s: bridgeSessionId = %q; the no-remote capture carries none", tc.file, e.BridgeSessionID)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, has := raw["waitingFor"]; has != (tc.status == "waiting") {
+			t.Errorf("%s: waitingFor key present=%v; want present only while waiting (absent, never null, otherwise)", tc.file, has)
+		}
+		if _, has := raw["working"]; has {
+			t.Errorf("%s: a `working` key appeared — never observed on 2.1.284; re-read §2", tc.file)
+		}
+	}
+
+	b, err := os.ReadFile(filepath.Join("testdata", "registry-waiting-2.1.284.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	want := []string{"cwd", "entrypoint", "kind", "messagingSocketPath", "name", "nameSince", "nameSource",
+		"peerFeatures", "peerProtocol", "pid", "pidDomain", "procStart", "sessionId", "startedAt", "status",
+		"statusUpdatedAt", "updatedAt", "version", "waitingFor"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("2.1.284 registry key set drifted:\n got  %v\n want %v", keys, want)
+	}
+}
+
+// registryRig is a run's private instance HOME holding ONE live session
+// registry entry built from a 2.1.284 capture (compat §2): pid rewritten to
+// this test process (so the pidAlive filter passes), cwd to a temp worktree,
+// plus any overrides. A sibling `<pid>.<sha256>.key` file — the CLI's peer
+// token, which sits beside the entry on 2.1.284 — carries a JSON body that
+// would select a different, louder entry if lab ever read it: only `*.json`
+// is read. The provider is the real claudecode.New one.
+type registryRig struct {
+	p        *claudecode.Provider
+	home, wt string
+}
+
+func newRegistryRig(t *testing.T, fixture string, overrides map[string]any) *registryRig {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(b, &entry); err != nil {
+		t.Fatal(err)
+	}
+	r := &registryRig{home: t.TempDir(), wt: filepath.Join(t.TempDir(), "worktree")}
+	entry["pid"] = os.Getpid()
+	entry["cwd"] = r.wt
+	for k, v := range overrides {
+		entry[k] = v
+	}
+	r.writeEntry(t, entry)
+
+	keyBody, _ := json.Marshal(map[string]any{
+		"pid": os.Getpid(), "cwd": r.wt, "sessionId": "from-the-key-file",
+		"startedAt": int64(1) << 62, "status": "waiting", "waitingFor": "key file was read",
+	})
+	sessions := filepath.Join(r.home, ".claude", "sessions")
+	keyName := strconv.Itoa(os.Getpid()) + ".0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.key"
+	if err := os.WriteFile(filepath.Join(sessions, keyName), keyBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r.p, err = claudecode.New(claudecode.Options{
+		ClaudeBin: "claude-not-invoked", ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
+		LoginDir: t.TempDir(), Runner: tmuxx.NewFake(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("claudecode.New: %v", err)
+	}
+	return r
+}
+
+// writeEntry (re)writes the rig's registry entry, as the CLI does on every
+// status transition and on /clear's sessionId rotation.
+func (r *registryRig) writeEntry(t *testing.T, entry map[string]any) {
+	t.Helper()
+	sessions := filepath.Join(r.home, ".claude", "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessions, strconv.Itoa(os.Getpid())+".json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// locate is the real LocateTranscript against the rig's HOME.
+func (r *registryRig) locate(t *testing.T) string {
+	t.Helper()
+	path, err := r.p.LocateTranscript(context.Background(), "repo~run", r.wt, r.home)
+	if err != nil || path == "" {
+		t.Fatalf("LocateTranscript = (%q, %v); want the entry's computed transcript path", path, err)
+	}
+	return path
+}
+
+// read writes body (nil: leave the file absent) at the located transcript
+// path and runs the real ReadChat as core does for an ACTIVE run.
+func (r *registryRig) read(t *testing.T, body []byte) provider.Chat {
+	t.Helper()
+	path := r.locate(t)
+	if body != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chat, err := r.p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: t.TempDir(),
+		Home: r.home, Worktree: r.wt, TranscriptPath: path})
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	return chat
+}
+
+// fixtureLines returns the first n lines of a testdata JSONL (n < 0: all).
+func fixtureLines(t *testing.T, name string, n int) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if n >= 0 {
+		lines = lines[:n]
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// Registry-driven state composition (compat.md §2, issue #79 decision 1)
+// through the REAL ReadChat, each live 2.1.284 registry capture over a
+// transcript whose fold is known: busy overrides the fold to working (the
+// background-subagent fix — busy held for the whole ~100 s subagent wait
+// live); idle hands the decision to the fold, the issue #159 pending-work hold
+// included; waiting reads needs_input with waitingFor as StateDetail when no
+// dialog is composed; `shell` (a background Bash only) is not a usable status
+// — the fold alone, consistent with #159 never holding on background Bash.
+func TestCompat_RegistryStatus_composesReadChat(t *testing.T) {
+	var (
+		userTail      = []byte(`{"type":"user","message":{"role":"user","content":"go"}}` + "\n")
+		assistantTail = append(append([]byte{}, userTail...),
+			[]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`+"\n")...)
+		agentAsync = "transcript-asyncagent-live-2.1.204.jsonl"
+		// launch → async_launched → turn-end text: the fold holds working.
+		agentHeld = fixtureLines(t, agentAsync, 3)
+		// + the completion notification and the resume text: the fold says
+		// needs_input — the conversation truly ended.
+		agentDone = fixtureLines(t, agentAsync, -1)
+	)
+	cases := []struct {
+		name, fixture string
+		body          []byte
+		wantState     string
+		wantDetail    string
+	}{
+		{"busy + working fold", "registry-busy-2.1.284.json", userTail, provider.StateWorking, ""},
+		{"busy + assistant-text tail (fold needs_input)", "registry-busy-2.1.284.json", assistantTail, provider.StateWorking, ""},
+		{"subagent: busy + pending-work hold", "registry-busy-2.1.284.json", agentHeld, provider.StateWorking, ""},
+		{"subagent: idle + pending-work hold → the fold", "registry-idle-2.1.284.json", agentHeld, provider.StateWorking, ""},
+		{"subagent: busy while the notification turn runs", "registry-busy-2.1.284.json", agentDone, provider.StateWorking, ""},
+		{"completed conversation + idle", "registry-idle-2.1.284.json", agentDone, provider.StateNeedsInput, ""},
+		{"completed conversation (assistant text) + idle", "registry-idle-2.1.284.json", assistantTail, provider.StateNeedsInput, ""},
+		{"permission prompt", "registry-waiting-2.1.284.json", userTail, provider.StateNeedsInput, "permission prompt"},
+		{"AskUserQuestion, no spool", "registry-waiting-question-2.1.284.json", userTail, provider.StateNeedsInput, "input needed"},
+		{"shell + assistant-text tail → the fold alone", "registry-shell-2.1.284.json", assistantTail, provider.StateNeedsInput, ""},
+		{"shell + working fold → the fold alone", "registry-shell-2.1.284.json", userTail, provider.StateWorking, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chat := newRegistryRig(t, tc.fixture, nil).read(t, tc.body)
+			if chat.State != tc.wantState || chat.StateDetail != tc.wantDetail {
+				t.Errorf("chat = {state:%q detail:%q}; want {state:%q detail:%q}",
+					chat.State, chat.StateDetail, tc.wantState, tc.wantDetail)
+			}
+			if chat.PendingDialog != nil {
+				t.Errorf("PendingDialog = %+v; no spool was written", chat.PendingDialog)
+			}
+		})
+	}
+
+	// The missing-status first write (live: the registry's very first write at
+	// startup has no `status` key, idle ~0.5 s later) is unusable → the fold.
+	r := newRegistryRig(t, "registry-busy-2.1.284.json", map[string]any{"status": nil, "statusUpdatedAt": nil})
+	if chat := r.read(t, assistantTail); chat.State != provider.StateNeedsInput {
+		t.Errorf("status-less first write: state = %q; want the fold's needs_input", chat.State)
 	}
 }
 
@@ -402,6 +649,87 @@ func TestCompat_TranscriptEcho_stateNeutral(t *testing.T) {
 	}
 }
 
+// The 2.1.284 /clear write sequence (compat.md §5, issue #79, live
+// 2026-10-09): the five lines the fresh transcript holds right after /clear —
+// mode, file-history-snapshot, an isMeta caveat, the user <command-name> echo,
+// and the NEW system/local_command event (parentUuid → the echo; empty
+// <local-command-stdout>; commandRun {command:"clear"}). Pinned through the
+// pure fold and through the real ReadChat over the idle registry capture
+// (status stays idle across /clear live): exactly ONE "/clear" user text,
+// state idle.
+func TestCompat_TranscriptClear284_rendersOnce(t *testing.T) {
+	body := fixtureLines(t, "transcript-clear-live-2.1.284.jsonl", -1)
+	if n := strings.Count(string(body), "\n"); n != 5 {
+		t.Fatalf("clear fixture has %d lines; want the 5 live lines", n)
+	}
+	if !strings.Contains(string(body), `"subtype":"local_command"`) || !strings.Contains(string(body), `"commandRun":{"command":"clear","args":""}`) {
+		t.Fatal("clear fixture lost its system/local_command line — the shape this test pins")
+	}
+	pure, err := claudecode.ParseTranscript(strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
+	r := newRegistryRig(t, "registry-idle-2.1.284.json",
+		map[string]any{"sessionId": "22222222-2222-4222-8222-222222222222"}) // the fixture's own session
+	for name, chat := range map[string]provider.Chat{"ParseTranscript": pure, "ReadChat (registry idle)": r.read(t, body)} {
+		if len(chat.Messages) != 1 {
+			t.Fatalf("%s: messages = %+v; want exactly one \"/clear\" user text", name, chat.Messages)
+		}
+		if m := chat.Messages[0]; m.Kind != provider.MessageText || m.Role != "user" || m.Text != "/clear" {
+			t.Errorf("%s: msg0 = %+v; want user text \"/clear\"", name, m)
+		}
+		if chat.State != provider.StateIdle || chat.StateDetail != "" {
+			t.Errorf("%s: state = %q detail %q; want idle, no detail", name, chat.State, chat.StateDetail)
+		}
+	}
+}
+
+// /clear rotation via the registry only (compat.md §5, issue #79 decision 5):
+// the registry's sessionId rotates AT CLEAR TIME, but the fresh transcript may
+// not exist yet (the diagnosed case; on the 2026-10-09 capture it was written
+// at once). LocateTranscript returns the computed path regardless — never the
+// old file, whose assistant-text tail read needs_input — and an ACTIVE read of
+// the missing file is an empty idle chat; an ENDED read of the same path is
+// ErrTranscriptGone.
+func TestCompat_ClearRotation_missingTranscript(t *testing.T) {
+	r := newRegistryRig(t, "registry-idle-2.1.284.json", nil)
+	old := r.locate(t)
+	if err := os.MkdirAll(filepath.Dir(old), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, []byte(`{"type":"user","message":{"role":"user","content":"go"}}`+"\n"+
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// /clear: the CLI rewrites the entry with the new sessionId; status idle.
+	b, err := os.ReadFile(filepath.Join("testdata", "registry-idle-2.1.284.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(b, &entry); err != nil {
+		t.Fatal(err)
+	}
+	entry["pid"], entry["cwd"], entry["sessionId"] = os.Getpid(), r.wt, "22222222-2222-4222-8222-222222222222"
+	r.writeEntry(t, entry)
+
+	fresh := r.locate(t)
+	if fresh == old || filepath.Base(fresh) != "22222222-2222-4222-8222-222222222222.jsonl" {
+		t.Fatalf("LocateTranscript after the rotation = %q; want the fresh session's path (old %q)", fresh, old)
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("fixture invariant: the fresh transcript must not exist yet (stat err %v)", err)
+	}
+	chat := r.read(t, nil)
+	if chat.State != provider.StateIdle || len(chat.Messages) != 0 || chat.Cursor != 0 || chat.StateDetail != "" {
+		t.Errorf("active read of the not-yet-written transcript = %+v; want an idle empty chat", chat)
+	}
+	if _, err := r.p.ReadChat(provider.ReadSpec{RunID: "run_1", Worktree: r.wt, TranscriptPath: fresh}); !errors.Is(err, provider.ErrTranscriptGone) {
+		t.Errorf("ended read of the missing transcript err = %v; want ErrTranscriptGone", err)
+	}
+}
+
 // Hook payload → Dialog (compat.md §9): the live 2.1.198 PreToolUse payload
 // (invisible in the transcript while pending — §5) maps through the SAME mapper
 // as the transcript into an answerable single-question dialog. The fixture is
@@ -430,6 +758,58 @@ func TestCompat_HookPayload_maps(t *testing.T) {
 	}
 	if d.Options[1].Description != "The second test option." {
 		t.Errorf("option B description = %q; want the payload description", d.Options[1].Description)
+	}
+}
+
+// Settings shape (compat.md §9, issue #79 decision 2): the per-run settings
+// file arms exactly the two dialog-capture hooks — PreToolUse and PostToolUse
+// — and NO Notification hook (its idle_prompt fired 60 s after every turn end,
+// background agents running or not, and outlived /clear; the registry status
+// of §2 replaced it). Top-level keys are hooks (+ env with a dialog timeout).
+func TestCompat_HookSettings_noNotification(t *testing.T) {
+	p, err := claudecode.New(claudecode.Options{
+		ClaudeBin: "claude-not-invoked", ConfigPath: filepath.Join(t.TempDir(), ".claude.json"),
+		LoginDir: t.TempDir(), Runner: tmuxx.NewFake(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatalf("claudecode.New: %v", err)
+	}
+	keysOf := func(b []byte) []string {
+		t.Helper()
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("not a JSON object: %v\n%s", err, b)
+		}
+		ks := make([]string, 0, len(m))
+		for k := range m {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		return ks
+	}
+	for name, tc := range map[string]struct {
+		opts provider.SetupOpts
+		top  []string
+	}{
+		"AFK (no timeout)":    {provider.SetupOpts{}, []string{"hooks"}},
+		"manual (60m window)": {provider.SetupOpts{DialogTimeout: time.Hour}, []string{"env", "hooks"}},
+	} {
+		settings, _, _ := p.Setup("run_1", t.TempDir(), tc.opts)
+		if got := keysOf(settings); !reflect.DeepEqual(got, tc.top) {
+			t.Errorf("%s: settings keys = %v; want %v", name, got, tc.top)
+		}
+		var s struct {
+			Hooks json.RawMessage `json:"hooks"`
+		}
+		if err := json.Unmarshal(settings, &s); err != nil {
+			t.Fatal(err)
+		}
+		if got := keysOf(s.Hooks); !reflect.DeepEqual(got, []string{"PostToolUse", "PreToolUse"}) {
+			t.Errorf("%s: hooks keys = %v; want exactly {PreToolUse, PostToolUse} — no Notification", name, got)
+		}
+		if strings.Contains(string(settings), `"Notification"`) || strings.Contains(string(settings), "/state/") {
+			t.Errorf("%s: settings still reference the Notification hook or its state/ marker:\n%s", name, settings)
+		}
 	}
 }
 

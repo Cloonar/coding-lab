@@ -21,6 +21,7 @@ import {
   baseRun,
   container,
   h,
+  emitMessagesChangedSettled,
   hashed,
   installChatHooks,
   mountChat,
@@ -91,6 +92,60 @@ describe('status line helpers', () => {
     expect(turnStartTime([user(1), tool(2, 'x', 'running')])).toBeNull();
     expect(turnStartTime([user(1, 'not a date')])).toBeNull();
     expect(lastMessageTime([tool(1, 'x', 'ok')])).toBeNull();
+  });
+});
+
+describe('StatusLine reason', () => {
+  function mountWaiting(detail: string | undefined, state: ConversationState = 'needs_input') {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const dispose = render(
+      () => (
+        <StatusLine
+          runID="run_x"
+          state={state}
+          stateDetail={detail}
+          messages={[]}
+          commitsBehind={0}
+          interrupt={{ busy: () => false, run: () => Promise.resolve() }}
+          onError={() => {}}
+          onNotice={() => {}}
+          onPulled={() => {}}
+        />
+      ),
+      el,
+    );
+    const text = () => el.querySelector('.chat-status-text')?.textContent ?? '';
+    return {
+      el,
+      text,
+      cleanup: () => {
+        dispose();
+        el.remove();
+      },
+    };
+  }
+
+  it('renders a long permission prompt in the clipping title span (ellipsis, one line)', () => {
+    const long = 'Allow Bash: ' + 'x'.repeat(300);
+    const line = mountWaiting(long);
+    expect(line.text()).toBe(`Waiting for you · ${long}`);
+    expect(
+      line.el.querySelector('.chat-status-reason')?.classList.contains('chat-status-title'),
+    ).toBe(true);
+    line.cleanup();
+  });
+
+  it('does not render a stale detail outside the waiting state', () => {
+    const line = mountWaiting('permission request', 'working');
+    expect(line.text()).toBe('Working');
+    line.cleanup();
+  });
+
+  it('treats a whitespace-only detail as absent', () => {
+    const line = mountWaiting('   ');
+    expect(line.text()).toBe('Waiting for you');
+    line.cleanup();
   });
 });
 
@@ -252,6 +307,53 @@ describe('StatusLine in the chat', () => {
     expect(container.querySelector('.chat-needs-input')?.textContent).toBe(
       'Claude Code is waiting for your reply.',
     );
+  });
+
+  it('needs_input with a state_detail: the reason follows the phrase after " · "', async () => {
+    h.messagesOnServer = {
+      ...h.messagesOnServer,
+      state: 'needs_input',
+      state_detail: 'permission request',
+    };
+    await mountChat();
+    expect(statusText()).toBe('Waiting for you · permission request');
+    const reason = container.querySelector('.chat-status-reason');
+    expect(reason?.getAttribute('title')).toBe('permission request');
+  });
+
+  it('needs_input without a state_detail: no separator is rendered', async () => {
+    await mountChat();
+    expect(statusText()).toBe('Waiting for you');
+    expect(container.querySelector('.chat-status-reason')).toBeNull();
+    h.messagesOnServer = { ...h.messagesOnServer, state: 'needs_input', state_detail: '' };
+    await mountChat();
+    expect(statusText()).toBe('Waiting for you');
+  });
+
+  it('a run.messages.changed tick with a new state_detail (same state) updates the line', async () => {
+    h.messagesOnServer = {
+      ...h.messagesOnServer,
+      state: 'needs_input',
+      state_detail: 'input needed',
+    };
+    await mountChat();
+    expect(statusText()).toBe('Waiting for you · input needed');
+
+    h.messagesOnServer = {
+      ...h.messagesOnServer,
+      state: 'needs_input',
+      state_detail: 'permission request',
+    };
+    await emitMessagesChangedSettled(RUN_ID, {
+      state: 'needs_input',
+      state_detail: 'permission request',
+    });
+    expect(statusText()).toBe('Waiting for you · permission request');
+
+    // The detail clears with the server's omission.
+    h.messagesOnServer = { ...h.messagesOnServer, state: 'needs_input', state_detail: undefined };
+    await emitMessagesChangedSettled(RUN_ID, { state: 'needs_input' });
+    expect(statusText()).toBe('Waiting for you');
   });
 
   it('idle: names the state and how long ago the last message arrived; no Pull base when not behind', async () => {

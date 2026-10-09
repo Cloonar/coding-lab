@@ -3,9 +3,9 @@ package claudecode
 // Transcript location (registry cwd-match → slug/sessionId path), the
 // state-derivation edges the compat fixture doesn't cover, and ReadChat's
 // adapter-owned conversational-state composition (issue #92) — the transcript
-// fold overlaid with the hook spool's live signals, the precedence core's
-// chat service used to apply. The full JSONL → schema mapping is pinned in
-// internal/compat against a captured fixture.
+// fold overlaid with the hook spool's pending dialog and the session
+// registry's status (issue #79's layered precedence). The full JSONL → schema
+// mapping is pinned in internal/compat against a captured fixture.
 
 import (
 	"context"
@@ -17,7 +17,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -168,19 +167,154 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 	}
 }
 
-// A non-empty transcriptPath that no longer exists is ErrTranscriptGone —
-// even when a live spool dialog exists (issue #92): the transcript read gates
-// the overlay, exactly as core returned the read error before applying
-// signals, so a gone transcript never resurrects as a dialog-only chat.
-func TestReadChat_goneFile(t *testing.T) {
-	p := chatProvider(t)
-	if _, err := p.ReadChat(provider.ReadSpec{TranscriptPath: filepath.Join(t.TempDir(), "absent.jsonl")}); err != provider.ErrTranscriptGone {
-		t.Errorf("ReadChat(absent) err = %v; want ErrTranscriptGone", err)
+// /clear rotation via the registry only (issue #79 decision 5): on 2.1.284 the
+// registry's sessionId rotates at clear time but the fresh transcript is
+// written only with the next message, so LocateTranscript returns the
+// computed path even though the file does not exist yet — core adopts the
+// rotation at once instead of staying on the old file's needs_input tail.
+func TestLocateTranscript_returnsPathBeforeFileExists(t *testing.T) {
+	home := t.TempDir()
+	worktree := "/home/op/state/worktrees/proj-manual-1"
+	writeHomeEntry(t, home, "1.json", liveEntry(worktree, "fresh-after-clear", "idle", "", 1))
+
+	got, err := chatProvider(t).LocateTranscript(context.Background(), "proj~manual-1", worktree, home)
+	if err != nil {
+		t.Fatalf("LocateTranscript: %v", err)
 	}
+	want := filepath.Join(projectsDirUnder(home), SlugForDir(worktree), "fresh-after-clear.jsonl")
+	if got != want {
+		t.Errorf("LocateTranscript = %q; want the computed path %q", got, want)
+	}
+	if _, err := os.Stat(got); !os.IsNotExist(err) {
+		t.Fatalf("fixture invariant: the transcript must not exist yet (stat err %v)", err)
+	}
+}
+
+// writeHomeEntry writes one session registry file under the instance HOME
+// (<home>/.claude/sessions/<name>, compat §2).
+func writeHomeEntry(t *testing.T, home, name string, e RegistryEntry) {
+	t.Helper()
+	dir := registryDirUnder(home)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRegistryEntry(t, dir, name, e)
+}
+
+// liveEntry renders a registry entry owned by THIS test process (os.Getpid,
+// so pidAlive passes) with the 2.1.284 status fields (issue #79).
+func liveEntry(cwd, sessionID, status, waitingFor string, startedAt int64) RegistryEntry {
+	return RegistryEntry{
+		PID: os.Getpid(), Cwd: cwd, StartedAt: startedAt, SessionID: sessionID,
+		Status: status, WaitingFor: waitingFor, StatusUpdatedAt: startedAt + 1,
+	}
+}
+
+// Entry selection (issue #79 decision 3): transcript identity and status come
+// from ONE entry — cwd match, live pid, newest startedAt, non-empty sessionId.
+// A dead pid's leftover, a sibling cwd, and a sessionId-less entry are all
+// skipped even when they are newer or carry a louder status.
+func TestRegistryEntryForDir_selection(t *testing.T) {
+	home := t.TempDir()
+	const wt = "/wt/run"
+	writeHomeEntry(t, home, "a.json", liveEntry(wt, "older", "busy", "", 100))
+	writeHomeEntry(t, home, "b.json", liveEntry(wt, "newest-live", "idle", "", 200))
+	dead := liveEntry(wt, "dead-leftover", "waiting", "input needed", 900)
+	dead.PID = deadPID(t)
+	writeHomeEntry(t, home, "c.json", dead)
+	writeHomeEntry(t, home, "d.json", liveEntry("/wt/other", "wrong-cwd", "waiting", "dialog open", 950))
+	writeHomeEntry(t, home, "e.json", liveEntry(wt, "", "busy", "", 999)) // no sessionId yet
+	if err := os.WriteFile(filepath.Join(registryDirUnder(home), "f.json"), []byte("{garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, ok := registryEntryForDir(registryDirUnder(home), wt)
+	if !ok || e.SessionID != "newest-live" || e.Status != "idle" {
+		t.Fatalf("registryEntryForDir = %+v,%v; want the newest LIVE same-cwd entry newest-live/idle", e, ok)
+	}
+
+	// LocateTranscript and ReadChat agree on that one entry: the transcript is
+	// newest-live's, and its idle status leaves the fold in charge — the older
+	// entry's busy and the dead/foreign entries' waiting never leak in.
+	p := chatProvider(t)
+	path, err := p.LocateTranscript(context.Background(), "s", wt, home)
+	if err != nil || filepath.Base(path) != "newest-live.jsonl" {
+		t.Fatalf("LocateTranscript = (%q, %v); want newest-live.jsonl", path, err)
+	}
+	writeTranscript(t, path, foldNeedsInputTail)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: t.TempDir(), Home: home, Worktree: wt, TranscriptPath: path})
+	if err != nil {
+		t.Fatalf("ReadChat: %v", err)
+	}
+	if chat.State != provider.StateNeedsInput || chat.StateDetail != "" {
+		t.Errorf("chat = {state:%q detail:%q}; want the fold's needs_input with no detail (idle registry)", chat.State, chat.StateDetail)
+	}
+
+	// No live entry at all → unusable.
+	if _, ok := registryEntryForDir(registryDirUnder(home), "/wt/none"); ok {
+		t.Error("an unmatched cwd must select nothing")
+	}
+}
+
+// writeTranscript writes body at path, creating its parent dirs.
+func writeTranscript(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A non-empty transcriptPath that does not exist splits on the read kind
+// (issue #79 decision 5). ENDED reads (no RuntimeDir, no Home) keep
+// ErrTranscriptGone — the transcript read gates the overlay, so a retired file
+// never resurrects as a signal-only chat. ACTIVE reads treat it as the fresh
+// post-/clear identity LocateTranscript names before claude writes it: an idle
+// empty chat, never an error, with the overlays still composed on top.
+func TestReadChat_missingTranscript(t *testing.T) {
+	p := chatProvider(t)
+	const wt = "/wt/run"
+	absent := filepath.Join(t.TempDir(), "sess-live.jsonl")
+
+	// Ended: ErrTranscriptGone, even with a worktree on the spec (a worktree
+	// alone never makes a read active).
+	if _, err := p.ReadChat(provider.ReadSpec{TranscriptPath: absent}); err != provider.ErrTranscriptGone {
+		t.Errorf("ended ReadChat(absent) err = %v; want ErrTranscriptGone", err)
+	}
+	if _, err := p.ReadChat(provider.ReadSpec{TranscriptPath: absent, Worktree: wt}); err != provider.ErrTranscriptGone {
+		t.Errorf("ended ReadChat(absent, worktree) err = %v; want ErrTranscriptGone", err)
+	}
+
+	// Active, no signals: the idle empty conversation.
+	for name, spec := range map[string]provider.ReadSpec{
+		"runtime dir": {RunID: "run_1", RuntimeDir: t.TempDir(), TranscriptPath: absent, Model: "fable"},
+		"home only":   {RunID: "run_1", Home: t.TempDir(), Worktree: wt, TranscriptPath: absent, Model: "fable"},
+	} {
+		chat, err := p.ReadChat(spec)
+		if err != nil {
+			t.Fatalf("%s: active ReadChat(absent) err = %v; want nil", name, err)
+		}
+		if chat.State != provider.StateIdle || len(chat.Messages) != 0 || chat.Cursor != 0 ||
+			chat.PendingDialog != nil || chat.ContextUsage != nil || chat.StateDetail != "" {
+			t.Errorf("%s: chat = %+v; want an idle empty chat", name, chat)
+		}
+	}
+
+	// Active, overlays still apply: a live spool dialog surfaces …
 	dir := t.TempDir()
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	if _, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: filepath.Join(dir, "absent.jsonl")}); err != provider.ErrTranscriptGone {
-		t.Errorf("ReadChat(absent, live spool dialog) err = %v; want ErrTranscriptGone", err)
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: absent})
+	if err != nil || chat.State != provider.StateQuestion || chat.PendingDialog == nil {
+		t.Errorf("active absent + spool = %+v, %v; want StateQuestion with the PendingDialog", chat, err)
+	}
+	// … and so does the registry status.
+	home := t.TempDir()
+	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "busy", "", 1))
+	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: t.TempDir(), Home: home, Worktree: wt, TranscriptPath: absent})
+	if err != nil || chat.State != provider.StateWorking {
+		t.Errorf("active absent + registry busy = %+v, %v; want StateWorking", chat, err)
 	}
 }
 
@@ -245,17 +379,16 @@ func TestReadChat_spoolDialogBeforeTranscriptLocated(t *testing.T) {
 	}
 }
 
-// runtimeDir == "" is the transcript-only degradation (ended runs, or no
-// runtime dir configured — the same gate core's liveSignals() applied): spool
-// and marker files on disk are never consulted, state comes from the
-// transcript alone (issue #92).
+// runtimeDir == "" and home == "" is the transcript-only degradation (ended
+// runs, or nothing configured — the same gate core's liveSignals() applied):
+// the spool on disk is never consulted, state comes from the transcript alone
+// (issues #92/#79).
 func TestReadChat_emptyRuntimeDirReadsTranscriptOnly(t *testing.T) {
 	p := spoolTestProvider(t)
 	dir := t.TempDir()
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	// A user-text tail derives working — distinct from both the dialog's
-	// question and the marker's needs_input, so any overlay would be visible.
+	// A user-text tail derives working — distinct from the dialog's question,
+	// so any overlay would be visible.
 	transcript := filepath.Join(dir, "sess-live.jsonl")
 	if err := os.WriteFile(transcript,
 		[]byte(line(`{"type":"user","message":{"role":"user","content":"go"}}`)), 0o600); err != nil {
@@ -296,52 +429,116 @@ func TestReadChat_transcriptDialogDormantFallback(t *testing.T) {
 	}
 }
 
-// Blocked-marker precedence (issue #92, decision 7 semantics unchanged): a
-// live marker forces needs_input over a non-question transcript state, but a
-// pending question — transcript-derived — outranks it (the marker is ignored,
-// never demoting a question the operator must answer).
-func TestReadChat_blockedMarkerPrecedence(t *testing.T) {
-	p := spoolTestProvider(t)
-	dir := t.TempDir()
-	t0 := time.Now().Add(-time.Hour)
-	// Marker + no dialog: the working tail is overridden to needs_input. The
-	// transcript is older than the marker so the marker is current.
-	working := filepath.Join(dir, "sess-live.jsonl")
-	writeFileWithModTime(t, working, line(`{"type":"user","message":{"role":"user","content":"go"}}`), t0)
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: working})
-	if err != nil {
-		t.Fatalf("ReadChat: %v", err)
-	}
-	if chat.State != provider.StateNeedsInput {
-		t.Errorf("marker over working tail: state = %q; want %q", chat.State, provider.StateNeedsInput)
-	}
+// Transcript fold tails for the precedence table (issue #79): each derives a
+// distinct fold state on its own.
+var (
+	foldWorkingTail    = line(`{"type":"user","message":{"role":"user","content":"go"}}`)
+	foldNeedsInputTail = line(`{"type":"user","message":{"role":"user","content":"go"}}`) +
+		line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+	// The issue #159 pending-work hold: an async agent launch then a
+	// turn-ending text — the fold says working.
+	foldHoldTail     = line(agentUseLine) + line(agentAsyncResultLine) + line(turnEndTextLine)
+	foldQuestionTail = line(colorUseLine) // a transcript-flushed pending dialog
+)
 
-	// Marker while the transcript tail is a pending dialog: the question wins.
-	pending := filepath.Join(dir, "sess-pending.jsonl")
-	writeFileWithModTime(t, pending, line(colorUseLine), t0)
-	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: pending})
-	if err != nil {
-		t.Fatalf("ReadChat: %v", err)
+// The layered precedence (issue #79 decision 1), composed inside ReadChat:
+// (1) spool dialog / transcript-flushed dialog → question; (2) registry
+// waiting → needs_input; (3) registry busy → working, overriding the fold;
+// (4) registry idle → the fold; (5) unusable registry → the fold alone.
+// StateDetail = waitingFor whenever the registry says waiting and the state
+// is question/needs_input.
+func TestReadChat_registryPrecedence(t *testing.T) {
+	const (
+		wt     = "/wt/run"
+		reason = "Claude needs your permission to use Bash"
+	)
+	cases := []struct {
+		name       string
+		fold       string // transcript body
+		spool      bool   // a live PreToolUse dialog spool
+		status     string // registry status; "-" = no registry entry at all
+		waitingFor string
+		noWorktree bool // the spec carries no Worktree
+		wantState  string
+		wantDetail string
+		wantDialog bool
+	}{
+		// Layer 3: busy overrides the fold — the background-subagent fix.
+		{name: "fold working + busy", fold: foldWorkingTail, status: "busy", wantState: provider.StateWorking},
+		{name: "fold needs_input + busy", fold: foldNeedsInputTail, status: "busy", wantState: provider.StateWorking},
+		// Layer 4: idle hands the decision to the fold, hold included.
+		{name: "pending-work hold + idle", fold: foldHoldTail, status: "idle", wantState: provider.StateWorking},
+		{name: "fold needs_input + idle", fold: foldNeedsInputTail, status: "idle", wantState: provider.StateNeedsInput},
+		{name: "empty fold + idle never needs_input", fold: "", status: "idle", wantState: provider.StateIdle},
+		// Layer 2: waiting with nothing composed → needs_input + the reason.
+		{name: "waiting, no spool", fold: foldNeedsInputTail, status: "waiting", waitingFor: reason,
+			wantState: provider.StateNeedsInput, wantDetail: reason},
+		{name: "waiting over a working fold", fold: foldWorkingTail, status: "waiting", waitingFor: "  " + reason + " ",
+			wantState: provider.StateNeedsInput, wantDetail: reason},
+		// Layer 1 wins, the waiting reason rides along.
+		{name: "waiting + spool dialog", fold: foldWorkingTail, spool: true, status: "waiting", waitingFor: "dialog open",
+			wantState: provider.StateQuestion, wantDetail: "dialog open", wantDialog: true},
+		{name: "waiting + transcript dialog", fold: foldQuestionTail, status: "waiting", waitingFor: "dialog open",
+			wantState: provider.StateQuestion, wantDetail: "dialog open"},
+		{name: "spool dialog + busy", fold: foldWorkingTail, spool: true, status: "busy",
+			wantState: provider.StateQuestion, wantDialog: true},
+		{name: "transcript dialog + busy", fold: foldQuestionTail, status: "busy", wantState: provider.StateQuestion},
+		// Layer 5: unusable status → the fold alone, no detail.
+		{name: "unknown status", fold: foldNeedsInputTail, status: "thinking", waitingFor: reason, wantState: provider.StateNeedsInput},
+		{name: "unknown status, working fold", fold: foldWorkingTail, status: "sleeping", wantState: provider.StateWorking},
+		{name: "empty status", fold: foldNeedsInputTail, status: "", wantState: provider.StateNeedsInput},
+		{name: "no registry entry", fold: foldNeedsInputTail, status: "-", wantState: provider.StateNeedsInput},
+		{name: "no worktree on the spec", fold: foldNeedsInputTail, status: "busy", noWorktree: true, wantState: provider.StateNeedsInput},
 	}
-	if chat.State != provider.StateQuestion || chat.PendingDialog != nil {
-		t.Errorf("marker vs transcript question: chat = %+v; want StateQuestion with nil PendingDialog", chat)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := spoolTestProvider(t)
+			dir, home := t.TempDir(), t.TempDir()
+			// The transcript lives at the registry entry's own computed path, its
+			// stem matching prePayload's session_id so the spool is current.
+			transcript := transcriptPathFor(home, wt, "sess-live")
+			writeTranscript(t, transcript, tc.fold)
+			if tc.status != "-" {
+				writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", tc.status, tc.waitingFor, 1))
+			}
+			if tc.spool {
+				writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
+			}
+			worktree := wt
+			if tc.noWorktree {
+				worktree = ""
+			}
+			chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, Home: home,
+				Worktree: worktree, TranscriptPath: transcript})
+			if err != nil {
+				t.Fatalf("ReadChat: %v", err)
+			}
+			if chat.State != tc.wantState || chat.StateDetail != tc.wantDetail {
+				t.Errorf("chat = {state:%q detail:%q}; want {state:%q detail:%q}",
+					chat.State, chat.StateDetail, tc.wantState, tc.wantDetail)
+			}
+			if got := chat.PendingDialog != nil; got != tc.wantDialog {
+				t.Errorf("PendingDialog = %+v; want present=%v", chat.PendingDialog, tc.wantDialog)
+			}
+		})
 	}
 }
 
-// Spool dialog + blocked marker together: the dialog wins — first in the
-// composition order, exactly as core applied it (issue #92).
-func TestReadChat_spoolDialogWinsOverMarker(t *testing.T) {
-	p := spoolTestProvider(t)
-	dir := t.TempDir()
-	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir})
+// An ENDED read (Home "") never consults the registry, whatever it says: a
+// terminal view is the transcript alone (issue #79 decision 6).
+func TestReadChat_endedReadIgnoresRegistry(t *testing.T) {
+	p := chatProvider(t)
+	home := t.TempDir()
+	const wt = "/wt/run"
+	transcript := transcriptPathFor(home, wt, "sess-live")
+	writeTranscript(t, transcript, foldNeedsInputTail)
+	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "waiting", "input needed", 1))
+	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", Worktree: wt, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
 	}
-	if chat.State != provider.StateQuestion || chat.PendingDialog == nil {
-		t.Errorf("chat = %+v; want the dialog (StateQuestion + PendingDialog) over the marker", chat)
+	if chat.State != provider.StateNeedsInput || chat.StateDetail != "" {
+		t.Errorf("chat = {state:%q detail:%q}; want the fold's needs_input with no detail", chat.State, chat.StateDetail)
 	}
 }
 
@@ -597,21 +794,20 @@ func TestParseTranscript_pendingWorkSendMessageResume(t *testing.T) {
 // Structured live signals break through the pending-work hold (issue #159):
 // the hold only softens the transcript's assistant-text edge — a live spool
 // dialog still forces StateQuestion + PendingDialog, and a live blocked
-// marker still forces StateNeedsInput, in ReadChat's unchanged composition
-// order. A waiting permission prompt or question must never hide behind
-// "working on background tasks".
+// registry "waiting" (issue #79 — the Notification marker's successor) still
+// forces StateNeedsInput, in ReadChat's layered order. A waiting permission
+// prompt or question must never hide behind "working on background tasks".
 func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 	p := spoolTestProvider(t)
-	dir := t.TempDir()
-	t0 := time.Now().Add(-time.Hour)
+	dir, home := t.TempDir(), t.TempDir()
+	const wt = "/wt/run"
 	// A transcript tail that holds working: async launch + turn-ending text.
-	// Named sess-live to match prePayload's session_id (dialog staleness key),
-	// and older than the spool files so the blocked marker reads as current.
-	transcript := filepath.Join(dir, "sess-live.jsonl")
-	writeFileWithModTime(t, transcript,
-		line(agentUseLine)+line(agentAsyncResultLine)+line(turnEndTextLine), t0)
+	// Named sess-live to match prePayload's session_id (dialog staleness key).
+	transcript := transcriptPathFor(home, wt, "sess-live")
+	writeTranscript(t, transcript, foldHoldTail)
+	spec := provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, Home: home, Worktree: wt, TranscriptPath: transcript}
 
-	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
+	chat, err := p.ReadChat(spec)
 	if err != nil {
 		t.Fatalf("ReadChat(no signals): %v", err)
 	}
@@ -621,7 +817,7 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 
 	// A live spool dialog wins over the hold.
 	writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
-	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
+	chat, err = p.ReadChat(spec)
 	if err != nil {
 		t.Fatalf("ReadChat(spool dialog): %v", err)
 	}
@@ -629,18 +825,19 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 		t.Errorf("spool dialog over hold: chat = %+v; want StateQuestion with PendingDialog", chat)
 	}
 
-	// Dialog gone, blocked marker present (newer than the transcript): the
-	// marker's needs_input wins over the hold too.
+	// Dialog gone, the registry says waiting (a permission prompt lab cannot
+	// render): needs_input wins over the hold too, with the reason attached.
 	if err := os.Remove(filepath.Join(dir, dialogsSubdir, "run_1.json")); err != nil {
 		t.Fatal(err)
 	}
-	writeSpool(t, dir, stateSubdir, "run_1", `{"notification_type":"permission_prompt"}`)
-	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: dir, TranscriptPath: transcript})
+	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "waiting", "permission request", 1))
+	chat, err = p.ReadChat(spec)
 	if err != nil {
-		t.Fatalf("ReadChat(blocked marker): %v", err)
+		t.Fatalf("ReadChat(registry waiting): %v", err)
 	}
-	if chat.State != provider.StateNeedsInput {
-		t.Errorf("blocked marker over hold: state = %q; want %q", chat.State, provider.StateNeedsInput)
+	if chat.State != provider.StateNeedsInput || chat.StateDetail != "permission request" {
+		t.Errorf("registry waiting over hold: chat = {state:%q detail:%q}; want needs_input with the reason",
+			chat.State, chat.StateDetail)
 	}
 }
 
@@ -969,6 +1166,98 @@ func TestParseTranscript_commandEchoNeverDrivesState(t *testing.T) {
 	}
 	if got.State != provider.StateIdle {
 		t.Errorf("fresh post-/clear state = %q; want %q (the stuck-composer case)", got.State, provider.StateIdle)
+	}
+}
+
+// The 2.1.284 /clear write sequence (issue #79, compat §5 — the five lines the
+// fresh transcript holds right after /clear, live 2026-10-09): mode,
+// file-history-snapshot, an isMeta caveat, the user <command-name> echo, and a
+// system/local_command event whose parentUuid is that echo's uuid. Exactly
+// ONE "/clear" user text renders (the system event does not repeat the
+// command its parent already showed; its stdout is empty), and the state is
+// idle.
+const (
+	clearEchoUUID    = "aaaaaaaa-0000-4000-8000-000000000001"
+	clearSequence284 = `{"type":"mode","mode":"normal","sessionId":"s"}` + "\n" +
+		`{"type":"file-history-snapshot","messageId":"` + clearEchoUUID + `","snapshot":{},"isSnapshotUpdate":false}` + "\n" +
+		`{"parentUuid":null,"type":"user","message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"isMeta":true,"uuid":"aaaaaaaa-0000-4000-8000-000000000002"}` + "\n" +
+		`{"parentUuid":"aaaaaaaa-0000-4000-8000-000000000002","type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"},"uuid":"` + clearEchoUUID + `"}` + "\n" +
+		`{"parentUuid":"` + clearEchoUUID + `","type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>","level":"info","uuid":"aaaaaaaa-0000-4000-8000-000000000003","isMeta":false,"commandRun":{"command":"clear","args":""}}` + "\n"
+)
+
+func TestParseTranscript_localCommandSystemEcho_clearSequence(t *testing.T) {
+	got, err := ParseTranscript(strings.NewReader(clearSequence284))
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("messages = %+v; want exactly one \"/clear\" user text", got.Messages)
+	}
+	if m := got.Messages[0]; m.Kind != provider.MessageText || m.Role != "user" || m.Text != "/clear" {
+		t.Errorf("msg0 = %+v; want user text \"/clear\"", m)
+	}
+	if got.State != provider.StateIdle {
+		t.Errorf("state = %q; want %q (the echo pair is state-neutral)", got.State, provider.StateIdle)
+	}
+}
+
+// A system/local_command with NO preceding user echo (its parentUuid names
+// nothing that rendered a command) still shows the command line — rebuilt
+// from commandRun as "/" + command [+ " " + args] — followed by its non-empty
+// stdout as a lifecycle (truncated like the user-echo stdout). Neither line
+// touches state: appended after an assistant text tail the state stays
+// needs_input; alone it is idle.
+func TestParseTranscript_localCommandSystemEcho_lone(t *testing.T) {
+	lone := line(`{"parentUuid":"some-assistant-uuid","type":"system","subtype":"local_command","content":"<local-command-stdout>Total cost: $0.01</local-command-stdout>","uuid":"u-sys","commandRun":{"command":"cost","args":" --verbose "}}`)
+
+	got, err := ParseTranscript(strings.NewReader(lone))
+	if err != nil {
+		t.Fatalf("ParseTranscript(lone): %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("lone messages = %+v; want the command line + its stdout", got.Messages)
+	}
+	if m := got.Messages[0]; m.Kind != provider.MessageText || m.Role != "user" || m.Text != "/cost --verbose" {
+		t.Errorf("lone msg0 = %+v; want user text \"/cost --verbose\"", m)
+	}
+	if m := got.Messages[1]; m.Kind != provider.MessageLifecycle || m.Error || m.Text != "Total cost: $0.01" {
+		t.Errorf("lone msg1 = %+v; want a non-error lifecycle with the stdout", m)
+	}
+	if got.State != provider.StateIdle {
+		t.Errorf("lone state = %q; want %q", got.State, provider.StateIdle)
+	}
+
+	// A long stdout is truncated like the user-echo path.
+	long := strings.Repeat("x", truncateLimit+50)
+	got, err = ParseTranscript(strings.NewReader(line(`{"type":"system","subtype":"local_command","content":"<local-command-stdout>` + long + `</local-command-stdout>","commandRun":{"command":"context","args":""}}`)))
+	if err != nil {
+		t.Fatalf("ParseTranscript(long): %v", err)
+	}
+	if len(got.Messages) != 2 || got.Messages[1].Text != truncate(long, truncateLimit) {
+		t.Errorf("long stdout not truncated to truncateLimit: %+v", got.Messages)
+	}
+
+	// State-neutral after real turns: the assistant's ended turn still decides.
+	turns := line(`{"type":"user","message":{"role":"user","content":"go"}}`) +
+		line(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`)
+	for name, tail := range map[string]string{"lone system echo": lone, "2.1.284 /clear sequence": clearSequence284} {
+		got, err = ParseTranscript(strings.NewReader(turns + tail))
+		if err != nil {
+			t.Fatalf("%s: ParseTranscript: %v", name, err)
+		}
+		if got.State != provider.StateNeedsInput {
+			t.Errorf("%s after an assistant text tail: state = %q; want %q (echoes never touch lastKey)", name, got.State, provider.StateNeedsInput)
+		}
+	}
+
+	// A malformed commandRun never drops the line: the stdout still renders,
+	// the command line is simply absent.
+	got, err = ParseTranscript(strings.NewReader(line(`{"type":"system","subtype":"local_command","content":"<local-command-stdout>ok</local-command-stdout>","commandRun":"clear"}`)))
+	if err != nil {
+		t.Fatalf("ParseTranscript(malformed commandRun): %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Kind != provider.MessageLifecycle || got.Messages[0].Text != "ok" {
+		t.Errorf("malformed commandRun messages = %+v; want just the stdout lifecycle", got.Messages)
 	}
 }
 

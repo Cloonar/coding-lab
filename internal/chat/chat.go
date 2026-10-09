@@ -5,7 +5,8 @@
 // conversational state and publishes a debounced run.messages.changed so the
 // chat view refetches. State COMPOSITION is adapter-owned (issue #92): the
 // provider folds its transcript and its own live signals (claude-code: the
-// hook spool, ADR-0020) inside ReadChat, and core never interprets a spool —
+// hook spool, ADR-0020, and the session registry's status, issue #79) inside
+// ReadChat, and core never interprets a spool or a registry —
 // core owns run lifecycle only (the StateEnded override and the transcript
 // identity). Read-through only — no message table; the sole persisted state
 // is runs.transcript_path, captured by cwd-match exactly like the deep link —
@@ -80,6 +81,12 @@ type messagesChangedPayload struct {
 	// (fresh transcript, seq restarts at 1) never sets it either — the client
 	// resets its stream via transcript_id then.
 	BackpatchSeq int64 `json:"backpatchSeq,omitempty"`
+	// StateDetail is the adapter's optional human reason for State as of this
+	// tick (issue #79 decision 4 — claude-code: the registry's waitingFor, e.g.
+	// a permission prompt's text), so the SPA's state chips can render "Waiting
+	// for you · permission request" without a refetch, exactly like State.
+	// Omitted when the adapter gives none. A detail-only change republishes.
+	StateDetail string `json:"state_detail,omitempty"`
 }
 
 // Options configures a Service. Store, Providers, and Bus are required.
@@ -134,9 +141,12 @@ type Options struct {
 	// pure instancehome.Manager.HomePath, injected as a closure so chat need not
 	// import the manager (its idiom for cross-package seams, like Notify and
 	// Secrets). LocateTranscript resolves the transcript strictly under this
-	// home. Nil → "" for every run, which is a locate MISS by the seam contract
-	// (the pre-upgrade / no-home degradation, keeping the run's already-stored
-	// path) — the same effect HomePath gives for a run whose home never existed.
+	// home, and an ACTIVE run's ReadChat/SpoolSig get it too (issue #79), so the
+	// adapter can read its agent's state registry there — opaquely, like the
+	// runtime dir. Nil → "" for every run, which is a locate MISS by the seam
+	// contract (the pre-upgrade / no-home degradation, keeping the run's
+	// already-stored path) and no registry consult — the same effect HomePath
+	// gives for a run whose home never existed.
 	HomeFor func(runID string) string
 }
 
@@ -278,13 +288,13 @@ func (s *Service) runtimeDir(runID string) string {
 }
 
 // View is the chat service's read of one run: the adapter-composed
-// conversation (embedded provider.Chat — messages, state, cursor, and the
-// side-channel PendingDialog, issue #92) plus the core-owned transcript
-// identity. Core forwards the adapter's composition verbatim — including the
-// live dialog on Chat.PendingDialog, whose doc pins the seq-stability
-// invariant (issues #89/#90) — and owns only run lifecycle: a terminated
-// run's view is forced to StateEnded with no dialog, regardless of what the
-// adapter returned.
+// conversation (embedded provider.Chat — messages, state, cursor, the
+// side-channel PendingDialog, issue #92, and the optional StateDetail, issue
+// #79) plus the core-owned transcript identity. Core forwards the adapter's
+// composition verbatim — including the live dialog on Chat.PendingDialog,
+// whose doc pins the seq-stability invariant (issues #89/#90) — and owns only
+// run lifecycle: a terminated run's view is forced to StateEnded with no
+// dialog and no state detail, regardless of what the adapter returned.
 type View struct {
 	provider.Chat
 	// TranscriptID is the opaque, provider-neutral identity of the transcript
@@ -304,15 +314,18 @@ type View struct {
 // own live signals (issue #92 — composition is adapter-owned; core never
 // interprets a spool). Core contributes only run lifecycle:
 //
-//   - an ACTIVE run reads with its per-run runtime dir (issue #205), so the
-//     adapter's live signals apply — including the no-transcript-yet case
-//     (path ""), where the adapter must still consult them (a pending dialog
-//     can exist before LocateTranscript first hits) and otherwise yields an
-//     idle empty chat;
-//   - an ENDED run reads transcript-only (runtimeDir "") BY CONSTRUCTION, so
-//     no spool residue can leak into a terminal view, and is then forced to
-//     StateEnded with no pending dialog — terminal state is core-owned,
-//     whatever the adapter returned;
+//   - an ACTIVE run reads with its per-run runtime dir (issue #205), its
+//     instance HOME and its worktree (issue #79 — where the adapter finds its
+//     agent's state registry, keyed by the worktree cwd), so the adapter's
+//     live signals apply — including the no-transcript-yet case (path ""),
+//     where the adapter must still consult them (a pending dialog can exist
+//     before LocateTranscript first hits) and otherwise yields an idle empty
+//     chat;
+//   - an ENDED run reads transcript-only (runtimeDir, home and worktree all
+//     "") BY CONSTRUCTION, so no spool or registry residue can leak into a
+//     terminal view, and is then forced to StateEnded with no pending dialog
+//     and no state detail — terminal state is core-owned, whatever the
+//     adapter returned;
 //   - an ended run with no captured transcript (or a retired transcript file,
 //     via the adapter's own ErrTranscriptGone) is the "transcript no longer
 //     available" state.
@@ -326,11 +339,11 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	if path == "" && !active {
 		return View{}, provider.ErrTranscriptGone
 	}
-	dir := ""
+	spec := provider.ReadSpec{RunID: run.ID, TranscriptPath: path, Model: run.Model}
 	if active {
-		dir = s.runtimeDir(run.ID)
+		spec.RuntimeDir, spec.Home, spec.Worktree = s.runtimeDir(run.ID), s.home(run.ID), run.WorktreePath
 	}
-	chat, err := prov.ReadChat(provider.ReadSpec{RunID: run.ID, RuntimeDir: dir, TranscriptPath: path, Model: run.Model})
+	chat, err := prov.ReadChat(spec)
 	if err != nil {
 		return View{}, err
 	}
@@ -351,6 +364,7 @@ func (s *Service) Read(ctx context.Context, run store.Run) (View, error) {
 	if !active {
 		view.State = provider.StateEnded
 		view.PendingDialog = nil // defensive: a transcript-only read composes none
+		view.StateDetail = ""    // a waiting reason belongs to a live state only
 	}
 	return view, nil
 }
@@ -524,8 +538,17 @@ func (s *Service) PendingDialog(ctx context.Context, run store.Run) (provider.Di
 }
 
 // State reports the tailer's latest derived conversational state for a live
-// session, for the instance list. Absent (ended or never-tailed) → "", false.
+// session. Absent (ended or never-tailed) → "", false.
 func (s *Service) State(session string) (string, bool) {
+	st, _, ok := s.tailers.state(session)
+	return st, ok
+}
+
+// ConversationState reports the tailer's latest state AND its adapter-given
+// detail (issue #79 — Chat.StateDetail) for a live session, read under one
+// lock so the pair always comes from the same tick — the instance list's
+// source. Absent (ended or never-tailed) → "", "", false.
+func (s *Service) ConversationState(session string) (state, detail string, ok bool) {
 	return s.tailers.state(session)
 }
 

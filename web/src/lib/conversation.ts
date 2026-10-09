@@ -23,3 +23,11 @@ export function stateBadge(state: ConversationState): StateBadge | null {
       return null;
   }
 }
+
+/**
+ * The reason behind a needs-input / question state (issue #79), trimmed;
+ * '' for any other state or when the server named none.
+ */
+export function stateReason(state: ConversationState, detail: string | undefined): string {
+  return state === 'needs_input' || state === 'question' ? (detail ?? '').trim() : '';
+}

@@ -632,6 +632,16 @@ type Chat struct {
 	// unknown or unsupported: no assistant turn has landed yet, the model is
 	// unknown or absent, or the provider simply cannot say.
 	ContextUsage *ContextUsage `json:"context_usage,omitempty"`
+	// StateDetail is an optional, adapter-composed human reason for State
+	// (issue #79 decision 4) — claude-code: the session registry's
+	// `waitingFor` ("input needed", "dialog open", a permission prompt's own
+	// text, …) while the CLI reports itself waiting. Free text for display
+	// only: core forwards it verbatim (the status-line suffix, the
+	// run.messages.changed envelope, the instances list, the needs-input push
+	// body's fallback) and never branches on its value — State alone stays the
+	// enumerated contract. "" when the adapter has no reason to give; core
+	// clears it for an ended run alongside the StateEnded override.
+	StateDetail string `json:"state_detail,omitempty"`
 }
 
 // ReadSpec is the full input to AgentProvider.ReadChat (issue #243 /
@@ -643,17 +653,35 @@ type ReadSpec struct {
 	// for a transcript-only read that consults no signals.
 	RunID string
 	// RuntimeDir is the run's PRIVATE runtime dir holding the adapter's spooled
-	// live signals (claude-code: the hook spool, compat §9). "" turns live
-	// signals off and the read degrades to the transcript alone — the way core
-	// reads ENDED runs, or a run with no runtime dir configured.
+	// live signals (claude-code: the dialog hook spool, compat §9). "" turns
+	// spooled signals off — the way core reads ENDED runs, or a run with no
+	// runtime dir configured.
 	RuntimeDir string
+	// Home is the run's private instance HOME (issue #202) for an ACTIVE run,
+	// "" for an ENDED run — core fills it exactly like RuntimeDir, so a
+	// terminal view never consults an agent's live state (issue #79 decision
+	// 6). An adapter whose CLI keeps its own state registry under HOME reads it
+	// here (claude-code: the session registry's `status`/`waitingFor`, compat
+	// §2); one with none (codex) ignores it. An opaque location: core
+	// interprets nothing under it.
+	Home string
+	// Worktree is the run's worktree path, the one cwd unique to the session —
+	// the key an adapter selects its registry entry by, the same cwd match
+	// LocateTranscript uses, so transcript and state come from ONE session
+	// (issue #79 decision 3). Opaque like Home; "" (or an empty Home) means no
+	// registry consult.
+	Worktree string
 	// TranscriptPath is the resolved provider-native transcript file. "" is an
 	// active run whose transcript is not yet located: the adapter must still
 	// consult its live signals (a pending dialog can exist before
 	// LocateTranscript first hits) and otherwise returns an idle empty chat,
-	// never an error. A non-empty path that no longer exists returns
-	// ErrTranscriptGone, so the caller can render the "transcript no longer
-	// available" state.
+	// never an error. A non-empty path that does not exist on an ENDED read
+	// (RuntimeDir and Home both "") returns ErrTranscriptGone, so the caller can
+	// render the "transcript no longer available" state. On an ACTIVE read an
+	// adapter whose LocateTranscript can name a transcript identity before its
+	// file exists (claude-code after /clear, issue #79 decision 5) treats the
+	// missing file as the fresh, still-empty conversation — an idle empty
+	// chat with its live signals composed, never ErrTranscriptGone.
 	TranscriptPath string
 	// Model is the run's SPAWN-TIME model catalog value as persisted on the run
 	// row (runs.model, e.g. "opus[1m]"), "" for legacy rows or an unknown
@@ -872,7 +900,11 @@ type AgentProvider interface {
 	// caller keeps the run's already-stored transcript path (see
 	// internal/chat/chat.go locateActive: a locate miss keeps known). Returns ""
 	// (no error) when no transcript is found yet. The path is persisted on the
-	// run row so ended runs stay readable.
+	// run row so ended runs stay readable. An adapter MAY return the path of
+	// an identity whose file does not exist yet (claude-code: the registry
+	// rotates its sessionId at /clear time, but the fresh transcript is
+	// written only with the next message — issue #79 decision 5); ReadChat's
+	// active-read rule on ReadSpec.TranscriptPath covers that window.
 	//
 	// Clear/epoch obligation (issue #51 decision 2): an adapter MUST surface
 	// a NEW conversation identity here whenever its provider clears context —
@@ -886,8 +918,10 @@ type AgentProvider interface {
 	// state — the adapter owns "what state is my agent in", composed from
 	// whatever its agent's best signals are (issue #92): the transcript at
 	// spec.TranscriptPath plus any adapter-private live signals spooled under
-	// spec.RuntimeDir for spec.RunID (claude-code: the hook spool, compat §9;
-	// codex: nothing — a pure rollout fold). Core owns run lifecycle only (the
+	// spec.RuntimeDir for spec.RunID or kept by the CLI under spec.Home
+	// (claude-code: the dialog hook spool, compat §9, and the session
+	// registry's status, compat §2 — issue #79; codex: nothing — a pure
+	// rollout fold). Core owns run lifecycle only (the
 	// StateEnded override, transcript identity) and never interprets an
 	// adapter's signals. The empty-string and ErrTranscriptGone rules for each
 	// input are pinned on ReadSpec's fields.
@@ -1041,17 +1075,18 @@ type OpenAffordance struct {
 // whose agent spools live signals under a run's PRIVATE runtime dir
 // (<state>/instances/<runID>/runtime — the dir argument both methods take) —
 // arming the channel at spawn (Setup) and cheap change detection for the
-// tailer (SpoolSig). What the signals MEAN is not a seam concept: the
-// adapter interprets its own spool inside ReadChat (issue #92 — state
-// composition is adapter-owned), so core never reads a dialog or blocked
-// state from here. lab owns the runtime spool directory and its lifecycle
-// (it creates the dir at launch and wipes the whole per-run tree at
-// stop/rollback — instancehome.Wipe/SweepAll — which is why the seam carries
-// no GC method since issue #205: spools, marker, settings file, and crash
-// orphans all die with the run's tree); the provider owns the settings shape
-// and the spool file protocol — for claude-code a fragile coupling pinned in
-// compat §9. Advertised structurally (a type assertion at the call site,
-// exactly like ConnectingReporter and DeepLinker).
+// tailer (SpoolSig, which since issue #79 also covers the agent's own state
+// registry under the run's instance HOME). What the signals MEAN is not a
+// seam concept: the adapter interprets its own spool and registry inside
+// ReadChat (issue #92 — state composition is adapter-owned), so core never
+// reads a dialog or a waiting state from here. lab owns the runtime spool
+// directory and its lifecycle (it creates the dir at launch and wipes the
+// whole per-run tree at stop/rollback — instancehome.Wipe/SweepAll — which is
+// why the seam carries no GC method since issue #205: spools, settings file,
+// and crash orphans all die with the run's tree); the provider owns the
+// settings shape and the spool file protocol — for claude-code a fragile
+// coupling pinned in compat §9. Advertised structurally (a type assertion at
+// the call site, exactly like ConnectingReporter and DeepLinker).
 //
 // Honest degradation (issue #51 decision 6): a provider WITHOUT a verified
 // structured signal channel simply omits the capability — the never-scrape
@@ -1061,8 +1096,10 @@ type OpenAffordance struct {
 // provider flushes pending tool_use.
 type LiveSignals interface {
 	// Setup builds the per-run settings/config payload that arms the agent's
-	// live signal channel (claude: the PreToolUse/PostToolUse/Notification
-	// dialog-capture hooks) to spool into the run's runtime dir keyed by
+	// live signal channel (claude: the PreToolUse/PostToolUse dialog-capture
+	// hooks — the Notification hook is gone since issue #79, its blocked
+	// marker superseded by the session registry's status) to spool into the
+	// run's runtime dir keyed by
 	// runID. It returns the file bytes, the path lab must write them to (the
 	// provider owns the runtime layout under dir), and the spawn args to
 	// append (e.g. ["--settings", settingsPath]). lab writes the bytes at
@@ -1073,11 +1110,15 @@ type LiveSignals interface {
 	// yields the baseline payload.
 	Setup(runID, dir string, opts SetupOpts) (settings []byte, settingsPath string, args []string)
 
-	// SpoolSig is a cheap change-detector over the run's spool + marker files
-	// (existence + mtime + size) so the tailer notices a dialog appearing while
-	// the transcript is byte-frozen and republishes state. "" when neither
-	// file exists.
-	SpoolSig(runID, dir string) string
+	// SpoolSig is a cheap change-detector (existence + mtime + size digest)
+	// over the run's spool files under dir AND the agent's own state registry
+	// under the instance HOME home (claude: the session registry files,
+	// compat §2 — issue #79 decision 6), so the tailer notices a dialog
+	// appearing or a registry status flip (busy → idle, a waiting prompt)
+	// while the transcript is byte-frozen and republishes state. An empty dir
+	// or home skips that half; "" when nothing exists. Core compares it for
+	// equality only and never interprets it.
+	SpoolSig(runID, dir, home string) string
 }
 
 // SetupOpts carries the per-run knobs LiveSignals.Setup folds into the

@@ -148,6 +148,9 @@ func redactChat(red *secrets.Redactor, chat *provider.Chat) []string {
 	if chat.PendingDialog != nil {
 		redactDialog(mask, chat.PendingDialog)
 	}
+	// The state detail (issue #79) can be a permission prompt's own text —
+	// a command line that may carry a value — and it doubles as the push body.
+	mask(&chat.StateDetail)
 	if len(hit) == 0 {
 		return nil
 	}

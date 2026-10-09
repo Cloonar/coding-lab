@@ -114,7 +114,8 @@ func viewJSON(t *testing.T, v View) string {
 }
 
 // 1. Read masks the exact value and an encoded form everywhere it appears —
-// Text, Tool.Input, a dialog message, and the live PendingDialog.
+// Text, Tool.Input, a dialog message, the live PendingDialog, and the state
+// detail (issue #79).
 func TestReadRedact_masksEverywhere(t *testing.T) {
 	cn := &captureNotifier{}
 	svc, st, fake, _ := newSecretService(t, cn.notify, time.Minute)
@@ -124,6 +125,7 @@ func TestReadRedact_masksEverywhere(t *testing.T) {
 	fake.SetChat(secretChat(testSecretValue))
 	fake.SetPendingDialog(&provider.Dialog{ToolID: "t9", Kind: provider.DialogKindQuestion,
 		Prompt: "deploy with " + testSecretValue + " now?", Answerable: true})
+	fake.SetStateDetail("Bash: curl -H 'X-Key: " + testSecretValue + "'")
 
 	view, err := svc.Read(context.Background(), run)
 	if err != nil {
@@ -153,6 +155,9 @@ func TestReadRedact_masksEverywhere(t *testing.T) {
 	}
 	if view.PendingDialog == nil || view.PendingDialog.Prompt != "deploy with "+testPlaceholder+" now?" {
 		t.Errorf("PendingDialog = %+v; want the masked prompt", view.PendingDialog)
+	}
+	if got := view.StateDetail; got != "Bash: curl -H 'X-Key: "+testPlaceholder+"'" {
+		t.Errorf("StateDetail = %q; want the placeholder (issue #79)", got)
 	}
 }
 

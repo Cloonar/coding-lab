@@ -142,6 +142,8 @@ export interface ContextUsage {
 export interface MessagesResponse {
   messages: ChatMessage[];
   state: ConversationState;
+  /** The reason behind `state` (issue #79); omitted when empty. */
+  state_detail?: string;
   cursor: number;
   has_more: boolean;
   /**

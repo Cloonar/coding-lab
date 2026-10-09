@@ -61,6 +61,8 @@ export function createInterrupt(
 export function Composer(props: {
   runID: string;
   state: ConversationState;
+  /** The reason behind `state` (issue #79) — the status line's suffix. */
+  stateDetail: string;
   ended: boolean;
   transcript: TranscriptStatus;
   dialog: Dialog | null;
@@ -359,6 +361,7 @@ export function Composer(props: {
             <StatusLine
               runID={props.runID}
               state={props.state}
+              stateDetail={props.stateDetail}
               messages={props.messages}
               commitsBehind={props.commitsBehind}
               interrupt={interrupt}

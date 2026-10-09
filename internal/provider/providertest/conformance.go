@@ -480,9 +480,14 @@ func checkLoginSession(p provider.AgentProvider) []error {
 //   - runtimeDir "" (signals off / transcript-only read) and a fresh empty
 //     runtime dir (signals armed, no spool yet — the common state seconds
 //     after spawn) must both yield that same idle read.
-//   - a non-empty transcriptPath that no longer exists must surface
+//   - a non-empty transcriptPath that no longer exists, read as an ENDED run
+//     reads it (no RuntimeDir, no Home), must surface
 //     provider.ErrTranscriptGone: httpapi renders the graceful "transcript
 //     no longer available" state from that sentinel; a raw error would 500.
+//     An ACTIVE read of a missing file is deliberately NOT pinned: an adapter
+//     whose LocateTranscript names an identity before its file exists
+//     (claude-code after /clear, issue #79) reads it as an idle empty chat,
+//     while one that never does (codex) may keep ErrTranscriptGone.
 func checkReadChat(tb testing.TB, p provider.AgentProvider) []error {
 	var errs []error
 	requireIdle := func(what string, chat provider.Chat, err error) {

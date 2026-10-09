@@ -30,6 +30,10 @@ type instanceResponse struct {
 	// (working|needs_input|question|idle), "" when unknown — the live badge on
 	// Dashboard rows (issue #7 decision 11).
 	State string `json:"state"`
+	// StateDetail is the adapter's optional human reason for State (issue #79
+	// decision 4 — claude-code: the registry's waitingFor), rendered after the
+	// state phrase on the Runs page. Omitted when none.
+	StateDetail string `json:"state_detail,omitempty"`
 }
 
 type instanceCreateRequest struct {
@@ -120,6 +124,7 @@ func (s *Server) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 			Live:        v.Live,
 			Connecting:  v.Connecting,
 			State:       v.State,
+			StateDetail: v.StateDetail,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"instances": items})
