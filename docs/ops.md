@@ -235,8 +235,9 @@ Runtime-mutable knobs live in the `settings` table (Settings UI / `PATCH /api/v1
 | `container_nofile` | `16384` | `--ulimit nofile` inside the container — replaces the host prlimit cap there; per-repo override. |
 | `runner_default` | `host` | Global runner default: the **Runner** of every repo set to *Inherit global default*. `host` or `container`; anything else is rejected. A change applies to each inheriting repo's next spawn, never to a live run ([Container runner](#container-runner)). |
 | `dev_image_default` | (unset) | Global default dev image for container runs whose repo has no **Dev image** of its own; blank falls through to `--container-image`. Pinned on save like a repo's Dev image. |
+| `transcript_retention_days` | `30` | Days an ended run keeps its transcript, so its chat stays readable ([Retained transcripts](#retained-transcripts)). `0` keeps none; at most `365`. Global only: no per-repo override, flag or NixOS option. |
 
-**Settings → Runner** edits `runner_default`, `dev_image_default` and the three `container_*` limits. `GET /api/v1/settings` also returns `dev_image_fallback` — the `--container-image` value, read-only (a PATCH cannot change it).
+**Settings → Runner** edits `runner_default`, `dev_image_default` and the three `container_*` limits; **Settings → General → Transcripts** edits `transcript_retention_days`. `GET /api/v1/settings` also returns `dev_image_fallback` — the `--container-image` value, read-only (a PATCH cannot change it).
 
 ## Seeding the initial operator user
 
@@ -953,11 +954,25 @@ Reading the failures:
                              into the run's container at its host-identical path
   logins/                    0700 — per-attempt scratch HOMEs for containerized
                              provider login (ADR-0057); wiped at login teardown
+  transcripts/<runID>/       0700 — an ended run's retained transcript (issue
+                             #81 / ADR-0079): the provider's own session file,
+                             moved out of instances/<runID>/home/ just before
+                             that tree is wiped; removed once the run has been
+                             ended for transcript_retention_days. Disposable,
+                             not backed up
 ```
 
 Sessions are named `<repo>~<label>`; `~` never appears in paths.
 
 **Sizing note — container image store.** When any repo uses the [container runner](#container-runner), rootless podman's image store also lives under the state dir, at `<state>/.local/share/containers` (the lab user's HOME is `<state>`). Dev and agent-tools images typically dominate disk usage — several GB and up. Account for it when sizing the `stateDir` volume; it is reconstructible (pull-if-missing at spawn), so it is not part of the backup set.
+
+### Retained transcripts
+
+An ended run's chat stays readable because lab keeps its transcript. When a run's private tree under `<state>/instances/<runID>/` is wiped (Stop, the AFK reaper, a discarded parked run, the orphan sweep), lab first moves the provider's own session file into `<state>/transcripts/<runID>/`, and the chat reads it from there. Only the run's current conversation is kept: the part before a `/clear` is not.
+
+**Settings → General → Transcripts → Transcript retention (days)** (`transcript_retention_days`, default 30, `0`–`365`) sets how long, counted from when the run ended. The reconcile sweep (every `sweep_interval_minutes`, and once at startup) removes each copy whose run ended longer ago than that, and the run's chat then reads "Transcript no longer available". Shortening the window applies to older runs at the next sweep; `0` stops keeping new transcripts and removes the existing ones at the next sweep. A directory under `transcripts/` whose run no longer exists in the database is removed by the same sweep. There is no size cap: the window is what bounds the directory. If a copy cannot be made, lab logs a warning and wipes the run as usual; that run's chat is simply not kept.
+
+**Retained transcripts and secrets.** A transcript holds whatever the agent printed, including any secret value it echoed, and the retained copy is that same file. Lab never rewrites it. The chat masks the repo secret values lab holds when it renders them, but the bytes on disk stay as written; if a secret reached a transcript, rotate it. The retention window bounds how long such a copy stays on disk after the run ends, and `0` keeps none at all.
 
 ## Backup & restore
 
@@ -967,7 +982,7 @@ Back up, **consistently together** (one snapshot set):
 - `<state>/master.key` (or the sops-managed key file) — without it, credential payloads are unrecoverable.
 - `<state>/repos/` — the bare reference clones (claims and parked branches live here as git refs).
 
-Explicitly **excluded** (reconstructible or ephemeral): `<state>/runtime/`, `<state>/instances/`, `<state>/logins/` (all regenerated per operation/run and swept at boot), `<state>/worktrees/` (recreated from branches — resolve parked/dirty worktrees *before* decommissioning a host; a backup cannot carry uncommitted changes safely), `<state>/agent/` and the `agent.sock` symlink (recreated on boot), and `<state>/.local/share/containers/` (digest-pinned images, re-pulled on demand).
+Explicitly **excluded** (reconstructible or ephemeral): `<state>/runtime/`, `<state>/instances/`, `<state>/logins/` (all regenerated per operation/run and swept at boot), `<state>/worktrees/` (recreated from branches — resolve parked/dirty worktrees *before* decommissioning a host; a backup cannot carry uncommitted changes safely), `<state>/agent/` and the `agent.sock` symlink (recreated on boot), `<state>/.local/share/containers/` (digest-pinned images, re-pulled on demand), and `<state>/transcripts/` (disposable: losing it loses only old runs' chat history, which ends with the [retention window](#retained-transcripts) anyway).
 
 Mechanics:
 

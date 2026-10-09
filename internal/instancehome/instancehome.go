@@ -20,6 +20,17 @@
 // clean Wipe, while sparing a directory too young to have made it into the
 // keep-set yet. See credFileMinAge in vault/materialize.go for the same
 // reasoning applied to homeDirMinAge below.
+//
+// Wipe and SweepAll are the ONLY two places a per-run tree is ever destroyed,
+// which makes them the one place a run gets a last look at its tree before it
+// is gone: the pre-wipe hook chain (AddPreWipeHook). It began as the single
+// issue #222 adopt-check seam (credrotate adopts a self-refreshed credential
+// family back into the master store; the Warpgate run key revocation of
+// ADR-0068 rides the same hook) and became a chain with issue #81, whose
+// transcript retain step moves the run's provider-native transcript out of
+// HOME into <state>/transcripts/<runID>/ — after the adopt-check, so every
+// teardown path (stop, rollback, AFK stop, the reaper, the parked discard,
+// the orphan sweeps) covers both with no per-site code.
 package instancehome
 
 import (
@@ -52,15 +63,24 @@ const homeDirMinAge = 5 * time.Minute
 // otherwise look orphaned.
 var runIDPattern = regexp.MustCompile(`^run_[0-9a-f]{32}$`)
 
+// IsRunID reports whether name has the exact run-id shape SweepAll matches
+// (runIDPattern: run_<32 lowercase hex>). Exported for the other owners of a
+// run-id-keyed directory (issue #81: reconcile's transcript expiry over
+// <state>/transcripts) so "which entries could be a run's" has ONE
+// definition: anything that does not match is never touched there either.
+func IsRunID(name string) bool { return runIDPattern.MatchString(name) }
+
 // Manager owns <state>/instances — one private per-run tree (home + runtime)
 // per run (issues #202/#205): the isolation seam the container runner will
 // later mount. See the package doc comment for the full lifecycle.
 type Manager struct {
 	root string
 
-	// preWipe is the issue #222 adopt-check seam, installed by SetPreWipeHook.
-	// nil (the zero value) is a no-op.
-	preWipe func(runID string)
+	// preWipe is the pre-wipe hook chain, appended to by AddPreWipeHook and
+	// run in registration order: the issue #222 adopt-check (+ the ADR-0068
+	// run-key revocation) first, then the issue #81 transcript retain step.
+	// Empty (the zero value) is a no-op.
+	preWipe []func(runID string)
 }
 
 // New returns a Manager rooted at root. Unlike vault.NewMaterializer, which
@@ -76,29 +96,46 @@ func New(root string) *Manager {
 // Root returns the instances root directory (<state>/instances).
 func (m *Manager) Root() string { return m.root }
 
-// SetPreWipeHook installs hook as the issue #222 adopt-check seam. Wipe (the
+// AddPreWipeHook appends hook to the pre-wipe chain. Wipe (the
 // stop/rollback path) and SweepAll (the orphan GC) — the ONLY two places any
-// per-run home tree is ever destroyed — call it synchronously with the run's
-// id immediately BEFORE that run's tree is removed, so a wipe can never
-// destroy the only valid credential family: the hook gets one last look at
-// the live tree to adopt a self-refreshed family into the master store
-// before it is gone for good.
+// per-run home tree is ever destroyed — run every hook synchronously, in
+// registration order, with the run's id immediately BEFORE that run's tree is
+// removed, so each gets one last look at the live tree before it is gone for
+// good. The seam began as the single issue #222 adopt-check (a wipe must
+// never destroy the only valid credential family, so a self-refreshed family
+// is adopted into the master store first) and became a chain with issue #81:
+// the transcript retain step moves the run's provider-native transcript out
+// of HOME — registered AFTER the adopt-check, which cmd/lab's registration
+// order alone guarantees.
 //
-// Wipe fires it only when the run's directory actually exists — an
-// idempotent re-wipe of an already-gone tree must not re-fire an adopt-check.
-// SweepAll fires it only for entries that already passed the run-id-pattern,
-// keep-set, and min-age gates — a genuine reap, never a kept, too-young, or
-// non-run-shaped entry.
+// Wipe runs the chain only when the run's directory actually exists — an
+// idempotent re-wipe of an already-gone tree must not re-fire an adopt-check
+// or a retain. SweepAll runs it only for entries that already passed the
+// run-id-pattern, keep-set, and min-age gates — a genuine reap, never a kept,
+// too-young, or non-run-shaped entry.
+//
+// A hook cannot veto or fail the wipe: it returns nothing, and every hook
+// must be best-effort (log and return) — the removal happens regardless.
 //
 // Manager has no lock of its own, so — like the rest of its invariants (e.g.
 // checkRunID's assumption that every runID it sees already satisfies the
-// id-shape contract) — this one is enforced by the caller, not the type: the
-// hook must be installed once at composition time, before any run can reach
-// Wipe or SweepAll, never concurrently with wipes already in flight. A nil
-// hook (the zero value — SetPreWipeHook never called) is a no-op:
-// Wipe/SweepAll behave exactly as they did before issue #222.
-func (m *Manager) SetPreWipeHook(hook func(runID string)) {
-	m.preWipe = hook
+// id-shape contract) — this one is enforced by the caller, not the type:
+// hooks must be added at composition time, before any run can reach Wipe or
+// SweepAll, never concurrently with wipes already in flight. An empty chain
+// (the zero value — AddPreWipeHook never called) is a no-op: Wipe/SweepAll
+// behave exactly as they did before issue #222. A nil hook is ignored.
+func (m *Manager) AddPreWipeHook(hook func(runID string)) {
+	if hook == nil {
+		return
+	}
+	m.preWipe = append(m.preWipe, hook)
+}
+
+// runPreWipe runs the pre-wipe chain for runID, in registration order.
+func (m *Manager) runPreWipe(runID string) {
+	for _, hook := range m.preWipe {
+		hook(runID)
+	}
 }
 
 // RunPath returns <root>/<runID> — the per-run tree itself, the parent of
@@ -211,20 +248,21 @@ func mkdirTight(dir string) error {
 // across repeated calls, and a run whose home was never materialized (e.g.
 // a rollback before Materialize ran) wipes cleanly too.
 //
-// If a pre-wipe hook is installed (SetPreWipeHook, issue #222) and the run's
-// directory actually exists, it runs synchronously here, immediately before
-// the RemoveAll — the run's last chance to adopt a self-refreshed credential
-// family into the master store before its home is gone for good. It does
-// NOT fire for an already-missing directory: an idempotent re-wipe must not
-// re-fire the adopt-check.
+// If pre-wipe hooks are installed (AddPreWipeHook) and the run's directory
+// actually exists, the chain runs synchronously here, in registration order,
+// immediately before the RemoveAll — the run's last chance to adopt a
+// self-refreshed credential family into the master store (issue #222) and
+// to have its transcript retained (issue #81) before its home is gone for
+// good. It does NOT fire for an already-missing directory: an idempotent
+// re-wipe must not re-fire the adopt-check or the retain.
 func (m *Manager) Wipe(runID string) error {
 	if err := checkRunID(runID); err != nil {
 		return err
 	}
 	runDir := filepath.Join(m.root, runID)
-	if m.preWipe != nil {
+	if len(m.preWipe) > 0 {
 		if _, err := os.Stat(runDir); err == nil {
-			m.preWipe(runID)
+			m.runPreWipe(runID)
 		}
 	}
 	if err := removeTree(runDir); err != nil {
@@ -307,12 +345,13 @@ func restoreWritable(root string) error {
 // log — the same shape reconcile's sweep/startup callers already handle for
 // CleanupAll.
 //
-// If a pre-wipe hook is installed (SetPreWipeHook, issue #222), it runs
-// synchronously right before each entry's RemoveAll — i.e. only for entries
-// that already passed the run-id-pattern, keep-set, and min-age gates, never
-// for a kept or too-young or non-run-shaped entry — so an orphan reaped here
-// (the restart-after-downtime race a startup sweep exists to close) gets the
-// same adopt-check chance as the synchronous Wipe path.
+// If pre-wipe hooks are installed (AddPreWipeHook), the chain runs
+// synchronously, in registration order, right before each entry's RemoveAll —
+// i.e. only for entries that already passed the run-id-pattern, keep-set, and
+// min-age gates, never for a kept or too-young or non-run-shaped entry — so
+// an orphan reaped here (the restart-after-downtime race a startup sweep
+// exists to close) gets the same adopt-check (issue #222) and transcript
+// retain (issue #81) chance as the synchronous Wipe path.
 func (m *Manager) SweepAll(keep func(runID string) bool) error {
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
@@ -337,9 +376,7 @@ func (m *Manager) SweepAll(keep func(runID string) bool) error {
 		if ierr != nil || time.Since(info.ModTime()) < homeDirMinAge {
 			continue // in-flight launch: materialized, but its run isn't in the keep-set yet
 		}
-		if m.preWipe != nil {
-			m.preWipe(name)
-		}
+		m.runPreWipe(name)
 		// removeTree, not a bare RemoveAll: an orphan reaped here carries the
 		// same write-protected import snapshots (issue #261) a synchronous
 		// Wipe would have had to clear.

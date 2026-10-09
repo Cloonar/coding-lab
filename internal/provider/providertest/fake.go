@@ -101,6 +101,14 @@ type Fake struct {
 	answerErr      error
 	interruptErr   error
 
+	// Transcript retention (issue #81): retainPath/retainErr script what
+	// RetainTranscript returns (default ("", nil) — nothing to keep; the fake
+	// never touches the filesystem); retainCalls records every call's
+	// arguments, in order.
+	retainPath  string
+	retainErr   error
+	retainCalls []RetainCall
+
 	// LiveSignals lifecycle capability (issue #17 / ADR-0020, narrowed in
 	// issue #92 and again in #205 — no GC method; the per-run runtime dir is
 	// wiped with the run). hookArgs/hookSettings script Setup; spoolSig
@@ -134,6 +142,17 @@ type ReadCall struct {
 	Worktree       string
 	TranscriptPath string
 	Model          string
+}
+
+// RetainCall is one recorded RetainTranscript invocation (issue #81) — the
+// assertion surface for what core's pre-wipe retain step passes down the
+// seam: the run's worktree and instance HOME, its stored transcript path, and
+// the per-run retention dir it created.
+type RetainCall struct {
+	Worktree       string
+	Home           string
+	TranscriptPath string
+	DestDir        string
 }
 
 // credSig is one home's scripted credential signature: the opaque sig string
@@ -549,6 +568,37 @@ func (f *Fake) LocateTranscript(_ context.Context, _, _, home string) (string, e
 	f.locateCt++
 	f.locateHomes = append(f.locateHomes, home)
 	return f.transcriptPath, nil
+}
+
+// RetainTranscript records the call and returns the scripted result (issue
+// #81; SetRetainResult) — ("", nil), nothing to keep, unless scripted. It
+// never touches the filesystem: core's retain step persists whatever path it
+// returns, so tests script a path and assert the persistence, not a move.
+func (f *Fake) RetainTranscript(_ context.Context, worktree, home, transcriptPath, destDir string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retainCalls = append(f.retainCalls, RetainCall{Worktree: worktree, Home: home,
+		TranscriptPath: transcriptPath, DestDir: destDir})
+	if f.retainErr != nil {
+		return "", f.retainErr
+	}
+	return f.retainPath, nil
+}
+
+// SetRetainResult scripts RetainTranscript's return: the retained path (""
+// → nothing to keep) or, when err is non-nil, the failure (the path is then
+// ignored, like a real adapter's error return).
+func (f *Fake) SetRetainResult(path string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retainPath, f.retainErr = path, err
+}
+
+// RetainCalls returns the arguments of every RetainTranscript call, in order.
+func (f *Fake) RetainCalls() []RetainCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]RetainCall(nil), f.retainCalls...)
 }
 
 // ReadChat returns the scripted transcript base composed with the scripted

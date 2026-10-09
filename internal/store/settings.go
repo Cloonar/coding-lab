@@ -133,7 +133,38 @@ const (
 	// silent drop to the flag image. Provider login and the provider CLI
 	// containers never read it: they run the flag image alone (ADR-0057).
 	SettingDevImageDefault = "dev_image_default"
+
+	// Transcript retention window (issue #81): how many days an ENDED run
+	// keeps its retained transcript under <state>/transcripts/<runID>/ — the
+	// provider-native file the pre-wipe retain step moves out of the run's
+	// HOME before teardown wipes it, so the read-only chat can still render
+	// the conversation. 0 = retain nothing (the off switch: the retain step
+	// skips, and the next expiry sweep removes every retained copy);
+	// MaxTranscriptRetentionDays caps it — there is no "forever", no per-repo
+	// override, no CLI flag and no NixOS option: this row is the only source.
+	// Like runner_default above it IS seeded (to
+	// DefaultTranscriptRetentionDays), so a fresh install retains without
+	// operator action and an operator's value survives re-seeding. Expiry keys
+	// on runs.ended_at (EndedRunsWithTranscriptBefore), never on file mtime,
+	// so shortening the window applies retroactively at the next reconcile
+	// sweep — intended. Read through TranscriptRetentionDays.
+	SettingTranscriptRetentionDays = "transcript_retention_days"
 )
+
+// Transcript retention bounds (issue #81) — the ONE source shared by the seed,
+// the settings PATCH's 0..Max validation, and TranscriptRetentionDays' read
+// fallback, so the window the instance retain step and the reconcile expiry
+// step act on can never drift from what the API accepts.
+const (
+	DefaultTranscriptRetentionDays = 30
+	MaxTranscriptRetentionDays     = 365
+)
+
+// ErrInvalidSetting is the sentinel for a present settings row whose value a
+// typed reader refuses (issue #81: TranscriptRetentionDays). The reader still
+// returns its usable fallback alongside it, so a caller can warn and carry on
+// rather than stall the step the setting gates.
+var ErrInvalidSetting = errors.New("invalid setting value")
 
 // Container resource-limit defaults — the ONE source of the grilled #205
 // values. SeedDefaultSettings writes them, and every read-side fallback (the
@@ -264,6 +295,32 @@ func (s *Store) GetBool(ctx context.Context, key string, def bool) (bool, error)
 	return false, fmt.Errorf("setting %q: not a boolean: %q", key, v)
 }
 
+// TranscriptRetentionDays reads transcript_retention_days (issue #81) for the
+// instance retain step and the reconcile expiry step. An absent or blank row
+// reads as DefaultTranscriptRetentionDays (nil error). A present value that is
+// not an integer in [0, MaxTranscriptRetentionDays] — only a hand-edited row;
+// the settings PATCH never stores one — returns the DEFAULT together with an
+// error wrapping ErrInvalidSetting: the caller logs it and proceeds on the
+// default, so neither retaining nor expiry stalls (a stalled expiry would
+// leave the secret-bearing copies past their window). Any other error is a
+// store failure, returned with 0: the caller skips its step this time rather
+// than act on a guessed window.
+func (s *Store) TranscriptRetentionDays(ctx context.Context) (int, error) {
+	v, err := s.GetString(ctx, SettingTranscriptRetentionDays, "")
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(v) == "" {
+		return DefaultTranscriptRetentionDays, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 || n > MaxTranscriptRetentionDays {
+		return DefaultTranscriptRetentionDays, fmt.Errorf("setting %q = %q, want an integer 0..%d (using %d): %w",
+			SettingTranscriptRetentionDays, v, MaxTranscriptRetentionDays, DefaultTranscriptRetentionDays, ErrInvalidSetting)
+	}
+	return n, nil
+}
+
 // SeedDefaultSettings inserts the design §3a defaults for every missing key
 // and never overwrites an existing row (--max-instances seeds the row on
 // first start; thereafter settings wins). defaultProvider seeds the
@@ -278,7 +335,9 @@ func (s *Store) GetBool(ctx context.Context, key string, def bool) (bool, error)
 // no lower layer for "absent" to fall back to. runner_default (issue #55)
 // joins them on the same footing, seeded host so an upgrade spawns exactly
 // as before; like every row here an existing value — an operator's
-// container — survives re-seeding untouched.
+// container — survives re-seeding untouched. transcript_retention_days
+// (issue #81) is seeded DefaultTranscriptRetentionDays on the same
+// insert-if-absent footing: an operator's 0 (off) or 365 is never reset.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
@@ -296,6 +355,8 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingContainerPids:        strconv.Itoa(DefaultContainerPids),
 		SettingContainerNofile:      strconv.Itoa(DefaultContainerNofile),
 		SettingRunnerDefault:        RunnerHost,
+
+		SettingTranscriptRetentionDays: strconv.Itoa(DefaultTranscriptRetentionDays),
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

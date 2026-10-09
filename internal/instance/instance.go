@@ -171,6 +171,16 @@ type Options struct {
 	ReposDir     string
 	WorktreeRoot string
 
+	// TranscriptsDir is <state>/transcripts (issue #81) — where the pre-wipe
+	// retain step (RetainTranscript) moves an ending run's provider-native
+	// transcript out of its HOME before the wipe, one 0700 <runID>/ dir per
+	// retained run, so the read-only chat can still render the conversation.
+	// Disposable by design: excluded from the backup set, and reconcile's
+	// expiry step removes each dir once the transcript_retention_days window
+	// past the run's ended_at closes. "" disables the retain step (every wipe
+	// behaves exactly as before issue #81).
+	TranscriptsDir string
+
 	// LabURL is the value handed to spawned sessions as LAB_URL so labctl can
 	// reach the agent API. It comes from labURL()'s precedence (issue #201):
 	// the dedicated agent URL if set, else the agent unix socket
@@ -322,6 +332,10 @@ type Service struct {
 	captureCtx   context.Context
 	now          func() time.Time
 
+	// transcriptsDir is <state>/transcripts, the pre-wipe retain step's root
+	// (issue #81; see Options.TranscriptsDir). "" = the retain step is off.
+	transcriptsDir string
+
 	// Container runner wiring (issue #205; see the Options fields). podmanRun
 	// is always non-nil (New defaults it); containerPreflight nil = container
 	// mode structurally unavailable.
@@ -448,6 +462,8 @@ func New(o Options) (*Service, error) {
 		gitEnv:       o.GitEnv,
 		captureCtx:   captureCtx,
 		now:          now,
+
+		transcriptsDir: o.TranscriptsDir,
 
 		podmanBin:            o.PodmanBin,
 		containerImage:       o.ContainerImage,

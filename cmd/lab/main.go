@@ -377,6 +377,12 @@ func run() int {
 	// at launch, Wipe at stop/rollback, SweepAll at boot/runtime) and the
 	// chat/httpapi read paths (the pure HomePath).
 	homes := instancehome.New(filepath.Join(cfg.StateDir, "instances"))
+	// Retained transcripts (issue #81): <state>/transcripts holds one 0700
+	// <runID>/ dir per ended run whose provider-native transcript the pre-wipe
+	// retain step moved out of its HOME, kept for transcript_retention_days
+	// and expired by the reconcile sweeps. Disposable (outside the backup
+	// set) and created lazily by the first retain, like <state>/instances.
+	transcriptsDir := filepath.Join(cfg.StateDir, "transcripts")
 
 	// Web push (issue #98): load-or-generate the VAPID keypair with the same
 	// first-start bootstrap and key-file contract as the master key, then wire
@@ -678,6 +684,9 @@ func run() int {
 			WorktreeRoot: worktreeRoot,
 			LabURL:       labURL(cfg),
 			CaptureCtx:   ctx,
+			// The pre-wipe retain step's root (issue #81); the step itself is
+			// installed on the homes' pre-wipe chain below.
+			TranscriptsDir: transcriptsDir,
 			// Container runner wiring (issue #205): the spawn seam that turns a
 			// Runner=container repo's pane command into `podman run`, gated on
 			// the preflight verdict above (nil = structurally unavailable).
@@ -724,6 +733,9 @@ func run() int {
 			ReposDir:     reposDir,
 			ArmCapture:   instanceSvc.ArmCapture,
 			AFKRunEnded:  m.AFKRunEnded,
+			// The transcript expiry step's root (issue #81) — the same dir the
+			// instance service retains into.
+			TranscriptsDir: transcriptsDir,
 			// Container backstops (issue #205): the Discard kill's podman rm
 			// and the startup orphaned-container sweep.
 			PodmanBin:          cfg.PodmanBin,
@@ -850,10 +862,24 @@ func run() int {
 		// from the runtime dir the wipe is about to remove, is a no-op on a lab
 		// without Warpgate or a run that was never wired, and detaches from ctx
 		// so shutdown cannot strand a key.
-		homes.SetPreWipeHook(func(runID string) {
+		//
+		// Since issue #81 the seam is a CHAIN, run in registration order, and
+		// the transcript retain step rides it as the second hook (decision 5):
+		// moving the run's provider-native transcript out of HOME into
+		// <state>/transcripts/<runID>/ is exactly the "one last look before the
+		// tree is gone" this seam exists for, so all six wipe sites — Stop, AFK
+		// stop, the reaper, the parked discard, launch rollback, and the orphan
+		// sweeps, the startup one after downtime included — retain with no
+		// per-site code. Ordered AFTER the adopt-check (and the key revocation)
+		// so a slow cross-device copy never delays adopting a self-refreshed
+		// credential family or revoking live SSH access. Like the hook above it
+		// must be installed before StartupReconcile, and like RevokeBastionKey
+		// it detaches from ctx, so a wipe during shutdown still retains.
+		homes.AddPreWipeHook(func(runID string) {
 			credrotateSvc.AdoptCheck(ctx, runID)
 			instanceSvc.RevokeBastionKey(ctx, runID)
 		})
+		homes.AddPreWipeHook(func(runID string) { instanceSvc.RetainTranscript(ctx, runID) })
 
 		// lab_instances_active (M8): a scrape-time gauge over the live
 		// tmux+active-runs view — registered only with the instance stack up

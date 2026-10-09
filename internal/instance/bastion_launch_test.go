@@ -1072,7 +1072,7 @@ func TestStop_BastionKeyRevokedThroughThePreWipeHook(t *testing.T) {
 	api := newBastionStub(f.repo.ID, warpgate.Target{ID: "t1", Name: "staging"})
 	f.enableBastion(t, api, &hostKeysStub{text: testKnownHosts})
 	f.cacheSSHTargets(t, store.SSHTarget{ID: "t1", Name: "staging"})
-	f.homes.SetPreWipeHook(func(runID string) { f.svc.RevokeBastionKey(context.Background(), runID) })
+	f.homes.AddPreWipeHook(func(runID string) { f.svc.RevokeBastionKey(context.Background(), runID) })
 
 	run, err := f.svc.Start(t.Context(), StartParams{RepoID: f.repo.ID})
 	if err != nil {

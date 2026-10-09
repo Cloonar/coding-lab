@@ -52,7 +52,7 @@ const aliasProviderID = "claude-code"
 // Config is the fully resolved process configuration.
 type Config struct {
 	Addr          string // listen address
-	StateDir      string // root of lab's state (db, master key, repos, worktrees, runtime)
+	StateDir      string // root of lab's state (db, master key, repos, worktrees, runtime, instances, transcripts)
 	DB            string // DSN: sqlite:<path> or postgres://…
 	MasterKeyFile string // path to the vault master key file
 	VAPIDKeyFile  string // path to the web push VAPID key file (RFC 8292)

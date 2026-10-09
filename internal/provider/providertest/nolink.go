@@ -173,6 +173,13 @@ func (f *NoLinkFake) LocateTranscript(context.Context, string, string, string) (
 	return "", nil
 }
 
+// RetainTranscript has nothing to keep (issue #81): this fake never locates a
+// transcript, so there is never a file to move — ("", nil), the seam's
+// nothing-to-keep answer.
+func (f *NoLinkFake) RetainTranscript(context.Context, string, string, string, string) (string, error) {
+	return "", nil
+}
+
 // ReadChat is transcript-less: this fake never locates a transcript, so every
 // read is the pre-transcript idle chat (the issue #92 seam contract: an empty
 // transcriptPath yields an idle empty chat, never an error).

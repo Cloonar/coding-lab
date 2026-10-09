@@ -47,6 +47,9 @@ func (s stubProvider) Commands(context.Context, string, string) ([]CommandSpec, 
 func (s stubProvider) LocateTranscript(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
+func (s stubProvider) RetainTranscript(context.Context, string, string, string, string) (string, error) {
+	return "", nil
+}
 func (s stubProvider) ReadChat(ReadSpec) (Chat, error)             { return Chat{}, nil }
 func (s stubProvider) Reply(context.Context, string, string) error { return nil }
 func (s stubProvider) AnswerDialog(context.Context, string, Dialog, DialogAnswer) error {

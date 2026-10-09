@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,6 +39,15 @@ type Fixture struct {
 	// CleanSamples: lines that must NOT match any scrub pattern (over-broad
 	// pattern guard). Optional.
 	CleanSamples []string
+	// SeedTranscript materializes ONE minimal provider-native session for
+	// worktree under the instance HOME home, written exactly where this
+	// provider's CLI would write it (plus whatever live registry its
+	// LocateTranscript keys on), such that LocateTranscript(ctx, _, worktree,
+	// home) finds it and an ENDED ReadChat of the located path yields at least
+	// one message. Required (issue #81): the retain-transcript obligation
+	// drives the real locate → retain → wipe → read cycle through it, so the
+	// transcript layout stays adapter knowledge and the suite stays neutral.
+	SeedTranscript func(tb testing.TB, home, worktree string)
 }
 
 // Conformance executes every Tier-1 seam obligation against p, hermetically
@@ -68,7 +78,9 @@ type Fixture struct {
 // spawn argv shape (issue #19 / ADR-0021), the auth-flow vocabulary and
 // login-session naming (issue #77 / ADR-0034), the remote-control knob's
 // advertise-or-ignore contract (issue #163), and executable exclude/scrub
-// coverage.
+// coverage. Transcript retention (issue #81, retain-transcript) is the one
+// chat-surface round-trip run end to end, against a session the adapter's own
+// Fixture.SeedTranscript writes — the suite never learns the layout.
 func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Helper()
 	report := func(t *testing.T, errs []error) {
@@ -87,6 +99,7 @@ func Conformance(t *testing.T, p provider.AgentProvider, fx Fixture) {
 	t.Run("login-session", func(t *testing.T) { report(t, checkLoginSession(p)) })
 	t.Run("read-chat", func(t *testing.T) { report(t, checkReadChat(t, p)) })
 	t.Run("locate-homeless", func(t *testing.T) { report(t, checkLocateHomeless(p)) })
+	t.Run("retain-transcript", func(t *testing.T) { report(t, checkRetainTranscript(t, p, fx)) })
 	t.Run("inject-credentials", func(t *testing.T) { report(t, checkInjectCredentials(t, p)) })
 	t.Run("credential-authority", func(t *testing.T) { report(t, checkCredentialAuthority(t, p)) })
 	t.Run("master-store-spec", func(t *testing.T) { report(t, checkMasterStoreSpec(t, p)) })
@@ -546,6 +559,101 @@ func checkLocateHomeless(p provider.AgentProvider) []error {
 		return []error{fmt.Errorf("locate-homeless: LocateTranscript with home=\"\" returned %q; want \"\" — with no per-run home there is no instance transcript store to resolve under, and resolving one means falling back to the master store, which isolation by construction forbids (issue #202)", path)}
 	}
 	return nil
+}
+
+// checkRetainTranscript pins RetainTranscript's contract end to end (issue
+// #81) — the pre-wipe seam core runs blind before every per-run tree wipe:
+//
+//   - the round-trip: Fixture.SeedTranscript writes a session under a fresh
+//     HOME, LocateTranscript finds it, an ENDED read (no Home, no RuntimeDir)
+//     of it is the baseline; RetainTranscript into an empty destDir must
+//     return a non-empty path UNDER destDir; then the whole HOME is removed
+//     (what instancehome's wipe does) and an ENDED ReadChat of the retained
+//     path must yield the same messages and cursor as the baseline — the file
+//     is moved, never rewritten (ADR-0016), and everything the read needs
+//     came along.
+//   - containment: destDir's siblings are never touched (a sibling run's
+//     retention dir survives byte-identical, and no new entry appears beside
+//     destDir).
+//   - nothing to keep: an empty transcriptPath (nothing located) and a
+//     vanished one under the HOME both return ("", nil) and leave destDir
+//     empty — never an error core would log on every transcript-less wipe.
+func checkRetainTranscript(tb testing.TB, p provider.AgentProvider, fx Fixture) []error {
+	if fx.SeedTranscript == nil {
+		return []error{fmt.Errorf("retain-transcript: Fixture.SeedTranscript is nil — the suite needs the adapter to write one minimal native session under a HOME so it can drive locate → retain → wipe → read (issue #81)")}
+	}
+	ctx := context.Background()
+	var errs []error
+
+	// Nothing to keep: no located transcript, and a vanished one.
+	for _, c := range []struct{ what, path string }{
+		{"an empty transcriptPath (nothing located)", ""},
+		{"a vanished transcriptPath under the HOME", "gone.jsonl"},
+	} {
+		home, dest := tb.TempDir(), tb.TempDir()
+		path := c.path
+		if path != "" {
+			path = filepath.Join(home, path)
+		}
+		got, err := p.RetainTranscript(ctx, tb.TempDir(), home, path, dest)
+		if err != nil || got != "" {
+			errs = append(errs, fmt.Errorf("retain-transcript: RetainTranscript with %s returned (%q, %v); want (\"\", nil) — nothing to keep is the normal state of a transcript-less run, never an error core logs on every wipe (issue #81)", c.what, got, err))
+		}
+		if n := countFiles(dest); n != 0 {
+			errs = append(errs, fmt.Errorf("retain-transcript: RetainTranscript with %s wrote %d file(s) into destDir — nothing to keep means nothing retained (issue #81)", c.what, n))
+		}
+	}
+
+	// The round-trip.
+	home, worktree := tb.TempDir(), tb.TempDir()
+	fx.SeedTranscript(tb, home, worktree)
+	located, err := p.LocateTranscript(ctx, "conformance-session-1", worktree, home)
+	if err != nil || located == "" {
+		return append(errs, fmt.Errorf("retain-transcript: LocateTranscript after Fixture.SeedTranscript returned (%q, %v); want the seeded session's path — the fixture must write exactly what the adapter locates (issue #81)", located, err))
+	}
+	before, err := p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1", TranscriptPath: located})
+	if err != nil || len(before.Messages) == 0 {
+		return append(errs, fmt.Errorf("retain-transcript: ENDED ReadChat of the seeded transcript returned %d message(s), err %v; want >=1 message — the fixture must seed a renderable conversation or the round-trip proves nothing (issue #81)", len(before.Messages), err))
+	}
+
+	parent := tb.TempDir()
+	dest := filepath.Join(parent, "conformance-run-1")
+	sibling := filepath.Join(parent, "conformance-run-0", "keep.jsonl")
+	for _, d := range []string{dest, filepath.Dir(sibling)} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			tb.Fatalf("retain-transcript: mkdir %s: %v", d, err)
+		}
+	}
+	const siblingBody = "a sibling run's retained transcript\n"
+	if err := os.WriteFile(sibling, []byte(siblingBody), 0o600); err != nil {
+		tb.Fatalf("retain-transcript: write sibling: %v", err)
+	}
+
+	retained, err := p.RetainTranscript(ctx, worktree, home, located, dest)
+	if err != nil {
+		return append(errs, fmt.Errorf("retain-transcript: RetainTranscript of the located transcript returned error %v — a present transcript under the run's own HOME must be retained (issue #81)", err))
+	}
+	if rel, rerr := filepath.Rel(dest, retained); retained == "" || rerr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return append(errs, fmt.Errorf("retain-transcript: RetainTranscript returned %q; want a path under destDir %q — anything else is wiped with the HOME or escapes the per-run retention dir core expires (issue #81)", retained, dest))
+	}
+	if b, err := os.ReadFile(sibling); err != nil || string(b) != siblingBody {
+		errs = append(errs, fmt.Errorf("retain-transcript: a sibling of destDir was modified or removed (read err %v) — RetainTranscript must never touch destDir's siblings (issue #81)", err))
+	}
+	if entries, err := os.ReadDir(parent); err != nil || len(entries) != 2 {
+		errs = append(errs, fmt.Errorf("retain-transcript: destDir's parent holds %d entries after the retain (err %v); want exactly destDir and its pre-existing sibling — RetainTranscript writes only under destDir (issue #81)", len(entries), err))
+	}
+
+	if err := os.RemoveAll(home); err != nil {
+		tb.Fatalf("retain-transcript: wipe HOME: %v", err)
+	}
+	after, err := p.ReadChat(provider.ReadSpec{RunID: "conformance-run-1", TranscriptPath: retained})
+	if err != nil {
+		return append(errs, fmt.Errorf("retain-transcript: ENDED ReadChat of the retained path %q after the HOME wipe returned error %v — everything the read needs must have moved into destDir (issue #81)", retained, err))
+	}
+	if !reflect.DeepEqual(after.Messages, before.Messages) || after.Cursor != before.Cursor {
+		errs = append(errs, fmt.Errorf("retain-transcript: ENDED ReadChat of the retained path yields %d message(s) / cursor %d; want the pre-retain read's %d / %d, identical — the native file is moved, never rewritten or truncated (ADR-0016; issue #81)", len(after.Messages), after.Cursor, len(before.Messages), before.Cursor))
+	}
+	return errs
 }
 
 // checkInjectCredentials pins InjectCredentials' argument contract hermetically

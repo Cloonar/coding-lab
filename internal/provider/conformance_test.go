@@ -1,6 +1,8 @@
 package provider_test
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -50,6 +52,7 @@ var conformanceProviders = []struct {
 					"Co-Authored-By: Alice <alice@example.com>",
 					"Docs generated with pandoc.",
 				},
+				SeedTranscript: seedClaudeTranscript,
 			}
 		},
 	},
@@ -80,9 +83,53 @@ var conformanceProviders = []struct {
 					"Co-authored-by: Alice <alice@example.com>",
 					"The openai.com docs describe the responses API.",
 				},
+				SeedTranscript: seedCodexRollout,
 			}
 		},
 	},
+}
+
+// seedClaudeTranscript is claude-code's Fixture.SeedTranscript (issue #81):
+// a live session-registry entry (this test process's pid, so pidAlive holds)
+// whose cwd is worktree, and the <sessionId>.jsonl it names under
+// <home>/.claude/projects/<slug(worktree)>/ (compat §5) carrying one user and
+// one assistant turn.
+func seedClaudeTranscript(tb testing.TB, home, worktree string) {
+	tb.Helper()
+	const sessionID = "c0nf0rma-0000-4000-8000-000000000001"
+	entry, err := json.Marshal(claudecode.RegistryEntry{PID: os.Getpid(), Cwd: worktree, StartedAt: 1, SessionID: sessionID})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	writeFixtureFile(tb, filepath.Join(home, ".claude", "sessions", "1.json"), string(entry))
+	writeFixtureFile(tb, filepath.Join(home, ".claude", "projects", claudecode.SlugForDir(worktree), sessionID+".jsonl"),
+		`{"type":"user","timestamp":"2026-10-09T00:00:00.000Z","message":{"role":"user","content":"hello claude"}}`+"\n"+
+			`{"type":"assistant","timestamp":"2026-10-09T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hello operator"}]}}`+"\n")
+}
+
+// seedCodexRollout is codex's Fixture.SeedTranscript (issue #81): one rollout
+// under <home>/.codex/sessions/YYYY/MM/DD/ whose session_meta cwd is worktree,
+// carrying one user and one agent message.
+func seedCodexRollout(tb testing.TB, home, worktree string) {
+	tb.Helper()
+	cwd, err := json.Marshal(worktree)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	writeFixtureFile(tb, filepath.Join(home, ".codex", "sessions", "2026", "10", "09", "rollout-2026-10-09T00-00-00-c0nf0rma.jsonl"),
+		`{"timestamp":"2026-10-09T00:00:00.000Z","type":"session_meta","payload":{"id":"c0nf0rma","cwd":`+string(cwd)+`,"cli_version":"0.133.0"}}`+"\n"+
+			`{"timestamp":"2026-10-09T00:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"hello codex"}}`+"\n"+
+			`{"timestamp":"2026-10-09T00:00:02.000Z","type":"event_msg","payload":{"type":"agent_message","message":"hello operator"}}`+"\n")
+}
+
+func writeFixtureFile(tb testing.TB, path, body string) {
+	tb.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		tb.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		tb.Fatal(err)
+	}
 }
 
 // TestConformance runs the Tier-1 suite against every registered adapter in

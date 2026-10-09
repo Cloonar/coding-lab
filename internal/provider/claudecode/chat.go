@@ -79,6 +79,28 @@ func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktr
 	return transcriptPathFor(home, worktree, e.SessionID), nil
 }
 
+// RetainTranscript implements provider.AgentProvider (issue #81): move the
+// run's <home>/.claude/projects/<slug>/<sessionId>.jsonl into destDir under
+// its own base name, via the shared provider.RetainFile (rename, EXDEV copy
+// fallback, strict containment under home; a missing file is ("", nil)).
+//
+// The transcript file ALONE comes along — deliberately no sidecar. The
+// <sessionId>/ sibling dir claude keeps next to the transcript (subagents/
+// *.jsonl, tool-results/) is never read by ReadChat: the fold renders a
+// subagent as the parent's Task/Agent tool_use + tool_result pair inside the
+// main JSONL (toolUseResult carries its report), and an ENDED read consults
+// neither the dialog spool (RuntimeDir "") nor the session registry (Home ""),
+// so the retained file reads exactly as it did in place. Moving the sidecar
+// would only lengthen the retained secrets' footprint (issue #108) for
+// nothing ReadChat renders. worktree is unused: the stored path already names
+// the identity.
+func (p *Provider) RetainTranscript(ctx context.Context, _ /*worktree*/, home, transcriptPath, destDir string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return provider.RetainFile(home, transcriptPath, destDir, p.rename)
+}
+
 // transcriptPathFor renders the transcript path shape (compat §5):
 // <home>/.claude/projects/<slug(worktree)>/<sessionId>.jsonl.
 func transcriptPathFor(home, worktree, sessionID string) string {

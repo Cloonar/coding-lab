@@ -11,8 +11,12 @@ import (
 // scan order: a best-effort `git fetch origin` first (a failure logs and the
 // sweep still runs on the last-known origin refs — never abort the GC), then
 // sweepProject. It closes with the credential keep-set cleanup (design §6: the
-// throttled sweep repeats the restart rule). Owned/starting sessions are never
-// touched (gatherRefs unions them).
+// throttled sweep repeats the restart rule), the instance-home keep-set
+// cleanup (issue #202), and then the transcript expiry step (issue #81:
+// expireTranscripts — after the home sweep, so an orphan home reaped there has
+// its transcript retained by the pre-wipe chain before the window is
+// applied). Owned/starting sessions are never touched (gatherRefs unions
+// them).
 func (s *Service) RuntimeSweep(ctx context.Context) {
 	repos, err := s.readyRepos(ctx)
 	if err != nil {
@@ -40,6 +44,12 @@ func (s *Service) RuntimeSweep(ctx context.Context) {
 	// the run id directly.
 	if err := s.homes.SweepAll(func(runID string) bool { return keep[runID] }); err != nil {
 		s.log.Warn("sweep: instance homes dir", "component", "reconcile", "err", err)
+	}
+	// Transcript retention expiry (issue #81): the throttled repeat of the
+	// startup step — drop retained transcripts past the window, and run-shaped
+	// dirs whose run row is gone.
+	if err := s.expireTranscripts(ctx); err != nil {
+		s.log.Warn("sweep: transcripts dir", "component", "reconcile", "err", err)
 	}
 }
 
