@@ -9,7 +9,8 @@
 //     re-adoption of runs.outcome='active' against live tmux (adopt survivors,
 //     mark the rest dead, re-arm deep-link capture), THEN Pass A orphan guarded
 //     teardown + Pass B bare-merged-branch GC, THEN the runtime/ credential
-//     keep-set cleanup.
+//     keep-set cleanup, the instance-home keep-set cleanup, and the
+//     transcript expiry step (issue #81).
 //   - RuntimeSweep / SweepLoop: throttled merged-ONLY sweep, best-effort fetch
 //     per repo first, owned/starting sessions never touched.
 //   - Parked / Discard: the read-only view over guarded-rule-preserved work,
@@ -97,6 +98,15 @@ type Options struct {
 	// ReposDir is <state>/repos — the parent of every bare reference clone.
 	ReposDir string
 
+	// TranscriptsDir is <state>/transcripts (issue #81) — the root the
+	// instance service's pre-wipe retain step moves ended runs' transcripts
+	// into, one <runID>/ dir per retained run. The startup and throttled
+	// sweeps expire it (expireTranscripts): a run whose ended_at is past the
+	// transcript_retention_days window loses its dir and its transcript path,
+	// and a run-shaped dir whose run row no longer exists is removed. ""
+	// disables the expiry step.
+	TranscriptsDir string
+
 	// GitEnv is prepended to every git subprocess (hermetic env in tests, nil
 	// in production). The sweep's best-effort fetch runs with only this base
 	// env — private-remote fetches degrade to the last-known origin refs
@@ -147,6 +157,10 @@ type Service struct {
 	armCapture  func(store.Run)
 	afkRunEnded func(kind, outcome string, duration time.Duration)
 	now         func() time.Time
+
+	// transcriptsDir is <state>/transcripts, the expiry step's root (issue
+	// #81; see Options.TranscriptsDir). "" = transcript expiry off.
+	transcriptsDir string
 
 	// Container backstop wiring (issue #205; see the Options fields).
 	// podmanRun is always non-nil (New defaults it); containerPreflight nil =
@@ -202,6 +216,8 @@ func New(o Options) (*Service, error) {
 		armCapture:  o.ArmCapture,
 		afkRunEnded: o.AFKRunEnded,
 		now:         now,
+
+		transcriptsDir: o.TranscriptsDir,
 
 		podmanBin:          o.PodmanBin,
 		podmanRun:          podmanRun,

@@ -28,6 +28,14 @@ const deathReasonAtStartup = "session gone at startup"
 //     the files of re-adopted LIVE runs (a pre-upgrade run re-adopted across
 //     the upgrade still authenticates through its global-dir files), unlink
 //     the rest.
+//  4. Instance-home keep-set cleanup (issue #202): reap aged-out orphan
+//     per-run trees — each through instancehome's pre-wipe chain, so an
+//     orphan left by downtime still gets its adopt-check (issue #222) and its
+//     transcript retained (issue #81).
+//  5. Transcript expiry (issue #81: expireTranscripts) — AFTER step 4, so the
+//     orphans just reaped are retained first and the window then applies to
+//     them like to any other ended run.
+//  6. Orphaned-container sweep (issue #205).
 func (s *Service) StartupReconcile(ctx context.Context) error {
 	liveRunIDs, err := s.readopt(ctx)
 	if err != nil {
@@ -52,6 +60,12 @@ func (s *Service) StartupReconcile(ctx context.Context) error {
 	// keyed by run id, unlike the credID.opID credential filenames).
 	if err := s.homes.SweepAll(func(runID string) bool { return liveRunIDs[runID] }); err != nil {
 		s.log.Warn("sweeping instance homes dir", "component", "reconcile", "err", err)
+	}
+	// Transcript retention expiry (issue #81): after the home sweep above, so
+	// the orphan homes it just reaped had their transcripts retained by the
+	// pre-wipe chain before the window is applied.
+	if err := s.expireTranscripts(ctx); err != nil {
+		s.log.Warn("sweeping transcripts dir", "component", "reconcile", "err", err)
 	}
 
 	// Orphaned-container sweep (issue #205): remove every labrun- container no

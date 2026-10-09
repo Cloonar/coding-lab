@@ -8,8 +8,10 @@ package instance
 //
 //   - RevokeBastionKey — per run, from the revocation marker the launch path
 //     wrote, at the root of the run's tree, the moment the key was
-//     registered. cmd/lab composes it into the ONE pre-wipe hook on
-//     instancehome.Manager, beside credrotate's adopt-check (ADR-0055), so
+//     registered. cmd/lab composes it into the FIRST pre-wipe hook on
+//     instancehome.Manager's chain (issue #81 made the seam a chain; the
+//     transcript retain step follows), beside credrotate's adopt-check
+//     (ADR-0055), so
 //     Stop, the AFK reaper, a launch rollback and the orphan-tree sweep all
 //     revoke with no per-site code: the hook exists precisely because every
 //     path that destroys a run's tree needs one last look at it first.

@@ -3,6 +3,7 @@ package instancehome
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -327,7 +328,7 @@ func TestWipeFiresPreWipeHookBeforeRemoval(t *testing.T) {
 		calls      []string
 		treeExists bool
 	)
-	m.SetPreWipeHook(func(gotRunID string) {
+	m.AddPreWipeHook(func(gotRunID string) {
 		calls = append(calls, gotRunID)
 		if _, err := os.Stat(home); err == nil {
 			treeExists = true
@@ -357,7 +358,7 @@ func TestWipeOfMissingTreeDoesNotFireHook(t *testing.T) {
 	const runID = "run_hhhh"
 
 	var calls int
-	m.SetPreWipeHook(func(string) { calls++ })
+	m.AddPreWipeHook(func(string) { calls++ })
 
 	if err := m.Wipe(runID); err != nil {
 		t.Fatalf("Wipe of never-materialized run: %v", err)
@@ -367,7 +368,7 @@ func TestWipeOfMissingTreeDoesNotFireHook(t *testing.T) {
 	}
 }
 
-// TestWipeStillWorksWithNoHookInstalled: a nil hook (SetPreWipeHook never
+// TestWipeStillWorksWithNoHookInstalled: an empty chain (AddPreWipeHook never
 // called) is a no-op — Wipe behaves exactly as it did before issue #222.
 func TestWipeStillWorksWithNoHookInstalled(t *testing.T) {
 	m := newTestManager(t)
@@ -495,7 +496,7 @@ func TestSweepAllFiresPreWipeHookOnlyForReapedOrphans(t *testing.T) {
 		calls            []string
 		treeExistsAtCall = map[string]bool{}
 	)
-	m.SetPreWipeHook(func(runID string) {
+	m.AddPreWipeHook(func(runID string) {
 		calls = append(calls, runID)
 		if _, err := os.Stat(filepath.Join(m.Root(), runID)); err == nil {
 			treeExistsAtCall[runID] = true
@@ -512,5 +513,83 @@ func TestSweepAllFiresPreWipeHookOnlyForReapedOrphans(t *testing.T) {
 	}
 	if !treeExistsAtCall[oldOrphan] {
 		t.Error("hook ran for oldOrphan, but its tree was already gone — hook must fire BEFORE removal")
+	}
+}
+
+// TestPreWipeHookChainRunsInRegistrationOrder pins the issue #81 chain: every
+// hook added fires, exactly once per reap, in registration order — cmd/lab
+// relies on that order to run the issue #222 adopt-check BEFORE the
+// transcript retain step — at both fire points (Wipe and SweepAll), and each
+// still sees the tree on disk.
+func TestPreWipeHookChainRunsInRegistrationOrder(t *testing.T) {
+	m := newTestManager(t)
+	const (
+		wiped  = "run_44444444444444444444444444444444"
+		orphan = "run_55555555555555555555555555555555"
+	)
+	for _, runID := range []string{wiped, orphan} {
+		if _, err := m.Materialize(runID); err != nil {
+			t.Fatalf("Materialize(%s): %v", runID, err)
+		}
+	}
+	ageDir(t, m.RunPath(orphan))
+
+	var calls []string
+	hook := func(name string) func(string) {
+		return func(runID string) {
+			if _, err := os.Stat(m.RunPath(runID)); err != nil {
+				t.Errorf("hook %s for %s ran after the tree was gone: %v", name, runID, err)
+			}
+			calls = append(calls, name+":"+runID)
+		}
+	}
+	m.AddPreWipeHook(hook("first"))
+	m.AddPreWipeHook(nil) // ignored, never called
+	m.AddPreWipeHook(hook("second"))
+
+	if err := m.Wipe(wiped); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	if err := m.SweepAll(func(string) bool { return false }); err != nil {
+		t.Fatalf("SweepAll: %v", err)
+	}
+
+	want := []string{"first:" + wiped, "second:" + wiped, "first:" + orphan, "second:" + orphan}
+	if !slices.Equal(calls, want) {
+		t.Errorf("hook calls = %v, want %v", calls, want)
+	}
+}
+
+// TestSweepAllStillWorksWithNoHookInstalled: the SweepAll half of the
+// empty-chain contract — an aged orphan is reaped exactly as before any hook
+// existed.
+func TestSweepAllStillWorksWithNoHookInstalled(t *testing.T) {
+	m := newTestManager(t)
+	const orphan = "run_66666666666666666666666666666666"
+	if _, err := m.Materialize(orphan); err != nil {
+		t.Fatal(err)
+	}
+	ageDir(t, m.RunPath(orphan))
+	if err := m.SweepAll(nil); err != nil {
+		t.Fatalf("SweepAll with no hook installed: %v", err)
+	}
+	if _, err := os.Stat(m.RunPath(orphan)); !os.IsNotExist(err) {
+		t.Error("orphan survived SweepAll")
+	}
+}
+
+func TestIsRunID(t *testing.T) {
+	for name, want := range map[string]bool{
+		"run_0123456789abcdef0123456789abcdef":  true,
+		"run_0123456789ABCDEF0123456789abcdef":  false, // uppercase hex
+		"run_0123456789abcdef0123456789abcde":   false, // 31 hex
+		"run_0123456789abcdef0123456789abcdef0": false, // 33 hex
+		"repo_0123456789abcdef0123456789abcdef": false,
+		"lost+found":                            false,
+		"":                                      false,
+	} {
+		if got := IsRunID(name); got != want {
+			t.Errorf("IsRunID(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
