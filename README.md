@@ -152,7 +152,8 @@ labctl label create --name N [--color C --description D]
 labctl pr create --title T --body B   open a PR/CR for the current branch
 labctl pr view <n>                    show PR n (number, title, state, head, url, body, reviews, comments)
 labctl pr list                        list open PRs plus the ~50 most recently closed (number, state, head, url)
-labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
+labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability); prints number, state, url,
+                                      then head-deleted | head-kept: <why> | head-delete-failed: <why> (exit 0 in all three)
 labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                       pending (exit 0 green/none · 2 red · 3 still pending)
 labctl pr logs <n> [--check <context>]

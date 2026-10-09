@@ -1216,13 +1216,21 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 }
 
 // prMergeResponse is the POST /agent/v1/prs/{n}/merge answer: the merged PR's
-// number, three-valued state (merged on success), head branch, and web/lab
-// URL — what `labctl pr merge` prints.
+// number, three-valued state (merged on success), head branch, web/lab URL,
+// and the head outcome (ADR-0081) — what `labctl pr merge` prints.
+// HeadOutcome is one of "deleted" | "kept" | "failed" (the tracker.Head*
+// constants): whether the head ref on ORIGIN is gone after the merge.
+// HeadReason says why it was kept, or carries the backend's own words when the
+// delete failed, and is omitted on "deleted". Both are additive — a client
+// that predates them ignores them — and a failed delete is still a 200: the
+// merge landed, which is the irreversible part.
 type prMergeResponse struct {
-	Number int    `json:"number"`
-	State  string `json:"state"`
-	Head   string `json:"head"`
-	URL    string `json:"url"`
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	Head        string `json:"head"`
+	URL         string `json:"url"`
+	HeadOutcome string `json:"head_outcome"`
+	HeadReason  string `json:"head_reason,omitempty"`
 }
 
 // handlePRMerge is POST /agent/v1/prs/{n}/merge: land PR/CR n of the run's
@@ -1233,8 +1241,14 @@ type prMergeResponse struct {
 // labctl exit. Convergent: merging an already-merged PR is a no-op success.
 // On a forge-bound repo the merge runs under the SERVER's forge token — the
 // run-token repo scope stays the only agent-side boundary, and no forge
-// credential ever reaches the session (ADR-0014). The head branch is not
-// deleted (teardown/sweep GCs a merged head, not merge).
+// credential ever reaches the session (ADR-0014). After the merge is durably
+// recorded the head ref on ORIGIN is deleted when the global merge_delete_head
+// setting is on (read here, once, via GetBool(key, true) — the adapters never
+// read settings; ADR-0081). The setting is read BEFORE the merge so an
+// unreadable row fails the call while nothing has landed yet. The outcome rides
+// the response; a failed delete is logged at warn and still answers 200 — the
+// merge succeeded and a non-zero exit would have the lander retry a merged PR.
+// The LOCAL branch lifecycle stays with teardown/the sweep.
 func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
 	_, repo, ok := s.runRepo(w, r)
 	if !ok {
@@ -1249,16 +1263,28 @@ func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pr, err := tk.MergePull(r.Context(), n)
+	deleteHead, err := s.store.GetBool(r.Context(), store.SettingMergeDeleteHead, true)
+	if err != nil {
+		s.internalError(w, "reading merge_delete_head setting", err)
+		return
+	}
+	pr, err := tk.MergePull(r.Context(), n, tracker.MergeOptions{DeleteHead: deleteHead})
 	if err != nil {
 		s.writeTrackerError(w, "merging pull request", repo, err)
 		return
 	}
+	if pr.Head.Outcome == tracker.HeadFailed {
+		s.log.Warn("merged pull request but deleting its head branch failed",
+			"component", "agentapi", "repo", repo.ID, "pr", pr.Number, "head", pr.HeadBranch,
+			"reason", pr.Head.Reason)
+	}
 	writeJSON(w, http.StatusOK, prMergeResponse{
-		Number: pr.Number,
-		State:  pr.State,
-		Head:   pr.HeadBranch,
-		URL:    pr.URL,
+		Number:      pr.Number,
+		State:       pr.State,
+		Head:        pr.HeadBranch,
+		URL:         pr.URL,
+		HeadOutcome: pr.Head.Outcome,
+		HeadReason:  pr.Head.Reason,
 	})
 }
 

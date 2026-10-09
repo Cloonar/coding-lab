@@ -108,12 +108,18 @@ type PRRef struct {
 }
 
 // PRMerged is the agent API's POST /prs/{n}/merge answer: the merged PR's
-// number, three-valued state (merged on success), head branch, and URL.
+// number, three-valued state (merged on success), head branch, URL, and the
+// head outcome (ADR-0081): HeadOutcome is "deleted" | "kept" | "failed" and
+// HeadReason carries why it was kept or the backend's own words on a failed
+// delete. A server that predates the outcome sends neither field; both then
+// decode empty.
 type PRMerged struct {
-	Number int    `json:"number"`
-	State  string `json:"state"`
-	Head   string `json:"head"`
-	URL    string `json:"url"`
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	Head        string `json:"head"`
+	URL         string `json:"url"`
+	HeadOutcome string `json:"head_outcome"`
+	HeadReason  string `json:"head_reason"`
 }
 
 // PRChecksReport is the agent API's GET /prs/{n}/checks answer: the per-check

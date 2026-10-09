@@ -285,6 +285,49 @@ type PullRef struct {
 	Closes     []int
 }
 
+// Head outcomes of a MergePull (ADR-0081): what became of the pull's head ref
+// on origin once the merge was durably recorded. HeadDeleted means the ref is
+// ABSENT on origin afterwards — an already-gone ref on a convergent re-merge,
+// or a built-in head that was never pushed, counts too. HeadKept means lab
+// deliberately left it (the merge_delete_head setting is off, or the
+// same-repo guard refused a fork's head). HeadFailed means the delete was
+// attempted and the backend refused it or the network failed; the merge
+// itself still succeeded — a delete failure never fails a landed merge.
+const (
+	HeadDeleted = "deleted"
+	HeadKept    = "kept"
+	HeadFailed  = "failed"
+)
+
+// HeadKeptSettingOff is the HeadReason of a HeadKept outcome produced because
+// the caller asked for no deletion (MergeOptions.DeleteHead false — the
+// merge_delete_head setting is off).
+const HeadKeptSettingOff = "setting off"
+
+// MergeOptions are the caller's knobs for MergePull. DeleteHead asks the
+// backend to delete the head ref on origin after the merge is recorded; the
+// caller reads it from the merge_delete_head setting — adapters never read
+// settings themselves.
+type MergeOptions struct {
+	DeleteHead bool
+}
+
+// HeadResult is the head outcome of a merge: Outcome is one of HeadDeleted |
+// HeadKept | HeadFailed; Reason says why it was kept (HeadKept) or carries the
+// backend's own words (HeadFailed), and is empty on HeadDeleted.
+type HeadResult struct {
+	Outcome string
+	Reason  string
+}
+
+// MergeResult is MergePull's answer: the merged pull's unchanged PullRef
+// (PullRef itself stays pinned to the reaper's hot path) plus the head
+// outcome.
+type MergeResult struct {
+	PullRef
+	Head HeadResult
+}
+
 // PullDetail is one pull request / change request in full: what PullRef
 // deliberately drops (title, BODY) plus the same number/state/head/URL. It
 // exists because PullRef is pinned to the reaper's hot path — Pulls() stays a
@@ -512,13 +555,19 @@ type Tracker interface {
 	// (the forge applies its own configured strategy). Mergeability is the
 	// backend's call: MergePull does NOT pre-check required status checks or
 	// branch protection; it attempts the merge and, if the backend refuses,
-	// wraps ErrMergeRejected around the refusal's own words. The head branch
-	// is never deleted (branch lifecycle stays owned by the sweep/teardown).
+	// wraps ErrMergeRejected around the refusal's own words. With
+	// opts.DeleteHead the head ref on ORIGIN is deleted once the merge is
+	// durably recorded (forge: after the forge confirms it; built-in: after
+	// the CR row is recorded), guarded so a fork's head is never touched; the
+	// local branch lifecycle stays with teardown/the sweep (ADR-0081). The
+	// result's HeadOutcome reports what happened; a failed delete is NOT an
+	// error — the merge is the irreversible part and still succeeded.
 	// Convergent: merging an already-merged pull is a no-op success naming
-	// the existing merged state, not an error. An unknown number wraps
+	// the existing merged state, not an error (the head delete still runs,
+	// so an already-gone ref reads HeadDeleted). An unknown number wraps
 	// ErrNotFound. On a forge binding the merge is a server-credentialed
 	// call — no forge token ever reaches the agent session (ADR-0014).
-	MergePull(ctx context.Context, number int) (PullRef, error)
+	MergePull(ctx context.Context, number int, opts MergeOptions) (MergeResult, error)
 
 	// Reviews lists the submitted reviews on pull number, oldest first — the
 	// read behind the human half of the autoland loop's hybrid rejected-state

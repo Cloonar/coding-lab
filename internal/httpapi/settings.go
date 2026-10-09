@@ -101,6 +101,11 @@ var settingsIntMax = map[string]int{
 var settingsBoolNullable = map[string]bool{
 	store.SettingSpawnRemoteDefault:    false,
 	store.SettingSpawnRemoteDefaultAFK: true,
+
+	// merge_delete_head (issue #90, ADR-0081): a plain non-nullable bool —
+	// false is a VALUE (keep the head branch on origin), and the seeded
+	// "true" row is always present, so there is no inherit state.
+	store.SettingMergeDeleteHead: false,
 }
 
 // typedSettings renders a raw settings map with the integer keys as JSON

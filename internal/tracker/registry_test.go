@@ -35,10 +35,12 @@ func (stubTracker) CheckLog(context.Context, int, string) (CheckLogResult, error
 func (stubTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, nil
 }
-func (stubTracker) MergePull(context.Context, int) (PullRef, error) { return PullRef{}, nil }
-func (stubTracker) Reviews(context.Context, int) ([]Review, error)  { return nil, nil }
-func (stubTracker) RerequestReview(context.Context, int) error      { return nil }
-func (stubTracker) CommentPull(context.Context, int, string) error  { return nil }
+func (stubTracker) MergePull(context.Context, int, MergeOptions) (MergeResult, error) {
+	return MergeResult{}, nil
+}
+func (stubTracker) Reviews(context.Context, int) ([]Review, error) { return nil, nil }
+func (stubTracker) RerequestReview(context.Context, int) error     { return nil }
+func (stubTracker) CommentPull(context.Context, int, string) error { return nil }
 func (stubTracker) PullComments(context.Context, int) ([]Comment, error) {
 	return nil, nil
 }

@@ -1481,10 +1481,11 @@ func TestMergePull_success(t *testing.T) {
 		}
 	})
 
-	ref, err := c.MergePull(context.Background(), 42)
+	res, err := c.MergePull(context.Background(), 42, tracker.MergeOptions{})
 	if err != nil {
 		t.Fatalf("MergePull: %v", err)
 	}
+	ref := res.PullRef
 	if !postCalled {
 		t.Fatal("MergePull did not POST a merge")
 	}
@@ -1494,8 +1495,13 @@ func TestMergePull_success(t *testing.T) {
 	if mergeBody["Do"] != "merge" {
 		t.Errorf("merge Do = %v; want the fixed \"merge\" method", mergeBody["Do"])
 	}
-	// The head branch must survive the merge (acceptance criterion 3): the
-	// merge request carries ONLY Do — no delete_branch_after_merge.
+	// The merge request carries ONLY Do — no delete_branch_after_merge: that
+	// flag would delete the branch inside the forge's merge, bypassing the
+	// same-repo guard and the outcome report (ADR-0081). With the default
+	// (zero) MergeOptions the head is kept.
+	if res.Head.Outcome != tracker.HeadKept || res.Head.Reason != tracker.HeadKeptSettingOff {
+		t.Errorf("head = %+v; want kept (setting off)", res.Head)
+	}
 	if len(mergeBody) != 1 {
 		t.Errorf("merge body = %v; want only Do (no delete_branch_after_merge)", mergeBody)
 	}
@@ -1517,10 +1523,11 @@ func TestMergePull_alreadyMergedIsConvergentNoOp(t *testing.T) {
 		  "html_url":"https://git.cloonar.com/o/r/pulls/42"}`)
 	})
 
-	ref, err := c.MergePull(context.Background(), 42)
+	res, err := c.MergePull(context.Background(), 42, tracker.MergeOptions{})
 	if err != nil {
 		t.Fatalf("MergePull: %v", err)
 	}
+	ref := res.PullRef
 	if postCalled {
 		t.Fatal("MergePull POSTed a merge for an already-merged pull; want a convergent no-op")
 	}
@@ -1543,7 +1550,7 @@ func TestMergePull_rejectedSurfacesForgeWordsVerbatim(t *testing.T) {
 		_, _ = io.WriteString(w, `{"message":"Please check the required status checks before merging"}`)
 	})
 
-	_, err := c.MergePull(context.Background(), 42)
+	_, err := c.MergePull(context.Background(), 42, tracker.MergeOptions{})
 	if !errors.Is(err, tracker.ErrMergeRejected) {
 		t.Fatalf("err = %v, want ErrMergeRejected", err)
 	}
@@ -1562,9 +1569,152 @@ func TestMergePull_notFound(t *testing.T) {
 		_, _ = io.WriteString(w, `{"message":"pull request does not exist"}`)
 	})
 
-	_, err := c.MergePull(context.Background(), 999)
+	_, err := c.MergePull(context.Background(), 999, tracker.MergeOptions{})
 	if !errors.Is(err, tracker.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMergePull_headOutcome is ADR-0081's table: what MergePull reports about
+// the head ref, and which calls it makes, for every way the decision can go.
+// Each row serves a pull (open, or already merged for the convergent path)
+// whose head lives in headRepo, then answers the head-ref DELETE with
+// deleteStatus/deleteBody. Whatever the DELETE does, MergePull's error is nil
+// and the PullRef reports merged — a failed delete never fails a landed merge.
+func TestMergePull_headOutcome(t *testing.T) {
+	const refPath = apiPrefix + "/branches/afk/42"
+	sameRepo := `{"full_name":"Cloonar/nixos"}`
+	tests := []struct {
+		name          string
+		alreadyMerged bool
+		deleteHead    bool
+		headRepo      string // raw JSON for head.repo
+		deleteStatus  int
+		deleteBody    string
+		wantDelete    bool
+		wantOutcome   string
+		wantReason    string // exact, for deleted/kept
+		wantReasonSub string // substring, for failed
+	}{
+		{name: "merged then ref deleted", deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusNoContent, wantDelete: true, wantOutcome: tracker.HeadDeleted},
+		{name: "owner/name match is case-insensitive", deleteHead: true, headRepo: `{"full_name":"cloonar/NixOS"}`,
+			deleteStatus: http.StatusNoContent, wantDelete: true, wantOutcome: tracker.HeadDeleted},
+		{name: "setting off keeps the ref and makes no DELETE", deleteHead: false, headRepo: sameRepo,
+			wantOutcome: tracker.HeadKept, wantReason: tracker.HeadKeptSettingOff},
+		{name: "fork head is kept", deleteHead: true, headRepo: `{"full_name":"someone/nixos"}`,
+			wantOutcome: tracker.HeadKept, wantReason: "head lives in someone/nixos"},
+		{name: "same repo name under another owner is a fork", deleteHead: true, headRepo: `{"full_name":"Cloonar/nixos-2"}`,
+			wantOutcome: tracker.HeadKept, wantReason: "head lives in Cloonar/nixos-2"},
+		{name: "deleted head fork (repo null) is kept", deleteHead: true, headRepo: `null`,
+			wantOutcome: tracker.HeadKept, wantReason: "head repository unknown"},
+		{name: "empty full_name is kept", deleteHead: true, headRepo: `{"full_name":""}`,
+			wantOutcome: tracker.HeadKept, wantReason: "head repository unknown"},
+		{name: "branch already absent (404) counts as deleted", deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusNotFound, deleteBody: `{"message":"The target couldn't be found."}`,
+			wantDelete: true, wantOutcome: tracker.HeadDeleted},
+		{name: "protected ref refused (403) is failed with the forge's words", deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusForbidden, deleteBody: `{"message":"Cannot delete protected branch"}`,
+			wantDelete: true, wantOutcome: tracker.HeadFailed, wantReasonSub: "Cannot delete protected branch"},
+		{name: "unauthorized (401) is failed, not deleted", deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusUnauthorized, deleteBody: `{"message":"token is required"}`,
+			wantDelete: true, wantOutcome: tracker.HeadFailed, wantReasonSub: "token is required"},
+		{name: "upstream 5xx is failed", deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusBadGateway, deleteBody: `{"message":"Server Error"}`,
+			wantDelete: true, wantOutcome: tracker.HeadFailed, wantReasonSub: "502"},
+		{name: "re-merge of an already-merged pull deletes the ref", alreadyMerged: true, deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusNoContent, wantDelete: true, wantOutcome: tracker.HeadDeleted},
+		{name: "re-merge whose branch is already gone reads deleted", alreadyMerged: true, deleteHead: true, headRepo: sameRepo,
+			deleteStatus: http.StatusNotFound, deleteBody: `{"message":"The target couldn't be found."}`,
+			wantDelete: true, wantOutcome: tracker.HeadDeleted},
+		{name: "re-merge with the setting off keeps the ref", alreadyMerged: true, deleteHead: false, headRepo: sameRepo,
+			wantOutcome: tracker.HeadKept, wantReason: tracker.HeadKeptSettingOff},
+		{name: "re-merge of a fork's pull keeps the ref", alreadyMerged: true, deleteHead: true, headRepo: `{"full_name":"someone/nixos"}`,
+			wantOutcome: tracker.HeadKept, wantReason: "head lives in someone/nixos"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes []string
+			postCalled := false
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					state := "open"
+					if tt.alreadyMerged {
+						state = "closed"
+					}
+					_, _ = fmt.Fprintf(w, `{"number":42,"state":%q,"merged":%t,"head":{"ref":"afk/42","repo":%s},
+					  "html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/42"}`, state, tt.alreadyMerged, tt.headRepo)
+				case http.MethodPost:
+					postCalled = true
+					_, _ = io.WriteString(w, `{}`)
+				case http.MethodDelete:
+					deletes = append(deletes, r.URL.EscapedPath())
+					w.WriteHeader(tt.deleteStatus)
+					_, _ = io.WriteString(w, tt.deleteBody)
+				default:
+					t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+
+			res, err := c.MergePull(context.Background(), 42, tracker.MergeOptions{DeleteHead: tt.deleteHead})
+			if err != nil {
+				t.Fatalf("MergePull: %v (a head outcome must never be an error)", err)
+			}
+			if postCalled == tt.alreadyMerged {
+				t.Errorf("merge POST called = %v; want %v", postCalled, !tt.alreadyMerged)
+			}
+			if res.State != tracker.PullMerged {
+				t.Errorf("state = %s; want merged whatever the head outcome", res.State)
+			}
+			if tt.wantDelete {
+				if len(deletes) != 1 || deletes[0] != refPath {
+					t.Errorf("DELETEs = %v; want exactly [%s]", deletes, refPath)
+				}
+			} else if len(deletes) != 0 {
+				t.Errorf("DELETEs = %v; want none", deletes)
+			}
+			if res.Head.Outcome != tt.wantOutcome {
+				t.Fatalf("head outcome = %q (%q); want %q", res.Head.Outcome, res.Head.Reason, tt.wantOutcome)
+			}
+			if tt.wantReasonSub != "" {
+				if !strings.Contains(res.Head.Reason, tt.wantReasonSub) {
+					t.Errorf("head reason = %q; want it to carry %q", res.Head.Reason, tt.wantReasonSub)
+				}
+			} else if res.Head.Reason != tt.wantReason {
+				t.Errorf("head reason = %q; want %q", res.Head.Reason, tt.wantReason)
+			}
+			if strings.Contains(res.Head.Reason, testToken) {
+				t.Errorf("token leaked into head reason: %q", res.Head.Reason)
+			}
+		})
+	}
+}
+
+// TestMergePull_headRefPathEscaping: a branch name's '/' separators stay
+// literal in branches/{branch} (the route takes a wildcard tail), while each
+// segment is still path-escaped.
+func TestMergePull_headRefPathEscaping(t *testing.T) {
+	var deleted string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"number":42,"state":"closed","merged":true,
+			  "head":{"ref":"feat/a b#1","repo":{"full_name":"Cloonar/nixos"}}}`)
+		case http.MethodDelete:
+			deleted = r.URL.EscapedPath()
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	res, err := c.MergePull(context.Background(), 42, tracker.MergeOptions{DeleteHead: true})
+	if err != nil {
+		t.Fatalf("MergePull: %v", err)
+	}
+	if want := apiPrefix + "/branches/feat/a%20b%231"; deleted != want {
+		t.Errorf("DELETE path = %q; want %q", deleted, want)
+	}
+	if res.Head.Outcome != tracker.HeadDeleted {
+		t.Errorf("head = %+v; want deleted", res.Head)
 	}
 }
 

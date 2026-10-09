@@ -250,8 +250,8 @@ func (o *observed) CreatePull(ctx context.Context, head, base, title, body strin
 	return pull, err
 }
 
-func (o *observed) MergePull(ctx context.Context, number int) (PullRef, error) {
-	pull, err := o.t.MergePull(ctx, number)
+func (o *observed) MergePull(ctx context.Context, number int, opts MergeOptions) (MergeResult, error) {
+	pull, err := o.t.MergePull(ctx, number, opts)
 	o.report(OpMergePull, err)
 	return pull, err
 }

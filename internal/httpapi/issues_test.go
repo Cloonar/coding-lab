@@ -363,8 +363,8 @@ func (s *stubForgeTracker) CheckLog(context.Context, int, string) (tracker.Check
 func (s *stubForgeTracker) CreatePull(context.Context, string, string, string, string) (tracker.PullRef, error) {
 	return tracker.PullRef{}, nil
 }
-func (s *stubForgeTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
-	return tracker.PullRef{}, nil
+func (s *stubForgeTracker) MergePull(context.Context, int, tracker.MergeOptions) (tracker.MergeResult, error) {
+	return tracker.MergeResult{}, nil
 }
 func (s *stubForgeTracker) Reviews(context.Context, int) ([]tracker.Review, error) {
 	return nil, nil

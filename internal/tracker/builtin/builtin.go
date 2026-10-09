@@ -262,26 +262,38 @@ func (t *Tracker) CreatePull(ctx context.Context, head, base, title, body string
 // MergePull lands the built-in change request `number` by routing into the
 // shared crmerge service (ADR-0011 orchestration: per-CR serialization,
 // cancellation-immune git window, Closes #N closure, cr.changed/issue.changed
-// events) and returns the merged PullRef. Reusing that service — rather than
-// reimplementing the merge here — is what keeps the operator route and this
-// agent route byte-for-byte identical.
+// events) and returns the merged PullRef plus the head outcome. Reusing that
+// service — rather than reimplementing the merge here — is what keeps the
+// operator route and this agent route byte-for-byte identical.
+//
+// Head delete (ADR-0081): opts is forwarded verbatim — the caller read the
+// merge_delete_head setting; this adapter never reads settings. With
+// opts.DeleteHead the service deletes the CR's head ref on ORIGIN after the
+// merge is recorded and reports deleted | failed (a failed delete is NOT an
+// error: the merge stands); without it the head is kept ("setting off"). The
+// LOCAL head branch is never touched — teardown and the sweep own it.
 //
 // Convergent: an already-merged CR is a no-op SUCCESS naming the merged state,
 // not an error (the service returns store.ErrCRNotOpen without touching git; a
 // re-read distinguishes merged → converge from closed-unmerged → reject),
 // matching CreatePull's duplicate handling and gitx.CRMerge's own convergence.
+// The convergent path still runs the head delete (merger.DeleteHead) when
+// asked, so a retried merge reports truthfully: a head an earlier attempt
+// already removed reads deleted (absent on origin is the definition), and one
+// whose earlier delete failed is retried.
+//
 // Every refusal the service surfaces — git head-missing / push-rejected /
 // merge-conflict, a closed-unmerged CR, or no configured author identity —
 // becomes tracker.ErrMergeRejected carrying the backend's OWN words; an
 // unknown number surfaces store.ErrNotFound (→ 404). Without a merge service
 // wired it fails loud rather than pretending to merge.
-func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
+func (t *Tracker) MergePull(ctx context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
 	if t.merger == nil {
-		return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: no CR-merge service wired", number)
+		return tracker.MergeResult{}, fmt.Errorf("builtin merge pull %d: no CR-merge service wired", number)
 	}
-	merged, err := t.merger.Merge(ctx, t.repoID, number)
+	merged, head, err := t.merger.Merge(ctx, t.repoID, number, opts)
 	if err == nil {
-		return toPullRef(merged), nil
+		return tracker.MergeResult{PullRef: toPullRef(merged), Head: head}, nil
 	}
 	if errors.Is(err, store.ErrCRNotOpen) {
 		// Not-open without a git run: converge iff it is already merged. A
@@ -289,13 +301,18 @@ func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, e
 		// agent gets a 500, not a spurious "merge refused" 409.
 		cr, rerr := t.store.CRByRepoNumber(ctx, t.repoID, number)
 		if rerr != nil {
-			return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, rerr)
+			return tracker.MergeResult{}, fmt.Errorf("builtin merge pull %d: %w", number, rerr)
 		}
 		if cr.State == store.CRStateMerged {
-			return toPullRef(cr), nil // convergent no-op success
+			// Convergent no-op success; the head outcome is re-derived.
+			head := tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}
+			if opts.DeleteHead {
+				head = t.merger.DeleteHead(ctx, t.repoID, cr.HeadBranch)
+			}
+			return tracker.MergeResult{PullRef: toPullRef(cr), Head: head}, nil
 		}
 		// Closed-unmerged (no reopen): a genuine refusal.
-		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+		return tracker.MergeResult{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
 	}
 	// Only the backend's REAL refusals become ErrMergeRejected (→ 409 with the
 	// words verbatim), matching the operator route's whitelist. Everything else
@@ -305,9 +322,9 @@ func (t *Tracker) MergePull(ctx context.Context, number int) (tracker.PullRef, e
 	// diagnostics never leak as a refusal message.
 	if errors.Is(err, gitx.ErrHeadMissing) || errors.Is(err, gitx.ErrPushRejected) ||
 		errors.Is(err, gitx.ErrMergeConflict) || errors.Is(err, crmerge.ErrNoAuthorIdentity) {
-		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+		return tracker.MergeResult{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
 	}
-	return tracker.PullRef{}, fmt.Errorf("builtin merge pull %d: %w", number, err)
+	return tracker.MergeResult{}, fmt.Errorf("builtin merge pull %d: %w", number, err)
 }
 
 // Reviews lists the submitted reviews on change request `number` — always an

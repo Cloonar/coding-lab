@@ -47,7 +47,9 @@ Usage:
   labctl pr create --title T --body B   open a PR/CR for the current branch
   labctl pr view <n>                    show PR n (number, title, state, head, url, body, reviews, comments)
   labctl pr list                        list open PRs plus the ~50 most recently closed (number, state, head, url)
-  labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability)
+  labctl pr merge <n>                   merge PR n (fixed method; the forge/base enforces mergeability);
+                                        prints number, state, url, then head-deleted | head-kept: <why> |
+                                        head-delete-failed: <why> (exit 0 in all three)
   labctl pr checks <n> [--wait]         CI status of PR n; --wait polls until the aggregate leaves
                                         pending (exit 0 green/none · 2 red · 3 still pending)
   labctl pr logs <n> [--check <context>]
@@ -434,8 +436,14 @@ func runPR(args []string, env Env) int {
 			if err != nil {
 				return err
 			}
-			// One parseable line: number, resulting state, URL.
-			_, _ = fmt.Fprintf(env.Stdout, "#%d\t%s\t%s\n", pm.Number, pm.State, pm.URL)
+			// One parseable line: number, resulting state, URL, then the head
+			// outcome (ADR-0081). A failed head delete is NOT an error — the
+			// merge landed, so every outcome exits zero.
+			line := fmt.Sprintf("#%d\t%s\t%s", pm.Number, pm.State, pm.URL)
+			if head := mergeHeadField(pm); head != "" {
+				line += "\t" + head
+			}
+			_, _ = fmt.Fprintln(env.Stdout, line)
 			return nil
 		})
 	case "checks":
@@ -900,4 +908,33 @@ func withClient(env Env, cmd string, fn func(*Client) error) int {
 		return 1
 	}
 	return 0
+}
+
+// mergeHeadField renders the fourth, tab-separated field of the `pr merge`
+// line from the server's head outcome: "head-deleted", "head-kept: <reason>",
+// or "head-delete-failed: <backend's words>". A server that predates the
+// outcome sends no head_outcome; the field is then "" and the line keeps its
+// original three fields (callers must not append a dangling tab). An outcome
+// word this client does not know prints as "head-<word>" (plus ": <reason>"
+// when given) rather than being dropped, so a newer server stays visible.
+func mergeHeadField(pm PRMerged) string {
+	var word string
+	switch pm.HeadOutcome {
+	case "":
+		return ""
+	case "deleted":
+		word = "head-deleted"
+	case "kept":
+		word = "head-kept"
+	case "failed":
+		word = "head-delete-failed"
+	default:
+		word = "head-" + pm.HeadOutcome
+	}
+	if pm.HeadReason == "" {
+		return word
+	}
+	// The reason can carry a backend's multi-line words; the line stays ONE
+	// line, so fold whitespace runs (including tabs) into single spaces.
+	return word + ": " + strings.Join(strings.Fields(pm.HeadReason), " ")
 }

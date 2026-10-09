@@ -20,7 +20,7 @@ Every tracker write this skill makes (a `pr approve` body, a `pr comment`) **mus
 ## Non-negotiable rules
 
 - **Merging needs explicit free-text approval, per PR.** A merge is a write to the default branch. Do **not** use `AskUserQuestion` for it — the auto-mode classifier does not treat its answers as authorisation. And `labctl pr merge` is an API call, not a `git push`, so the classifier will not prompt for it on its own: *this skill is the gate*. Validate, approve, present the verdict, ask the human in plain text, and run `labctl pr merge` **only** on an explicit free-text go-ahead for **that one PR**. An `approve` is **not** a merge — it records that validation passed; only free text merges. Never offer a "merge everything green" batch.
-- **Never force-push, never push to the base branch.** Conflict-resolution pushes go to the PR's **head branch** only, with an ordinary push. If the head branch is one the human does not own (a fork / external contributor), do **not** push and do **not** delete it — stop and hand back. (In practice every PR here is authored as `dominik`, AFK or manual.)
+- **Never force-push, never push to the base branch.** Conflict-resolution pushes go to the PR's **head branch** only, with an ordinary push. If the head branch is one the human does not own (a fork / external contributor), do **not** push — stop and hand back. (In practice every PR here is authored as `dominik`, AFK or manual.)
 - **Require a clean working tree before checking out a PR.** Checking out the head switches the working tree. If `git status` is not clean, stop — never risk clobbering uncommitted work. Restore the prior branch when done.
 - **Prefer a signal that already vouches over re-running anything.** Re-running an expensive gate the repo already enforced is waste. Only run the project's own checks yourself when nothing already vouches (see [Learn the repo's rules](#learn-the-repos-rules)).
 
@@ -92,13 +92,26 @@ Read `validation-core.md` in this skill's directory — it is the single definit
 
 When merging the PR would conflict with its base. You don't pre-reason the forge's mergeability (branch protection, required checks — that's the backend's call, surfaced verbatim when you attempt the merge); a *textual* conflict you resolve on the head yourself, and you'll see it the moment you merge the base into the head locally. Resolve it before the merge gate so the human's single go-ahead covers the resolved tree:
 
-1. **Working tree must be clean** (else stop — see the non-negotiable rules). Head branch comes from `labctl pr view <N>`.
-2. **Fetch & check out the head, detached:** note the branch you are on (`git branch --show-current`), then `git fetch origin <head>` and `git checkout --detach FETCH_HEAD`. Never `git checkout <head>`: in a lab run the AFK run's parked worktree usually still holds that branch (`afk/<N>`), so git refuses to check it out a second time.
+Resolve on a **detached HEAD, never a branch** — the whole sequence is:
+
+```
+git fetch origin <head>
+git checkout --detach origin/<head>
+git merge origin/<base>
+# resolve, commit
+git push origin HEAD:refs/heads/<head>
+git checkout -
+```
+
+Why detached: every worktree of the repo shares one set of branch refs, and the head is often already checked out in another worktree (the AFK run's parked tree still holds `afk/<N>`), so `git checkout <head>` is refused. Working detached needs no local branch at all, so you never create a sibling branch (a `land/…` copy) that nothing would ever clean up.
+
+1. **Working tree must be clean** (else stop — see the non-negotiable rules). Head and base come from `labctl pr view <N>`.
+2. **Fetch & check out the head, detached:** `git fetch origin <head>`, then `git checkout --detach origin/<head>`. Never `git checkout <head>`, and never create a branch for the resolution.
 3. **Bring the base in** with a merge, never a rebase: `git merge origin/<base>`. (A rebase needs a force-push that rewrites the branch and disrupts the open PR.)
 4. **Resolve** per the conflict policy in `validation-core.md`: auto-resolve silently only when the resolution is deterministic and behaviour-preserving; the moment it's a *semantic choice*, **grill** the human — inline and targeted, not a full interview — showing both sides and asking the single question you need (*"PR sets the timeout to 30s, `main` changed it to 60s — which wins, or is there a combined intent?"*), then apply the answer. For a genuinely tangled, multi-point resolution, offer to escalate to a `/grill-me` session.
-5. **Commit** the merge and **push** to the head branch with the explicit refspec `git push origin HEAD:refs/heads/<head>` — you are detached, so a bare `git push` has no upstream to go to (ordinary push, never force, never to base).
+5. **Commit** the merge and **push** it to the head branch with the explicit refspec `git push origin HEAD:refs/heads/<head>` — you are detached, so a bare `git push` has no upstream to go to (ordinary push, never force, never to base).
 6. **Re-verify — mandatory.** The resolution commit is one *no gate has seen*, so the "a signal already vouches" shortcut no longer applies: run the project's own checks on the resolved tree now.
-7. **Show the resolution diff** to the human before the merge gate; optionally record it as `labctl pr comment <N> "<summary>"` (disclaimer line first) for the audit trail. Then check the branch you noted in step 2 back out (`git checkout <that branch>`) — the prior-branch restore the rules above require.
+7. **Show the resolution diff** to the human before the merge gate; optionally record it as `labctl pr comment <N> "<summary>"` (disclaimer line first) for the audit trail. Then `git checkout -` back to where you started — the prior-branch restore the rules above require.
 
 The same principle generalises: act autonomously while the call is safe; **grill the moment a judgement is needed** — a semantic conflict or a validation ambiguity — and only then.
 
@@ -109,7 +122,10 @@ Only after a clean verdict (`PASS`, approved) and, if there was a conflict, a re
 1. **Free-text gate.** Tell the human the PR is validated and approved, and ask them to confirm the merge in plain text. Proceed only on an explicit go-ahead for this PR. (No `AskUserQuestion`.)
 2. **Merge.** `labctl pr merge <N>`. The merge method is the **server's** choice — there is no `--style`/`--method` flag. Mergeability is the backend's call: attempt it and read the result — if the forge refuses (required check red, protected base, or a conflict), it surfaces the refusal's *own words* verbatim and exits non-zero. Don't pre-reason it. A refusal for a **conflict** routes to [Resolve a merge conflict](#resolve-a-merge-conflict), then re-present and re-attempt. Re-merging an already-merged PR is a no-op **success**.
 3. **Close the loop.** The merge normally auto-closes the linked issue via its `Closes #<issue>` link. Confirm it closed; if it didn't, comment the reason then `labctl issue close <n>`. There is no claim label to clear — an AFK run claims via its `afk/<N>` branch, not a label, and the merge closing the issue is what releases the claim.
-4. **Clean up.** Lab never auto-deletes a head branch on merge — branch lifecycle is guarded teardown's job, not the merge's. Once the PR is merged, delete the head branch yourself: `git push origin --delete <head>` (head from `labctl pr view`), then delete any local copy and restore the working tree to the base branch. Do **not** delete a branch the human doesn't own — leave a fork / external contributor's head alone.
+4. **Relay the head outcome.** The merge itself deletes the PR's head branch on origin (lab's `merge_delete_head` setting, on by default; local branches stay with guarded teardown), so there is nothing to delete by hand. `labctl pr merge` prints one tab-separated line — number, state, URL, then the head outcome — and exits `0` whichever outcome it reports. Read the fourth field and relay it:
+   - `head-deleted` — the head branch is gone from origin. Nothing more to do.
+   - `head-kept: <reason>` — lab deliberately left it: `setting off`, or `head lives in <fork>` (a fork's head is never touched). Report the reason.
+   - `head-delete-failed: <words>` — the merge **landed**; only the delete was refused. Report the backend's words verbatim and stop. Do **not** fall back to `git push origin --delete` — the operator decides.
 5. **Report, don't babysit.** If the merge triggers the repo's CD, say so and stop — do not block-watch the deploy. The skill's job ends at a clean merge.
 
 ## No argument: list, pick, loop

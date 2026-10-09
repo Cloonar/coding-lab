@@ -171,9 +171,19 @@ type ghReview struct {
 	Body  string `json:"body"`
 }
 
+// ghPullRepo is the repository a pull's head (or base) lives in. MergePull's
+// same-repo guard reads full_name ("owner/name") off it to tell a branch on
+// this repository from one on a fork. GitHub reports repo as null when the
+// head fork has been deleted, so ghPullHead carries it as a pointer: nil means
+// "head repository unknown", never "same repository".
+type ghPullRepo struct {
+	FullName string `json:"full_name"`
+}
+
 type ghPullHead struct {
-	Ref string `json:"ref"`
-	Sha string `json:"sha"`
+	Ref  string      `json:"ref"`
+	Sha  string      `json:"sha"`
+	Repo *ghPullRepo `json:"repo"`
 }
 
 type ghPull struct {
@@ -746,23 +756,32 @@ func (c *Client) CreatePull(ctx context.Context, head, base, title, body string)
 }
 
 // MergePull merges pull request `number` on GitHub and returns its merged
-// PullRef. GitHub — not lab — decides mergeability: MergePull does NOT
-// pre-check required status checks or branch protection. It first GETs the
-// pull so an already-merged one is a convergent no-op success, then PUTs the
-// fixed "merge" method (a merge commit; GitHub enforces its own configured
-// allowed methods and branch protection). A refusal — a required check
-// unsatisfied (405), a protected base, a changed head (409) — is GitHub's own
-// non-2xx answer, wrapped in tracker.ErrMergeRejected with that answer's body
-// verbatim; an unknown number stays tracker.ErrNotFound. The merge is
-// authorized by this client's server-side forge token, so no forge credential
-// ever reaches the agent session (ADR-0014). The head branch is not deleted.
-func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
+// PullRef plus what became of the head ref (ADR-0081). GitHub — not lab —
+// decides mergeability: MergePull does NOT pre-check required status checks
+// or branch protection. It first GETs the pull so an already-merged one is a
+// convergent no-op success, then PUTs the fixed "merge" method (a merge commit;
+// GitHub enforces its own configured allowed methods and branch protection). A
+// refusal — a required check unsatisfied (405), a protected base, a changed
+// head (409) — is GitHub's own non-2xx answer, wrapped in
+// tracker.ErrMergeRejected with that answer's body verbatim; an unknown number
+// stays tracker.ErrNotFound. The merge is authorized by this client's
+// server-side forge token, so no forge credential ever reaches the agent
+// session (ADR-0014).
+//
+// Only after GitHub confirmed the merge — or on the convergent already-merged
+// path, so a retry after a lost delete finishes the job — the head outcome is
+// computed (deleteHead): with opts.DeleteHead off the ref is kept; a head that
+// does not live in this client's owner/repo (a fork) is kept; otherwise the
+// ref is deleted on origin. A failed delete is reported in Head and is NEVER an
+// error: the merge is the irreversible part and has already succeeded.
+func (c *Client) MergePull(ctx context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
 	var gh ghPull
 	if _, err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &gh); err != nil {
-		return tracker.PullRef{}, err // 404 → tracker.ErrNotFound
+		return tracker.MergeResult{}, err // 404 → tracker.ErrNotFound
 	}
 	if derivePullState(gh.State, gh.MergedAt != nil) == tracker.PullMerged {
-		return toPullRef(gh), nil // convergent no-op: already merged
+		// convergent no-op: already merged — the head delete still runs.
+		return tracker.MergeResult{PullRef: toPullRef(gh), Head: c.deleteHead(ctx, gh.Head, opts)}, nil
 	}
 	req := struct {
 		MergeMethod string `json:"merge_method"`
@@ -773,18 +792,69 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 		// — surface them as-is so the agent gets a 404 / a retryable upstream
 		// error, never a permanent, retry-proof "merge refused" 409.
 		if errors.Is(err, tracker.ErrNotFound) || errors.Is(err, tracker.ErrRateLimited) {
-			return tracker.PullRef{}, err
+			return tracker.MergeResult{}, err
 		}
-		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+		return tracker.MergeResult{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
 	}
 	// Merged. The head ref and web URL do not change on merge; report merged.
-	return tracker.PullRef{
-		Number:     gh.Number,
-		HeadBranch: gh.Head.Ref,
-		State:      tracker.PullMerged,
-		URL:        gh.HTMLURL,
-		Closes:     tracker.ParseCloses(gh.Body),
+	return tracker.MergeResult{
+		PullRef: tracker.PullRef{
+			Number:     gh.Number,
+			HeadBranch: gh.Head.Ref,
+			State:      tracker.PullMerged,
+			URL:        gh.HTMLURL,
+			Closes:     tracker.ParseCloses(gh.Body),
+		},
+		Head: c.deleteHead(ctx, gh.Head, opts),
 	}, nil
+}
+
+// deleteHead computes MergePull's head outcome for a pull GitHub has merged.
+// The checks run in order, and every one that refuses ends in HeadKept without
+// a network call:
+//
+//   - opts.DeleteHead false → kept, tracker.HeadKeptSettingOff.
+//   - no head ref name → kept: there is nothing to address.
+//   - same-repo guard (strict): head.repo.full_name must equal this client's
+//     owner/repo, case-insensitively (GitHub names are case-insensitive). A
+//     different repository is a fork's branch — kept, "head lives in <fork>".
+//     A null/empty head.repo (GitHub reports null once the head fork is
+//     deleted) is "head repository unknown" and is kept too: lab never deletes
+//     a ref it cannot prove is on origin.
+//
+// Otherwise it DELETEs git/refs/heads/{ref}. 204 → deleted. A ref that is
+// already absent — GitHub answers 422 "Reference does not exist" — is also
+// deleted: the outcome means "the ref is absent on origin afterwards". Any
+// other refusal or network error → failed, carrying the error text do()
+// produced (method, path, status, GitHub's own body snippet; never the token).
+func (c *Client) deleteHead(ctx context.Context, head ghPullHead, opts tracker.MergeOptions) tracker.HeadResult {
+	if !opts.DeleteHead {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}
+	}
+	if head.Ref == "" {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head branch unknown"}
+	}
+	if head.Repo == nil || head.Repo.FullName == "" {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head repository unknown"}
+	}
+	if !strings.EqualFold(head.Repo.FullName, c.owner+"/"+c.repo) {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head lives in " + head.Repo.FullName}
+	}
+	_, err := c.do(ctx, http.MethodDelete, c.headRefPath(head.Ref), nil, nil, nil)
+	if err == nil || isRefAbsent(err) {
+		return tracker.HeadResult{Outcome: tracker.HeadDeleted}
+	}
+	return tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: err.Error()}
+}
+
+// isRefAbsent reports whether err is GitHub's answer to deleting a ref that
+// does not exist: 422 with the message "Reference does not exist". The message
+// is matched (case-insensitively) rather than the bare 422, because 422 also
+// answers genuine refusals that must stay failures.
+func isRefAbsent(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.status == http.StatusUnprocessableEntity &&
+		strings.Contains(strings.ToLower(se.message), "reference does not exist")
 }
 
 // Reviews lists the submitted reviews on pull `number`, oldest first — the read
@@ -1082,6 +1152,18 @@ func (c *Client) pullsPath() string      { return c.repoPath("/pulls") }
 func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
+
+// headRefPath is the git-refs route for one head branch: git/refs/heads/{ref}.
+// Branch names carry '/' (afk/90) and GitHub's ref routes take the ref as a
+// multi-segment tail, so the '/' separators stay literal and each segment is
+// escaped on its own — an escaped %2F would address a ref that does not exist.
+func (c *Client) headRefPath(ref string) string {
+	segs := strings.Split(ref, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return c.repoPath("/git/refs/heads/" + strings.Join(segs, "/"))
+}
 
 // checkRunsPath and statusPath are Checks' two CI-reporting endpoints for one
 // commit SHA. The SHA comes from GitHub's own Pull response rather than

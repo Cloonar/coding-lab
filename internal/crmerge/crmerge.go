@@ -11,6 +11,12 @@
 // and a re-merge of an already-merged head converges (gitx.CRMerge is a no-op
 // on it, and the store's open-state guard is the real double-merge protection).
 //
+// With tracker.MergeOptions.DeleteHead the service also deletes the CR's head
+// ref on ORIGIN once the merge is durably recorded (ADR-0081, issue #90) — a
+// best-effort push-delete whose outcome is reported, never an error; the
+// LOCAL head branch is left to guarded teardown and the sweep (pass B GCs it
+// once the CR leaves open), exactly as before.
+//
 // The service is built-in-only by construction — a forge-bound repo's PRs are
 // merged on the forge (the forgejo/github tracker bindings own that path). It
 // speaks CR NUMBERS, loads the repo/CR itself, and returns the merged store.CR
@@ -30,9 +36,15 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/ids"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 	"git.cloonar.com/Cloonar/coding-lab/internal/vault"
 )
+
+// Service is the built-in tracker's CR-merge seam (tracker.CRMerger): the
+// registry hands it to builtin.New, whose MergePull routes here.
+var _ tracker.CRMerger = (*Service)(nil)
 
 // Event names published on a CR mutation — the same wire strings the operator
 // API and agent API use ({type, repoID} envelope), so any client already
@@ -120,7 +132,8 @@ func New(cfg Config) *Service {
 }
 
 // Merge lands the repo's open change request `number` on its base branch and
-// returns the merged CR. The pinned contract both callers rely on:
+// returns the merged CR plus the head outcome. The pinned contract both
+// callers rely on:
 //
 //   - unknown repo or CR number → store.ErrNotFound (nothing is done).
 //   - CR not open → store.ErrCRNotOpen wrapped with the actual state, and NO
@@ -133,25 +146,46 @@ func New(cfg Config) *Service {
 //     the CR stays open and a retry converges.
 //   - success → the merged CR (state merged, merge_commit/merged_at stamped,
 //     every Closes #N issue best-effort closed, cr.changed/issue.changed/
-//     run.changed published).
+//     run.changed published) and the head outcome (below).
+//
+// Every error return carries the zero HeadResult: nothing was merged, so no
+// head delete was attempted.
+//
+// Head delete (ADR-0081): only AFTER store.MergeCR has recorded the row —
+// before that, the head is the retry path of an unrecorded merge (ADR-0024)
+// — and only with opts.DeleteHead, Merge runs a best-effort
+// `git push origin :refs/heads/<head>` from the bare clone with the SAME
+// materialized credential as the merge (its cleanup is deferred to Merge's
+// return, so it is still on disk). The per-CR mutex is released first: a
+// concurrent close is refused on state by then, so the network round-trip
+// need not hold it. Outcomes: tracker.HeadDeleted when the ref is absent on
+// origin afterwards (deleted now, or never pushed — gitx.DeleteRemoteBranch
+// asks origin rather than parsing git's prose); tracker.HeadFailed with
+// git's own words on a refusal or network failure, logged at warn — the
+// merge is the irreversible part and STAYS a success; tracker.HeadKept with
+// tracker.HeadKeptSettingOff without the option. The local head branch is
+// never touched here.
 //
 // Everything from the decision to merge onward runs on a cancellation-immune
 // context: a caller (a phone, a labctl process) dropping the connection after
 // the push but before the bookkeeping must not strand a pushed merge
-// unrecorded or skip gitx's refresh fetch.
-func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.CR, error) {
+// unrecorded or skip gitx's refresh fetch. The head delete runs on that same
+// context.
+func (s *Service) Merge(ctx context.Context, repoID string, number int, opts tracker.MergeOptions) (store.CR, tracker.HeadResult, error) {
 	repo, err := s.store.RepoByID(ctx, repoID)
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
 	cr, err := s.store.CRByRepoNumber(ctx, repoID, number)
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
 
 	// Serialize against a concurrent close/merge of the SAME CR before the
-	// seconds-wide git window opens (ADR-0011).
-	unlock := s.mu.lock(cr.ID)
+	// seconds-wide git window opens (ADR-0011). Released early once the row
+	// is recorded (the head delete does not need it); the deferred call is
+	// the error paths' release, and OnceFunc makes the double call safe.
+	unlock := sync.OnceFunc(s.mu.lock(cr.ID))
 	defer unlock()
 
 	// Not abortable once we commit to it (see the doc comment).
@@ -160,18 +194,18 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 	// Re-read under the lock so a mutation that won the lock first is seen.
 	cr, err = s.store.CRByRepoNumber(ctx, repoID, number)
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
 	if cr.State != store.CRStateOpen {
-		return store.CR{}, fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, cr.State)
+		return store.CR{}, tracker.HeadResult{}, fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, cr.State)
 	}
 
 	name, email, err := s.authorIdentity(ctx, repo)
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
 	if name == "" || email == "" {
-		return store.CR{}, ErrNoAuthorIdentity
+		return store.CR{}, tracker.HeadResult{}, ErrNoAuthorIdentity
 	}
 
 	// The merge's two fetches report their outcome to the readiness recorder
@@ -183,8 +217,10 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 	})
 	credEnv, cleanup, err := s.credentialEnv(ctx, repo, "crmerge-"+cr.ID)
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
+	// Deferred to Merge's return — AFTER the head delete below, which pushes
+	// with this same credential.
 	defer cleanup()
 
 	env := append(append([]string{}, s.gitEnv...), credEnv...)
@@ -195,7 +231,7 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 		// gitx's typed refusals (head missing, push rejected, merge conflict)
 		// pass through verbatim; the callers map them to a 409 whose body is
 		// the backend's own words. Nothing is recorded — the CR stays open.
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
 
 	// The merge is on origin. Record it, close the closes-issues, publish. If
@@ -203,8 +239,11 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 	// already converged and the error tells the caller the truth.
 	merged, err := s.store.MergeCR(ctx, repoID, cr.Number, mergeCommit, s.now())
 	if err != nil {
-		return store.CR{}, err
+		return store.CR{}, tracker.HeadResult{}, err
 	}
+	// Recorded: the CR is no longer open, so a concurrent close/merge is
+	// refused on state — the rest needs no serialization.
+	unlock()
 
 	closedAny := false
 	for _, n := range merged.Closes {
@@ -225,7 +264,70 @@ func (s *Service) Merge(ctx context.Context, repoID string, number int) (store.C
 	// commits_behind badges instantly, without waiting for the next fetch
 	// cadence.
 	s.publish(EventRunChanged, repoID)
-	return merged, nil
+
+	// The merge is durably recorded — only now may the head leave origin
+	// (ADR-0081). After the publishes, so the SPA's refetch never waits on
+	// the delete's network round-trip.
+	head := tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}
+	if opts.DeleteHead {
+		head = s.deleteHead(ctx, repo, merged.Number, merged.HeadBranch, merged.BaseBranch, env)
+	}
+	return merged, head, nil
+}
+
+// DeleteHead runs Merge's best-effort origin head delete on its own, for a CR
+// that is ALREADY merged — the built-in tracker's convergent re-merge path
+// (MergePull on a merged CR), so a retried `labctl pr merge` reports where
+// the head truthfully stands: an earlier delete that succeeded reads
+// HeadDeleted again (the ref is absent), one that failed is retried. It
+// loads the repo and materializes its credential for this one op (a fresh op
+// id — there is no per-CR mutex to make "crmerge-<cr>" unique here). Never an
+// error: a repo/credential failure is HeadFailed with the reason, logged at
+// warn like a refused push. The local branch is untouched. Runs on a
+// cancellation-immune context like Merge's tail.
+func (s *Service) DeleteHead(ctx context.Context, repoID, head string) tracker.HeadResult {
+	ctx = context.WithoutCancel(ctx)
+	repo, err := s.store.RepoByID(ctx, repoID)
+	if err != nil {
+		return s.headFailed(repoID, 0, head, err)
+	}
+	credEnv, cleanup, err := s.credentialEnv(ctx, repo, ids.NewID("crhead"))
+	if err != nil {
+		return s.headFailed(repoID, 0, head, err)
+	}
+	defer cleanup()
+	env := append(append([]string{}, s.gitEnv...), credEnv...)
+	return s.deleteHead(ctx, repo, 0, head, repo.DefaultBranch, env)
+}
+
+// deleteHead is the shared best-effort origin delete behind Merge and
+// DeleteHead. crNumber is 0 when unknown (DeleteHead) and only labels the
+// log line. Built-in has no forks, so the only guard is a belt-and-braces
+// refusal to delete the base/default branch itself — a CR's head is a
+// managed run branch in practice, but deleting origin's mainline over a
+// malformed row would be unrecoverable. Everything else defers to
+// gitx.DeleteRemoteBranch's "absent afterwards" contract.
+func (s *Service) deleteHead(ctx context.Context, repo store.Repo, crNumber int, head, base string, env []string) tracker.HeadResult {
+	if head == "" || head == base || head == repo.DefaultBranch {
+		reason := fmt.Sprintf("head %q is the base branch", head)
+		s.log.Warn("keeping change request head on origin",
+			"component", "crmerge", "repo", repo.ID, "cr", crNumber, "head", head, "reason", reason)
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: reason}
+	}
+	if err := s.git.DeleteRemoteBranch(ctx, s.bareDir(repo.ID), head, env); err != nil {
+		return s.headFailed(repo.ID, crNumber, head, err)
+	}
+	s.log.Info("deleted change request head on origin",
+		"component", "crmerge", "repo", repo.ID, "cr", crNumber, "head", head)
+	return tracker.HeadResult{Outcome: tracker.HeadDeleted}
+}
+
+// headFailed logs a failed origin head delete at warn and returns its
+// HeadFailed outcome carrying the error's own words.
+func (s *Service) headFailed(repoID string, crNumber int, head string, err error) tracker.HeadResult {
+	s.log.Warn("deleting change request head on origin failed; the merge stands",
+		"component", "crmerge", "repo", repoID, "cr", crNumber, "head", head, "err", err)
+	return tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: err.Error()}
 }
 
 // Close transitions the repo's open change request `number` to closed

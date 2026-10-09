@@ -398,3 +398,126 @@ func TestHeadCommit_discriminatesMissingFromBroken(t *testing.T) {
 		t.Error("non-repo dir resolved a head commit")
 	}
 }
+
+// --- DeleteRemoteBranch (ADR-0081, issue #90) --------------------------------
+
+// pushHead publishes a local head branch to origin from the bare clone — the
+// state an agent's `git push origin HEAD` leaves (origin carries the head,
+// and the push refreshes refs/remotes/origin/<branch>).
+func (f *crFixture) pushHead(branch string) {
+	f.t.Helper()
+	gitCmd(f.t, f.home, f.bare, "push", "-q", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
+}
+
+// refIn reports whether ref resolves in the git dir dir.
+func (f *crFixture) refIn(dir, ref string) bool {
+	f.t.Helper()
+	return f.eng.refExists(f.t.Context(), dir, ref, f.env)
+}
+
+// installRejectDeletionHook makes origin refuse every ref DELETION (all-zero
+// new sha) via pre-receive while accepting ordinary pushes — the "branch
+// protection forbids deleting this ref" stand-in.
+func (f *crFixture) installRejectDeletionHook(msg string) {
+	f.t.Helper()
+	hook := "#!/bin/sh\nwhile read old new ref; do\n  case \"$new\" in *[!0]*) ;; *) echo \"" + msg + "\" >&2; exit 1 ;; esac\ndone\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(f.origin, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		f.t.Fatalf("install pre-receive hook: %v", err)
+	}
+}
+
+// TestDeleteRemoteBranch_pushedHead: a head published to origin is deleted
+// there; the push-side tracking-ref update drops refs/remotes/origin/<head>
+// too; the LOCAL branch is untouched (teardown/the sweep own it).
+func TestDeleteRemoteBranch_pushedHead(t *testing.T) {
+	f := newCRFixture(t)
+	head := f.addHead("afk/1", func(dir string) {
+		writeFileT(t, filepath.Join(dir, "feature.txt"), "feature\n")
+	})
+	f.pushHead("afk/1")
+	if !f.refIn(f.origin, "refs/heads/afk/1") || !f.refIn(f.bare, "refs/remotes/origin/afk/1") {
+		t.Fatal("fixture: head not published to origin")
+	}
+
+	if err := f.eng.DeleteRemoteBranch(t.Context(), f.bare, "afk/1", f.env); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+	if f.refIn(f.origin, "refs/heads/afk/1") {
+		t.Error("origin still carries refs/heads/afk/1 after the delete")
+	}
+	if f.refIn(f.bare, "refs/remotes/origin/afk/1") {
+		t.Error("bare clone still carries refs/remotes/origin/afk/1 after the delete")
+	}
+	if got := gitCmd(t, f.home, f.bare, "rev-parse", "refs/heads/afk/1"); got != head {
+		t.Errorf("local refs/heads/afk/1 = %q, want it untouched at %s", got, head)
+	}
+}
+
+// TestDeleteRemoteBranch_absentIsSuccess: "absent on origin afterwards" is
+// the contract, so a never-pushed head and an already-deleted one (the
+// convergent re-merge) both answer nil — and a stale remote-tracking ref left
+// behind by an out-of-band delete is dropped.
+func TestDeleteRemoteBranch_absentIsSuccess(t *testing.T) {
+	f := newCRFixture(t)
+
+	t.Run("never pushed", func(t *testing.T) {
+		f.addHead("afk/2", func(dir string) {
+			writeFileT(t, filepath.Join(dir, "two.txt"), "two\n")
+		})
+		if err := f.eng.DeleteRemoteBranch(t.Context(), f.bare, "afk/2", f.env); err != nil {
+			t.Fatalf("DeleteRemoteBranch(never pushed) = %v, want nil", err)
+		}
+		if !f.refIn(f.bare, "refs/heads/afk/2") {
+			t.Error("local branch afk/2 removed, want it untouched")
+		}
+	})
+
+	t.Run("already gone with a stale tracking ref", func(t *testing.T) {
+		f.addHead("afk/3", func(dir string) {
+			writeFileT(t, filepath.Join(dir, "three.txt"), "three\n")
+		})
+		f.pushHead("afk/3")
+		// Someone deletes it on origin directly; the bare clone's tracking
+		// ref goes stale (a plain fetch does not prune).
+		gitCmd(t, f.home, f.origin, "update-ref", "-d", "refs/heads/afk/3")
+		if !f.refIn(f.bare, "refs/remotes/origin/afk/3") {
+			t.Fatal("fixture: tracking ref missing before the delete")
+		}
+		if err := f.eng.DeleteRemoteBranch(t.Context(), f.bare, "afk/3", f.env); err != nil {
+			t.Fatalf("DeleteRemoteBranch(already gone) = %v, want nil", err)
+		}
+		if f.refIn(f.bare, "refs/remotes/origin/afk/3") {
+			t.Error("stale refs/remotes/origin/afk/3 survived the already-absent path")
+		}
+	})
+
+}
+
+// TestDeleteRemoteBranch_refusedAndUnreachable: an origin that refuses the
+// deletion surfaces ErrPushRejected with the hook's own words (the ref is
+// still there), and an unreachable origin is an error too — never a silent
+// "absent".
+func TestDeleteRemoteBranch_refusedAndUnreachable(t *testing.T) {
+	f := newCRFixture(t)
+	f.addHead("afk/5", func(dir string) {
+		writeFileT(t, filepath.Join(dir, "five.txt"), "five\n")
+	})
+	f.pushHead("afk/5")
+	f.installRejectDeletionHook("deleting branches is forbidden here")
+
+	err := f.eng.DeleteRemoteBranch(t.Context(), f.bare, "afk/5", f.env)
+	if !errors.Is(err, ErrPushRejected) {
+		t.Fatalf("err = %v, want ErrPushRejected", err)
+	}
+	if !strings.Contains(err.Error(), "deleting branches is forbidden here") {
+		t.Errorf("refusal does not carry the hook's words: %v", err)
+	}
+	if !f.refIn(f.origin, "refs/heads/afk/5") {
+		t.Error("origin lost refs/heads/afk/5 despite the refusal")
+	}
+
+	gitCmd(t, f.home, f.bare, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	if err := f.eng.DeleteRemoteBranch(t.Context(), f.bare, "afk/5", f.env); err == nil {
+		t.Fatal("DeleteRemoteBranch against an unreachable origin = nil, want an error")
+	}
+}

@@ -73,6 +73,7 @@ export interface GlobalDrafts {
   git_author_name: string;
   git_author_email: string;
   transcript_retention_days: string;
+  merge_delete_head: boolean;
 }
 
 /** The read-only keys of every GET: never a field, never sent. */
@@ -371,6 +372,14 @@ export const GLOBAL_FIELDS: {
     label: 'Transcript retention, days',
     min: 0,
     max: TRANSCRIPT_RETENTION_MAX_DAYS,
+  }),
+  // A plain bool, seeded true server-side (issue #90, ADR-0081): an absent key
+  // reads on, as the server's GetBool(key, true) does.
+  merge_delete_head: field('merge_delete_head', {
+    section: 'general',
+    label: 'Delete head branch after merge',
+    seed: (s) => s.merge_delete_head !== false,
+    wire: same,
   }),
 };
 

@@ -172,6 +172,8 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingRunnerDefault:        "host",
 
 			SettingTranscriptRetentionDays: "30",
+
+			SettingMergeDeleteHead: "true",
 		}
 		if len(all) != len(want) {
 			t.Errorf("seeded %d keys, want %d: %v", len(all), len(want), all)
@@ -214,6 +216,13 @@ func TestSeedDefaultSettings(t *testing.T) {
 		}
 		if v, err := s.GetBool(ctx, SettingSpawnRemoteDefaultAFK, true); err != nil || !v {
 			t.Errorf("GetBool(spawn_remote_default_afk) = %v, %v; want the caller's default true, nil", v, err)
+		}
+
+		// merge_delete_head (issue #90) is seeded explicitly "true" — a real
+		// row, not an absent-means-default key — so it reads true even when
+		// the caller's fallback says false.
+		if v, err := s.GetBool(ctx, SettingMergeDeleteHead, false); err != nil || !v {
+			t.Errorf("GetBool(merge_delete_head, false) = %v, %v; want seeded true, nil", v, err)
 		}
 	})
 }
