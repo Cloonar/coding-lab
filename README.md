@@ -5,13 +5,14 @@
 You add repositories and credentials in the UI, then start **manual instances** (interactive agent sessions you drive from lab's built-in chat, from any device) or **AFK runs** (unattended sessions that pick up one `ready-for-agent` issue, resolve it, and open a pull request). Repositories without a usable forge tracker get a built-in issue tracker with lab-internal change requests — reviewable and mergeable from your phone.
 
 <p align="center">
-  <img src="docs/assets/start.png" width="30%" alt="New run: recent repositories as pills, the repo's open issues with Auto, and the composer docked at the bottom with model and effort chips" />
+  <img src="docs/assets/start.png" width="30%" alt="Runs: live runs grouped Needs you, Working and Idle, with the bottom tab bar carrying the count of runs waiting for you" />
   <img src="docs/assets/chat.png" width="30%" alt="Chat view: the rendered agent conversation with collapsible tool calls and a reply box" />
-  <img src="docs/assets/side-menu.png" width="30%" alt="Side menu: active runs, repos, run history, credentials, tokens, and settings" />
+  <img src="docs/assets/new-run.png" width="30%" alt="New run: recent repositories as pills, the repo's open issues with Auto, and the composer docked above the tab bar with model and effort chips" />
 </p>
 
 ## Features
 
+- **Runs at a glance** — lab opens on the Runs page: your live runs grouped by what needs you (waiting for input, working, idle), each one tap from its chat, with finished runs one switch away under Ended. On a phone a bottom tab bar (Runs · New · Repos · More) carries the count of runs waiting for you; on a wide screen a side rail and a runs table do, and the browser tab and installed app icon show the same count.
 - **Manual instances** — interactive agent sessions, each in its own git worktree on its own branch. Start one from the New run page: pick a repository, describe the task, adjust model and effort in two taps, or tap one of the repo's open issues to start a run that triages, implements or discusses it. Drive them through lab's embedded chat (messages, tool activity, a status line with one-tap interrupt, questions answered in a panel above the composer, model and context at a glance), or hop into the provider's own web surface via a captured deep link (claude.ai for Claude Code).
 - **AFK runs** — unattended sessions that claim one `ready-for-agent` issue from the repo's tracker, resolve it, and open a PR. Budget clock, three-strikes pause, guarded teardown, restart-safe re-adoption.
 - **Schedules** — per-repo cron cadences that start scheduled runs with your prompt plus built-in flows (investigate, then file `ready-for-agent` or `needs-triage` issues for the pipeline to pick up); **Run now** starts one on demand, so a prompt can be tried before its cadence is switched on.

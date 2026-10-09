@@ -17,7 +17,7 @@ The per-repo pick of where an instance's pane command executes (`repos.runner`: 
 _Avoid_: sandbox mode, executor, isolation level, backend
 
 **Title**:
-A user-set display name on an instance, stored as nullable `runs.title`; it overrides the label-derived title everywhere the UI names the instance — chat header, runs rail, History — but never becomes identity, since branch, worktree, and tmux session name all stay keyed off the label regardless (ADR-0040).
+A user-set display name on an instance, stored as nullable `runs.title`; it overrides the label-derived title everywhere the UI names the instance — chat header, Runs page, runs rail, Ended view — but never becomes identity, since branch, worktree, and tmux session name all stay keyed off the label regardless (ADR-0040).
 _Avoid_: nickname, alias, custom label, session name
 
 **AFK run**:
@@ -37,8 +37,12 @@ The provider-native session file the Chat reads through (Claude Code: the live J
 _Avoid_: log, history, raw output, session file (in UI copy)
 
 **Conversational state**:
-The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the runs rail and as the chat's status line above the composer (*Working*, *Waiting for you*, *Idle*). Distinct from `live` (tmux liveness) and the run's terminal outcome.
+The chat tailer's per-instance signal derived from the transcript tail — *working*, *needs input*, *question pending*, or *idle* — served on the instance list and shown as a live state dot on the **Runs page** and the runs rail and as the chat's status line above the composer (*Working*, *Waiting for you*, *Idle*). Distinct from `live` (tmux liveness) and the run's terminal outcome.
 _Avoid_: status, activity, progress
+
+**Runs page**:
+The app's home at `/`, at every width: the live **instances** grouped Needs you / Working / Idle (attention-first, ADR-0025), a row per run that opens its **Chat** — a list on a phone, a table from 1024px. Its **Live / Ended** switch is two links: `/history` is the Ended side, the finished runs grouped by day with the outcome each earned (done, died, timed out, stopped, escalated). The runs rail on desktop carries the same grouped list; on a phone the bottom **tab bar** (Runs · New · Repos · More) replaces the rail, and the **Runs badge** on its first tab counts the runs that need the operator — the number `(N) lab` shows in the browser tab. The composer for a new run is the New run page at `/new`, not the home (ADR-0077).
+_Avoid_: dashboard, home (for the composer), drawer, side menu
 
 **Slash-command catalog**:
 The provider's slash commands plus lab's own **lab commands**, surfaced in the Chat composer as autocomplete the moment the input starts with `/` (filtered as you type by name, description, and argument hint) or from the composer's `/` button, which opens the full list. Served per instance — project- and user-level commands are discovered relative to the worktree — and curated to **chat-safe** commands only: one that would strand the agent's TUI in a picker lab cannot see is withheld. The entry tagged `role=clear` (Claude Code's `/clear`) also backs a **New conversation** action that clears the instance's context in place; a provider command executes down the ordinary reply path as pasted text, never a dedicated endpoint, while a **lab command** is intercepted by the server and never reaches the provider.
