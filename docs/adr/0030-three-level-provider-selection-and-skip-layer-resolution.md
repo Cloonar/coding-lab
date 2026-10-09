@@ -116,6 +116,8 @@ now via `provider_default` instead of a const. Unblocks #2: registering a
 second provider makes the chip appear and the selects populate, with zero
 refactor.
 
+Amended by issue #92 (2026-10-09): the "UI consequences" bullet's "ephemeral: it resets on repo change and page load" no longer holds for page load. The per-spawn provider pick now survives a reload as part of the unsent New run draft (text, label, repo, provider, model, effort, remote-control pick, attached issue action), kept in localStorage under one key and validated against the registered providers when restored; a pick whose provider is no longer registered is dropped silently, and model/effort picks not in the resolved catalog go with it. The pick is still ephemeral in the sense the ADR wanted: the draft is cleared on a successful spawn (a failed start keeps it), and a real repo switch still resets the provider, model and effort picks, though the restore itself does not count as a switch. So the pick never outlives the spawn it was made for and never becomes a sticky default; repo/global defaults remain the durable levers.
+
 ## Considered options
 
 - **Validate defaults strictly at write time everywhere instead of

@@ -46,6 +46,8 @@ Accepted. Resolves issue #58.
 
 Compat §7 gains the "Chat about this" subsection, and §8's Interrupt placement is rewritten. `docs/agents/provider-authoring.md` documents `DialogAnswer.Chat` and `QuestionAnswer.Chat`.
 
+Amended by issue #92 (2026-10-09): the composer's reply text is now a draft kept per run in the browser's localStorage (key `lab.draft.chat.<run id>`, saved on every keystroke, entries older than about seven days dropped on read). It is restored when that run's chat opens, also after a reload, and swapped when the run id changes under a reused route component, so one run's text never shows in another run's box. It is cleared on a successful send, when the box is emptied, and when the run ends; a failed send keeps it. Where storage is unavailable (private mode, quota, disabled) the draft silently does not persist. The question dock's answer drafts are unchanged: still held per dialog `tool_id`, in memory. Decided for the case of answering a quick question in one run mid-way through a long reply to another.
+
 ## Considered options
 
 - **Keep the in-stream card and add a jump-to-question pill.** Rejected. The card still sits away from the composer, and multi-question dialogs still stack every question into one long card. The issue's core ask is answering in thumb reach.
