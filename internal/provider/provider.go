@@ -914,6 +914,29 @@ type AgentProvider interface {
 	// an adapter whose CLI clears IN PLACE must synthesize a new epoch (e.g.
 	// an epoch-qualified path) so the identity still rotates.
 	LocateTranscript(ctx context.Context, sessionName, worktree, home string) (string, error)
+	// RetainTranscript moves what the adapter needs to render the run's
+	// conversation after its HOME is wiped into destDir (created by core,
+	// empty) and returns the path ReadChat should read from. "" means
+	// nothing to keep. Never reads live signals; never touches destDir's
+	// siblings.
+	//
+	// Core calls it on the pre-wipe seam (issue #81) just before the run's
+	// per-run tree — HOME included — is removed, with the run's stored
+	// transcriptPath (what LocateTranscript last returned) and a fresh 0700
+	// <state>/transcripts/<runID>/ as destDir. The returned path is persisted
+	// as the run's transcript path and later read through ReadChat with an
+	// ENDED spec (no Home, no RuntimeDir), so whatever that read consults must
+	// land under destDir; core never learns the layout (claude-code moves the
+	// <sessionId>.jsonl alone, codex its rollout file). The provider-native
+	// file is MOVED, never rewritten — no lab-owned snapshot format (ADR-0016)
+	// — by a rename on the same filesystem with a copy as the cross-device
+	// (EXDEV) fallback; provider.RetainFile is the shared implementation.
+	// Only the current transcriptPath is retained: earlier /clear segments
+	// are not. transcriptPath "" or a missing source file is nothing to keep
+	// ("", nil); a transcriptPath outside home is refused with an error — an
+	// adapter only ever moves files out of the run's OWN HOME. A returned
+	// error is logged by core and the wipe proceeds regardless.
+	RetainTranscript(ctx context.Context, worktree, home, transcriptPath, destDir string) (retainedPath string, err error)
 	// ReadChat reads the run's conversation and composes its conversational
 	// state — the adapter owns "what state is my agent in", composed from
 	// whatever its agent's best signals are (issue #92): the transcript at

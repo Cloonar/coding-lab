@@ -73,6 +73,23 @@ func (p *Provider) LocateTranscript(_ context.Context, _ /*sessionName*/, worktr
 	return "", nil
 }
 
+// RetainTranscript implements provider.AgentProvider (issue #81): move the
+// run's rollout file out of <home>/.codex/sessions/YYYY/MM/DD/ into destDir
+// under its own base name (rollout-<local-ts>-<uuid>.jsonl), via the shared
+// provider.RetainFile (rename, EXDEV copy fallback, strict containment under
+// home; a missing file is ("", nil)). The date directories are NOT recreated
+// under destDir: only LocateTranscript walks the YYYY/MM/DD tree, while
+// ReadChat is a pure fold of whatever path it is handed, so the flat retained
+// path reads identically. The rollout is self-contained — codex keeps no
+// sidecar ReadChat consults. worktree is unused: the stored path already
+// names the identity.
+func (p *Provider) RetainTranscript(ctx context.Context, _ /*worktree*/, home, transcriptPath, destDir string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return provider.RetainFile(home, transcriptPath, destDir, p.rename)
+}
+
 // dateDirsNewestFirst walks the sessions tree's YYYY/MM/DD directories in
 // reverse chronological order. A missing or unreadable level is silently
 // empty — the tree grows lazily with the first rollout.

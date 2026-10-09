@@ -155,6 +155,10 @@ type Provider struct {
 	logoutTimeout  time.Duration // defensive cap on the non-interactive `codex logout`
 	keyDelay       time.Duration // paste→Enter settling gap in the reply recipe
 	probeTimeout   time.Duration // boot-time `codex debug models` catalog probe budget
+	// rename is RetainTranscript's same-filesystem move (issue #81); nil →
+	// os.Rename. Tests swap in an EXDEV-returning rename to drive the
+	// cross-device copy fallback.
+	rename provider.RenameFunc
 
 	// catModels/catEfforts hold the catalog probed from `codex debug models`
 	// at construction (issue #156). nil = the probe never succeeded — the

@@ -195,6 +195,10 @@ type Provider struct {
 	logoutTimeout  time.Duration // defensive cap on the non-interactive `claude auth logout`
 	keyDelay       time.Duration // inter-op gap in the dialog-answer recipe (compat §7)
 	settleDelay    time.Duration // gap before the recipe's FIRST key (compat §7, 2.1.280)
+	// rename is RetainTranscript's same-filesystem move (issue #81); nil →
+	// os.Rename. Tests swap in an EXDEV-returning rename to drive the
+	// cross-device copy fallback.
+	rename provider.RenameFunc
 
 	// authMu guards the lazy login-status cache. The ~0.75s status command
 	// runs while holding it; that brief serialisation is accepted for a

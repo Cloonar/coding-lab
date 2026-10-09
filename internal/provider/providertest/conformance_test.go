@@ -63,6 +63,9 @@ type mockProvider struct {
 	// masterStore overrides the default conforming MasterStoreSpec — the
 	// master-store-spec breakage hook (issues #206/#211).
 	masterStore func() provider.MasterStoreSpec
+	// retain overrides the default conforming RetainTranscript — the
+	// retain-transcript breakage hook (issue #81).
+	retain func(home, transcriptPath, destDir string) (string, error)
 }
 
 var _ provider.AgentProvider = (*mockProvider)(nil)
@@ -110,6 +113,26 @@ func mockFixture() Fixture {
 			"Co-Authored-By: Alice <alice@example.com>",
 			"Docs generated with pandoc.",
 		},
+		SeedTranscript: seedMockTranscript,
+	}
+}
+
+// mockTranscriptUnder is the mock's native transcript location under an
+// instance HOME — one file per HOME, enough for the retain round-trip.
+func mockTranscriptUnder(home string) string {
+	return filepath.Join(home, ".mockagent", "sessions", "transcript.jsonl")
+}
+
+// seedMockTranscript is the mock's Fixture.SeedTranscript (issue #81): a
+// two-line native transcript the mock's ReadChat renders one message per line.
+func seedMockTranscript(tb testing.TB, home, _ string) {
+	tb.Helper()
+	path := mockTranscriptUnder(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		tb.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("hello mock\nhello operator\n"), 0o600); err != nil {
+		tb.Fatal(err)
 	}
 }
 
@@ -238,12 +261,35 @@ func (m *mockProvider) Commands(context.Context, string, string) ([]provider.Com
 
 // LocateTranscript's default is conforming per the locate-homeless obligation
 // (issue #202): an empty instance home is a miss ("", nil), never an error and
-// never a fall back to a master store the mock does not have.
+// never a fall back to a master store the mock does not have. Under a real
+// home it finds the seeded transcript (mockTranscriptUnder), the retain
+// round-trip's locate step (issue #81).
 func (m *mockProvider) LocateTranscript(_ context.Context, _, _, home string) (string, error) {
 	if m.locate != nil {
 		return m.locate(home)
 	}
+	if home == "" {
+		return "", nil
+	}
+	if path := mockTranscriptUnder(home); fileExists(path) {
+		return path, nil
+	}
 	return "", nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// RetainTranscript's default is conforming per the retain-transcript
+// obligation (issue #81): the shared provider.RetainFile move, exactly what
+// the real adapters ship.
+func (m *mockProvider) RetainTranscript(_ context.Context, _, home, transcriptPath, destDir string) (string, error) {
+	if m.retain != nil {
+		return m.retain(home, transcriptPath, destDir)
+	}
+	return provider.RetainFile(home, transcriptPath, destDir, nil)
 }
 
 // InjectCredentials's default is conforming per the inject-credentials
@@ -318,10 +364,24 @@ func (m *mockProvider) ReadChat(spec provider.ReadSpec) (provider.Chat, error) {
 	if spec.TranscriptPath == "" {
 		return provider.Chat{State: provider.StateIdle}, nil
 	}
-	if _, err := os.Stat(spec.TranscriptPath); os.IsNotExist(err) {
+	b, err := os.ReadFile(spec.TranscriptPath)
+	if os.IsNotExist(err) {
 		return provider.Chat{}, provider.ErrTranscriptGone
 	}
-	return provider.Chat{State: provider.StateIdle}, nil
+	if err != nil {
+		return provider.Chat{}, err
+	}
+	// One text message per non-empty line — enough for the retain round-trip
+	// to compare a pre-retain read with a post-wipe one (issue #81).
+	chat := provider.Chat{State: provider.StateIdle}
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" {
+			continue
+		}
+		chat.Cursor++
+		chat.Messages = append(chat.Messages, provider.Message{Seq: chat.Cursor, Kind: provider.MessageText, Role: "user", Text: line})
+	}
+	return chat, nil
 }
 func (m *mockProvider) Reply(context.Context, string, string) error { return nil }
 func (m *mockProvider) AnswerDialog(context.Context, string, provider.Dialog, provider.DialogAnswer) error {
@@ -377,6 +437,7 @@ func TestCheckFunctions_wellFormedProviderPasses(t *testing.T) {
 		{"login-session", func(t *testing.T) []error { return checkLoginSession(p) }},
 		{"read-chat", func(t *testing.T) []error { return checkReadChat(t, p) }},
 		{"locate-homeless", func(t *testing.T) []error { return checkLocateHomeless(p) }},
+		{"retain-transcript", func(t *testing.T) []error { return checkRetainTranscript(t, p, mockFixture()) }},
 		{"inject-credentials", func(t *testing.T) []error { return checkInjectCredentials(t, p) }},
 		{"credential-authority", func(t *testing.T) []error { return checkCredentialAuthority(t, p) }},
 		{"master-store-spec", func(t *testing.T) []error { return checkMasterStoreSpec(t, p) }},
@@ -714,4 +775,67 @@ func TestCheckSeedHomeContainment_masterStoreWriteFails(t *testing.T) {
 		return os.WriteFile(filepath.Join(dir, ".claude.json"), []byte("{}\n"), 0o600)
 	}
 	wantError(t, checkSeedHomeContainment(t, p), "seed-home-containment", "master store")
+}
+
+// --- retain-transcript breakages (issue #81) ---------------------------------
+
+// A fixture without SeedTranscript cannot drive the round-trip: the obligation
+// names the missing fixture instead of passing vacuously.
+func TestCheckRetainTranscript_missingFixtureFails(t *testing.T) {
+	fx := mockFixture()
+	fx.SeedTranscript = nil
+	wantError(t, checkRetainTranscript(t, newMockProvider(), fx), "retain-transcript", "Fixture.SeedTranscript is nil", "issue #81")
+}
+
+// Treating "nothing located" as a failure would make core log a warning on
+// every transcript-less wipe.
+func TestCheckRetainTranscript_emptyPathErroringFails(t *testing.T) {
+	p := newMockProvider()
+	p.retain = func(home, transcriptPath, destDir string) (string, error) {
+		if transcriptPath == "" {
+			return "", errors.New("no transcript to retain")
+		}
+		return provider.RetainFile(home, transcriptPath, destDir, nil)
+	}
+	wantError(t, checkRetainTranscript(t, p, mockFixture()), "retain-transcript", "empty transcriptPath", "never an error")
+}
+
+// Returning the in-HOME path (a "retain" that moves nothing) loses the file to
+// the wipe that follows.
+func TestCheckRetainTranscript_pathLeftInHomeFails(t *testing.T) {
+	p := newMockProvider()
+	p.retain = func(_, transcriptPath, _ string) (string, error) { return transcriptPath, nil }
+	wantError(t, checkRetainTranscript(t, p, mockFixture()), "retain-transcript", "want a path under destDir")
+}
+
+// A retain that rewrites the native file (here: keeps only its first line)
+// breaks the moved-never-rewritten rule the ended read relies on.
+func TestCheckRetainTranscript_rewrittenFileFails(t *testing.T) {
+	p := newMockProvider()
+	p.retain = func(_, transcriptPath, destDir string) (string, error) {
+		b, err := os.ReadFile(transcriptPath)
+		if err != nil {
+			return "", nil
+		}
+		first, _, _ := strings.Cut(string(b), "\n")
+		dst := filepath.Join(destDir, filepath.Base(transcriptPath))
+		return dst, os.WriteFile(dst, []byte(first+"\n"), 0o600)
+	}
+	wantError(t, checkRetainTranscript(t, p, mockFixture()), "retain-transcript", "never rewritten")
+}
+
+// Writing beside destDir (into the shared transcripts root) instead of into it
+// touches a sibling run's territory.
+func TestCheckRetainTranscript_siblingWriteFails(t *testing.T) {
+	p := newMockProvider()
+	p.retain = func(home, transcriptPath, destDir string) (string, error) {
+		if transcriptPath == "" {
+			return "", nil
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(destDir), "stray.jsonl"), []byte("x\n"), 0o600); err != nil {
+			return "", err
+		}
+		return provider.RetainFile(home, transcriptPath, destDir, nil)
+	}
+	wantError(t, checkRetainTranscript(t, p, mockFixture()), "retain-transcript", "writes only under destDir")
 }
