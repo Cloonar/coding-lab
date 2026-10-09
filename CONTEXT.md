@@ -33,7 +33,7 @@ The rendered conversation of an instance inside lab's UI (the `/runs/:id` view) 
 _Avoid_: terminal, console, session view, thread
 
 **Transcript**:
-The provider-native session file the Chat reads through (Claude Code: the live JSONL under `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`), located by worktree-cwd match and mapped behind the provider seam to the universal message schema (`text | tool | dialog | lifecycle`). Never rendered raw; its path is the only chat state lab persists (`runs.transcript_path`). A retired file degrades to "transcript no longer available".
+The provider-native session file the Chat reads through (Claude Code: the live JSONL under `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`), located by worktree-cwd match and mapped behind the provider seam to the universal message schema (`text | tool | dialog | lifecycle`). Never rendered raw; its path is the only chat state lab persists (`runs.transcript_path`). An ended run keeps it: just before the run's private HOME is wiped, the provider moves the file, never rewritten, to `<state>/transcripts/<runID>/` and `runs.transcript_path` follows it there; it expires `transcript_retention_days` (Settings → General, default 30, `0` keeps none) after the run ended (ADR-0079). A retired or expired file degrades to "transcript no longer available".
 _Avoid_: log, history, raw output, session file (in UI copy)
 
 **Conversational state**:
