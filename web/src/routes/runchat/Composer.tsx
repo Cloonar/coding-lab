@@ -15,7 +15,7 @@
 //   otherwise                         status line (live + transcript
 //                                     available) above the normal composer
 
-import { For, Match, Show, Switch, createEffect, createSignal, on } from 'solid-js';
+import { For, Match, Show, Switch, createEffect, createSignal, on, untrack } from 'solid-js';
 import {
   errorMessage,
   interruptRun,
@@ -28,6 +28,7 @@ import {
 } from '../../api';
 import Icon from '../../components/Icon';
 import { isComposerSend } from '../../lib/composerKeys';
+import { chatDraftKey, clearDraft, readDraft, writeDraft } from '../../lib/drafts';
 import { QuestionDock, docksQuestion } from './QuestionDock';
 import { StatusLine } from './StatusLine';
 import { capitalize } from './shared';
@@ -87,7 +88,21 @@ export function Composer(props: {
   /** After a Pull base: refetch the run (commits_behind) and the stream. */
   onPulled: () => void;
 }) {
-  const [text, setText] = createSignal('');
+  // The reply box is a per-run draft (issue #92): every keystroke (and a Tab
+  // completion) saves it under the run's key in localStorage, so leaving the
+  // chat, a reload or a backgrounded phone browser keeps the unsent text; a
+  // successful send, an emptied box and an ended run delete the entry. Saving
+  // lives in those handlers, not in an effect on `text`: the router reuses this
+  // component when only `:id` changes, and an effect would write run A's text
+  // under run B's key mid-swap. The swap effect below reloads the box instead.
+  const loadDraft = (id: string): string =>
+    readDraft(chatDraftKey(id), (v) => (typeof v === 'string' ? v : null)) ?? '';
+  const saveDraft = (value: string) => {
+    const key = chatDraftKey(props.runID);
+    if (value.trim() === '') clearDraft(key);
+    else writeDraft(key, value);
+  };
+  const [text, setText] = createSignal(untrack(() => loadDraft(props.runID)));
   const [sending, setSending] = createSignal(false);
   // The `/` button's browse mode (issue #58 §6): the popover lists the FULL
   // catalog whatever the box holds, until the next keystroke, a pick, a send,
@@ -99,6 +114,18 @@ export function Composer(props: {
   // status line above it carries the working Interrupt (issue #58 §2), and it
   // gates nothing.
   const canSend = () => !sending() && text().trim() !== '';
+
+  // An ended run is read-only for good: its draft would never be sent. Keyed
+  // on `ended` alone (`on` reads runID untracked): on an A → B swap, `ended`
+  // can still describe A until B's run loads, and must not delete B's draft.
+  createEffect(
+    on(
+      () => props.ended,
+      (ended) => {
+        if (ended) clearDraft(chatDraftKey(props.runID));
+      },
+    ),
+  );
 
   // The one interrupt controller this composer hands its Interrupt buttons
   // (the status line's and the degraded escape hatch's share one busy guard).
@@ -134,11 +161,17 @@ export function Composer(props: {
   // clear-on-success.
   const send = async (body = text().trim()) => {
     if (sending() || body === '') return;
+    // Captured at send start: a reply that resolves after the route moved to
+    // another run must delete THIS run's draft and leave the new box alone.
+    const runID = props.runID;
     setSending(true);
     try {
-      const result = await replyRun(props.runID, body);
-      setText('');
-      setBrowseAll(false);
+      const result = await replyRun(runID, body);
+      clearDraft(chatDraftKey(runID));
+      if (props.runID === runID) {
+        setText('');
+        setBrowseAll(false);
+      }
       // 200 with a `notice` body is informational (issue #149), not an error
       // — 204 (the common case) carries none.
       if (result?.notice) props.onNotice(result.notice);
@@ -190,6 +223,20 @@ export function Composer(props: {
   const acOpen = () => !acDismissed() && acMatches().length > 0;
   // Typing resets the highlight to the best (first) match and un-dismisses.
   createEffect(on(text, () => setAcIndex(0), { defer: true }));
+
+  // run A → run B without a remount: show B's draft (or an empty box), reset
+  // the popover state. A's draft stays stored under A's key.
+  createEffect(
+    on(
+      () => props.runID,
+      (id) => {
+        setText(loadDraft(id));
+        setBrowseAll(false);
+        setAcDismissed(false);
+      },
+      { defer: true },
+    ),
+  );
   // The list scrolls past 40vh, so cycling must drag the active row into view
   // (optional call: jsdom has no scrollIntoView).
   createEffect(() => {
@@ -198,7 +245,9 @@ export function Composer(props: {
   });
   const completeCommand = (cmd: RunCommand) => {
     setBrowseAll(false);
-    setText(`/${cmd.name} `);
+    const value = `/${cmd.name} `;
+    setText(value);
+    saveDraft(value);
     // Dismiss until the next keystroke: with the completion landed the picker
     // has done its job — left open it would keep swallowing Tab and the
     // arrows (descriptions often still match "name "). Enter needs no such
@@ -448,6 +497,7 @@ export function Composer(props: {
                 setAcDismissed(false);
                 setBrowseAll(false);
                 setText(e.currentTarget.value);
+                saveDraft(e.currentTarget.value);
               }}
               onKeyDown={onKeyDown}
               onBlur={() => setBrowseAll(false)}

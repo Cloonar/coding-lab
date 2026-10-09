@@ -21,7 +21,11 @@
 //   and rides as first_message with the `<action>-<n>` label default;
 // - blockers at the composer: logged out, cloning and clone failed disable
 //   the field; a failing tracker check warns and leaves it enabled; the host
-//   Runner warning shows whenever the effective Runner is host.
+//   Runner warning shows whenever the effective Runner is host;
+// - the unsent composition is a draft (issue #92): restored on open after the
+//   resources land, in any order, with stale picks dropped one by one;
+//   cleared by a started run, kept by a failed one; a throwing localStorage
+//   leaves the page as it was.
 //
 // The pickers render in a Portal on document.body, so they are queried on
 // `document`, not on the mount container.
@@ -31,6 +35,8 @@ import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IssueSummary, Provider, ProviderAuthStatus, Repo } from '../api';
 import App from '../App';
+import { NEW_RUN_DRAFT_KEY, readDraft, writeDraft } from '../lib/drafts';
+import { EMPTY_NEW_RUN_DRAFT, parseNewRunDraft, type NewRunDraft } from '../lib/newRun';
 import NewRun from './NewRun';
 
 class FakeEventSource {
@@ -539,6 +545,8 @@ beforeEach(() => {
   instancePosts = [];
   // A stale recent list must not strand the composer; default to the empty slate.
   localStorage.removeItem('lab.last-repo');
+  // Nor may one test's unsent composition (issue #92) open in the next.
+  localStorage.removeItem(NEW_RUN_DRAFT_KEY);
   stubApi();
 });
 
@@ -549,6 +557,8 @@ afterEach(() => {
   document.body.style.overflow = '';
   FakeEventSource.instances = [];
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  localStorage.removeItem(NEW_RUN_DRAFT_KEY);
 });
 
 describe('NewRun page', () => {
@@ -1617,5 +1627,361 @@ describe('NewRun blockers', () => {
     sendButton().click();
     await settle();
     expect(instancePosts).toHaveLength(1);
+  });
+});
+
+// The New run draft (issue #92): one localStorage entry holds the whole
+// composition until the run starts. Opening the page restores it once repos,
+// providers and defaults have landed — whatever order they land in — and the
+// reset effects never wipe it on the way; each stale pick is dropped on its
+// own. A started run clears it, a failed one keeps it.
+describe('NewRun draft (issue #92)', () => {
+  beforeEach(() => {
+    providersOnServer = [...PROVIDERS, CODEX, GPT];
+    reposOnServer = [repoFixture(), repoFixture({ id: 'repo_2', name: 'other-repo' })];
+    issuesOnServer = [issueFixture()];
+  });
+
+  /** Stores a draft as a previous visit would have. */
+  function storeDraft(value: Partial<NewRunDraft>): void {
+    writeDraft(NEW_RUN_DRAFT_KEY, { ...EMPTY_NEW_RUN_DRAFT, ...value });
+  }
+  const storedDraft = () => readDraft(NEW_RUN_DRAFT_KEY, parseNewRunDraft);
+
+  /** Leaves the page and comes back (a reload is the same fresh mount). */
+  async function remount(): Promise<void> {
+    dispose?.();
+    container.remove();
+    FakeEventSource.instances = [];
+    await mountNewRun();
+  }
+
+  /** Holds every GET of `url` until the returned release lets them through. */
+  function hold(url: string): () => Promise<void> {
+    const inner = globalThis.fetch;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo, init?: RequestInit) =>
+        String(input) === url ? gate.then(() => inner(input, init)) : inner(input, init),
+      ),
+    );
+    return async () => {
+      open();
+      await settle();
+    };
+  }
+
+  const attachedText = () => container.querySelector('.composer-attach-text')?.textContent ?? null;
+
+  async function labelValue(): Promise<string> {
+    const panel = await openMore();
+    const value = panel.querySelector<HTMLInputElement>('input[name="label"]')!.value;
+    await closePicker();
+    return value;
+  }
+
+  async function remoteOn(): Promise<boolean> {
+    const panel = await openMore();
+    const on =
+      panel.querySelector('button[role="switch"][name="remote"]')?.getAttribute('aria-checked') ===
+      'true';
+    await closePicker();
+    return on;
+  }
+
+  const FULL: Partial<NewRunDraft> = {
+    text: 'half a thought',
+    label: 'mine',
+    pickedId: 'repo_2',
+    providerPick: 'gpt',
+    modelPick: 'gpt-5.6-luna',
+    effortPick: 'high',
+    remotePick: false,
+    attachment: { action: 'triage', issue: issueFixture(), repoId: 'repo_2' },
+  };
+
+  it('restores the whole composition after the resources resolve; the resets do not wipe it', async () => {
+    // Remote inherits ON, so the restored `false` is a real pick.
+    settingsOnServer = { spawn_remote_default: true };
+    storeDraft(FULL);
+    await mountNewRun();
+
+    expect(pill('other-repo')?.getAttribute('aria-pressed')).toBe('true');
+    expect(composerInput().value).toBe('half a thought');
+    expect(attachedText()).toBe('Triage #47 · Rename the module path');
+    expect(chipLabel('Model')).toBe('GPT-5.6-Luna');
+    expect(chipLabel('Effort')).toBe('High');
+    expect(await checkedAgent()).toBe('GPT');
+    await closePicker();
+    expect(await labelValue()).toBe('mine');
+    expect(await remoteOn()).toBe(false);
+
+    sendButton().click();
+    await settle();
+    expect(instancePosts).toEqual([
+      {
+        repo: 'repo_2',
+        body: {
+          label: 'mine',
+          provider: 'gpt',
+          model: 'gpt-5.6-luna',
+          effort: 'high',
+          remote: false,
+          first_message: '/triage #47\nhalf a thought',
+        },
+      },
+    ]);
+  });
+
+  // Each resource landing last: repos (the selected repo appears last),
+  // providers (the catalog appears last) and defaults (the inherited provider
+  // moves from the first registered, claude-code, to codex when it lands —
+  // the switch that would have wiped a codex model pick).
+  it.each(['/api/v1/settings', '/api/v1/providers', '/api/v1/repos'])(
+    'restores the picks whatever lands last (%s)',
+    async (last) => {
+      reposOnServer = [repoFixture({ provider: null })];
+      settingsOnServer = { provider_default: 'codex' };
+      storeDraft({ text: 'late', modelPick: 'gpt-5', remotePick: true });
+      const release = hold(last);
+      await mountNewRun();
+      await release();
+
+      expect(chipLabel('Model')).toBe('GPT-5');
+      expect(composerInput().value).toBe('late');
+      sendButton().click();
+      await settle();
+      expect(posts()).toEqual([{ model: 'gpt-5', first_message: 'late' }]);
+      // Codex has no remote knob: the restored pick stays, but never rides.
+      expect(storedDraft()).toBeNull();
+    },
+  );
+
+  it('a repo switch made before the restore ends still resets the repo picks', async () => {
+    storeDraft({ providerPick: 'codex', remotePick: true, text: 'keep me' });
+    const release = hold('/api/v1/settings');
+    await mountNewRun();
+
+    pill('other-repo')!.click();
+    await settle();
+    await release();
+
+    expect(await checkedAgent()).toBe('Claude Code');
+    await closePicker();
+    expect(composerInput().value).toBe('keep me');
+    expect(storedDraft()).toMatchObject({ providerPick: '', remotePick: null, text: 'keep me' });
+  });
+
+  it('an agent switch made before the restore ends still resets model and effort', async () => {
+    // "high" is in both catalogs: only the reset can drop it.
+    storeDraft({ effortPick: 'high' });
+    const release = hold('/api/v1/settings');
+    await mountNewRun();
+
+    await chooseAgent('GPT');
+    await closePicker();
+    await release();
+
+    expect(chipLabel('Model')).toBe('GPT-5.6-Terra');
+    expect(chipLabel('Effort')).toBe('Medium');
+    expect(storedDraft()).toMatchObject({ providerPick: 'gpt', effortPick: '' });
+  });
+
+  it('a real repo switch after the restore resets provider, remote and attachment', async () => {
+    storeDraft({
+      ...FULL,
+      pickedId: 'repo_1',
+      attachment: { action: 'triage', issue: issueFixture(), repoId: 'repo_1' },
+    });
+    await mountNewRun();
+    expect(attachedText()).not.toBeNull();
+    expect(chipLabel('Model')).toBe('GPT-5.6-Luna');
+
+    pill('other-repo')!.click();
+    await settle();
+
+    expect(attachedText()).toBeNull();
+    expect(chipLabel('Model')).toBe('Sonnet');
+    expect(await checkedAgent()).toBe('Claude Code');
+    await closePicker();
+    expect(storedDraft()).toEqual({
+      ...FULL,
+      pickedId: 'repo_2',
+      providerPick: '',
+      modelPick: '',
+      effortPick: '',
+      remotePick: null,
+      attachment: null,
+    });
+  });
+
+  it('saves every change and restores it after leaving and coming back', async () => {
+    await mountNewRun();
+    typeText('do the thing');
+    await chooseFromChip('Model', 'Opus');
+    await chooseFromChip('Effort', 'High');
+    typeLabel(await openMore(), 'debug');
+    await closePicker();
+    await attachAction(47, 'Implement');
+
+    expect(storedDraft()).toMatchObject({
+      text: 'do the thing',
+      label: 'debug',
+      modelPick: 'opus',
+      effortPick: 'high',
+      attachment: { action: 'implement', repoId: 'repo_1', issue: { number: 47 } },
+    });
+
+    await remount();
+
+    expect(composerInput().value).toBe('do the thing');
+    expect(chipLabel('Model')).toBe('Opus');
+    expect(chipLabel('Effort')).toBe('High');
+    expect(attachedText()).toBe('Implement #47 · Rename the module path');
+    expect(await labelValue()).toBe('debug');
+  });
+
+  it('a started run clears the draft; the next visit opens clean', async () => {
+    storeDraft(FULL);
+    await mountNewRun();
+
+    sendButton().click();
+    await settle();
+    expect(container.textContent).toContain('run:run_new');
+    expect(localStorage.getItem(NEW_RUN_DRAFT_KEY)).toBeNull();
+
+    await remount();
+    expect(composerInput().value).toBe('');
+    expect(attachedText()).toBeNull();
+    expect(pill('coding-lab')?.getAttribute('aria-pressed')).toBe('true');
+    expect(chipLabel('Model')).toBe('Sonnet');
+  });
+
+  it('a failed start keeps the draft', async () => {
+    instancePost = { status: 409, runID: 'run_new' };
+    await mountNewRun();
+    typeText('try me');
+    await chooseFromChip('Model', 'Opus');
+
+    sendButton().click();
+    await settle();
+    expect(container.querySelector('.banner.error')).not.toBeNull();
+    expect(storedDraft()).toMatchObject({ text: 'try me', modelPick: 'opus' });
+
+    await remount();
+    expect(composerInput().value).toBe('try me');
+    expect(chipLabel('Model')).toBe('Opus');
+  });
+
+  it('drops a provider pick that is no longer registered, and only that', async () => {
+    storeDraft({ providerPick: 'retired', modelPick: 'opus', text: 'x', label: 'l' });
+    await mountNewRun();
+
+    expect(await checkedAgent()).toBe('Claude Code');
+    await closePicker();
+    expect(chipLabel('Model')).toBe('Opus');
+    expect(composerInput().value).toBe('x');
+    expect(storedDraft()).toMatchObject({ providerPick: '', modelPick: 'opus', label: 'l' });
+    sendButton().click();
+    await settle();
+    expect(posts()).toEqual([{ label: 'l', model: 'opus', effort: 'low', first_message: 'x' }]);
+  });
+
+  it("drops a model the resolved provider's catalog no longer offers, and only that", async () => {
+    storeDraft({ modelPick: 'gpt-5', effortPick: 'high', text: 'x' });
+    await mountNewRun();
+
+    expect(chipLabel('Model')).toBe('Sonnet');
+    expect(chipLabel('Effort')).toBe('High');
+    expect(storedDraft()).toMatchObject({ modelPick: '', effortPick: 'high', text: 'x' });
+  });
+
+  it("drops an effort the resolved model's catalog no longer offers, and only that", async () => {
+    storeDraft({ providerPick: 'gpt', modelPick: 'gpt-5.6-luna', effortPick: 'ultra' });
+    await mountNewRun();
+
+    expect(chipLabel('Model')).toBe('GPT-5.6-Luna');
+    // Luna stops at high: its reported default shows instead.
+    expect(chipLabel('Effort')).toBe('Medium');
+    expect(storedDraft()).toMatchObject({
+      providerPick: 'gpt',
+      modelPick: 'gpt-5.6-luna',
+      effortPick: '',
+    });
+  });
+
+  it('drops an attachment made under another repo, and only that', async () => {
+    storeDraft({
+      pickedId: 'repo_1',
+      remotePick: true,
+      text: 'x',
+      attachment: { action: 'triage', issue: issueFixture(), repoId: 'repo_2' },
+    });
+    await mountNewRun();
+
+    expect(attachedText()).toBeNull();
+    expect(composerInput().value).toBe('x');
+    expect(await remoteOn()).toBe(true);
+    expect(storedDraft()).toMatchObject({ pickedId: 'repo_1', remotePick: true, attachment: null });
+  });
+
+  it('a repo that no longer exists falls back to the preselection; the rest restores', async () => {
+    localStorage.setItem('lab.last-repo', JSON.stringify(['repo_2']));
+    storeDraft({
+      pickedId: 'repo_gone',
+      modelPick: 'opus',
+      text: 'x',
+      attachment: { action: 'triage', issue: issueFixture(), repoId: 'repo_gone' },
+    });
+    await mountNewRun();
+
+    expect(pill('other-repo')?.getAttribute('aria-pressed')).toBe('true');
+    expect(attachedText()).toBeNull();
+    expect(chipLabel('Model')).toBe('Opus');
+    expect(composerInput().value).toBe('x');
+    expect(storedDraft()).toMatchObject({ pickedId: null, attachment: null, modelPick: 'opus' });
+  });
+
+  it('removing the attachment and clearing the text update the entry; all-empty clears it', async () => {
+    storeDraft({
+      text: 'x',
+      attachment: { action: 'discuss', issue: issueFixture(), repoId: 'repo_1' },
+    });
+    await mountNewRun();
+    expect(attachedText()).not.toBeNull();
+
+    container.querySelector<HTMLButtonElement>('.composer-attach-remove')!.click();
+    await settle();
+    expect(storedDraft()).toEqual({ ...EMPTY_NEW_RUN_DRAFT, text: 'x' });
+
+    typeText('');
+    await settle();
+    expect(localStorage.getItem(NEW_RUN_DRAFT_KEY)).toBeNull();
+  });
+
+  it('works as before with a localStorage that throws on every access', async () => {
+    for (const m of ['getItem', 'setItem', 'removeItem', 'key'] as const) {
+      vi.spyOn(Storage.prototype, m).mockImplementation(() => {
+        throw new Error('denied');
+      });
+    }
+    const consoleError = vi.spyOn(console, 'error');
+    await mountNewRun();
+
+    expect(pill('coding-lab')?.getAttribute('aria-pressed')).toBe('true');
+    typeText('no storage');
+    await chooseFromChip('Model', 'Opus');
+    pill('other-repo')!.click();
+    await settle();
+    sendButton().click();
+    await settle();
+
+    expect(instancePosts).toEqual([
+      { repo: 'repo_2', body: { model: 'opus', effort: 'low', first_message: 'no storage' } },
+    ]);
+    expect(container.textContent).toContain('run:run_new');
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });

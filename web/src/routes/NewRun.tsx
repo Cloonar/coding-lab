@@ -35,9 +35,15 @@
 //
 // Resolution mirrors the server: per-spawn pick → repo override → global
 // default (ADR-0030 for the agent; issue #156 for per-model efforts; issue
-// #163's tri-state for remote control). Picks are ephemeral and reset with the
-// repo; only explicit agent/remote picks ride the request. Manual spawn has no
-// provider-options bag (internal/httpapi/instances.go), so issue #21 stays open.
+// #163's tri-state for remote control). Picks reset with the repo and never
+// outlive the spawn; only explicit agent/remote picks ride the request. Manual
+// spawn has no provider-options bag (internal/httpapi/instances.go), so issue
+// #21 stays open.
+//
+// The unsent composition — text, label, repo, picks, the attachment — is a
+// draft in localStorage (issue #92, lib/drafts): restored on open (stale
+// picks dropped against what loads), saved on every change, cleared when the
+// run starts. It is never a default for the next run (ADR-0030).
 
 import { A, useNavigate } from '@solidjs/router';
 import {
@@ -84,16 +90,20 @@ import SectionHead from '../components/SectionHead';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
 import { isComposerSend } from '../lib/composerKeys';
+import { NEW_RUN_DRAFT_KEY, clearDraft, readDraft, writeDraft } from '../lib/drafts';
 import { createLiveResource } from '../lib/liveResource';
 import { createMediaQuery } from '../lib/media';
 import {
+  EMPTY_NEW_RUN_DRAFT,
   RECENT_REPOS_PILLS,
   attachmentText,
   composeFirstMessage,
   composerBlockers,
   composerPlaceholder,
   fieldDisabled,
+  isEmptyNewRunDraft,
   isStartable,
+  parseNewRunDraft,
   preselectedRepo,
   pushRecentRepo,
   readRecentRepos,
@@ -103,16 +113,12 @@ import {
   writeRecentRepos,
   type AttachmentRef,
   type IssueAction,
+  type NewRunAttachment,
+  type NewRunDraft,
 } from '../lib/newRun';
 import { resourceValue } from '../lib/resource';
 import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from '../lib/spawn';
 import { createCloneProgressStore } from '../stores/cloneProgress';
-
-/** The issue action attached to the composer. */
-interface Attachment {
-  action: IssueAction;
-  issue: IssueSummary;
-}
 
 export default function NewRun() {
   return (
@@ -146,6 +152,20 @@ function NewRunView() {
   const toast = createToast();
   onCleanup(progress.dispose);
 
+  // The unsent composition (issue #92), read once: it seeds the signals
+  // below, every change writes it back (see "The draft"), a started run
+  // clears it. No draft, or no storage, is the untouched page.
+  const draft = readDraft(NEW_RUN_DRAFT_KEY, parseNewRunDraft) ?? EMPTY_NEW_RUN_DRAFT;
+  // The restore window. repos, providers and defaults land independently,
+  // and each landing can move the selected repo or the effective provider
+  // (undefined → the first real id; the first registered provider → the
+  // defaults' one when defaults land last). Neither is an operator's switch,
+  // but either would fire the resets below and wipe the restored picks. So
+  // the page is restoring until all three have settled (resolved or errored):
+  // the resets hold off, the restored picks are then checked ONCE against
+  // what loaded (dropStalePicks), and only an id change after that resets.
+  const [restored, setRestored] = createSignal(false);
+
   const repoList = (): Repo[] => resourceValue(repos) ?? [];
   // Awaitable, so the AFK controls and the clone Retry stay busy until the
   // fresh list is in.
@@ -162,8 +182,9 @@ function NewRunView() {
   const openedWith = readRecentRepos();
   const [recentIds, setRecentIds] = createSignal<string[]>(openedWith);
   const [pickedHere, setPickedHere] = createSignal<string[]>([]);
-  // null = nothing picked on this visit: the most recent usable repo.
-  const [pickedId, setPickedId] = createSignal<string | null>(null);
+  // null = nothing picked on this visit (or in its draft): the most recent
+  // usable repo.
+  const [pickedId, setPickedId] = createSignal<string | null>(draft.pickedId);
 
   // The picked repo while it still exists (even if it went un-startable, so
   // its banner shows), else the preselection — which falls back to a
@@ -191,6 +212,9 @@ function NewRunView() {
   const pickRepo = (repo: Repo): void => {
     if (!pills().includes(repo))
       setPickedHere((ids) => [repo.id, ...ids.filter((x) => x !== repo.id)]);
+    // The reset effect holds off during the restore; a switch made in it is
+    // still the operator's own, so it resets here.
+    if (!restored() && repo.id !== selectedRepo()?.id) resetRepoPicks();
     setPickedId(repo.id);
     // Only a repo a run can start in is remembered (the issue: "startable
     // repos only"); the picker never offers another, but a pill may be one.
@@ -205,18 +229,24 @@ function NewRunView() {
   const defaultsValue = () => resourceValue(defaults) ?? {};
 
   // Per-spawn provider pick ('' = no pick). Ephemeral by design (ADR-0030): it
-  // resets on repo change (below) and on page load; the repo override and the
-  // global default are the durable levers.
-  const [providerPick, setProviderPick] = createSignal('');
+  // resets on repo change (below) and never outlives the spawn — an unsent
+  // draft restores it on page load (issue #92), a started run clears it. The
+  // repo override and the global default are the durable levers.
+  const [providerPick, setProviderPick] = createSignal(draft.providerPick);
   // Per-spawn remote-control pick (issue #163). null = untouched — NOT false:
   // `false` is a real pick here (an operator turning an inherited-on default
   // off), so only null can mean "let the layers decide".
-  const [remotePick, setRemotePick] = createSignal<boolean | null>(null);
-  // The attached issue action belongs to the repo's tracker.
-  const [attachment, setAttachment] = createSignal<Attachment | null>(null);
+  const [remotePick, setRemotePick] = createSignal<boolean | null>(draft.remotePick);
+  // The attached issue action belongs to the repo's tracker; it carries the
+  // repo it was attached under, so a restore under another repo drops it.
+  const [attachment, setAttachment] = createSignal<NewRunAttachment | null>(draft.attachment);
   // Picks and the attachment were made against one repo: another repo
   // (a pick, or the selected one disappearing) starts clean.
-  //
+  const resetRepoPicks = (): void => {
+    setProviderPick('');
+    setRemotePick(null);
+    setAttachment(null);
+  };
   // The id is a memo on purpose: `on` re-runs its callback whenever anything
   // it reads changes, and selectedRepo() reads the repos resource, which the
   // repo.changed subscription refetches (a readiness verdict, an AFK sweep).
@@ -224,13 +254,15 @@ function NewRunView() {
   // fired while the operator was typing and threw their picks away. The memo
   // only notifies when the id itself differs.
   const selectedRepoId = createMemo(() => selectedRepo()?.id);
+  // The reset keys on the id once the restore is over (undefined until then),
+  // and skips the step from undefined: what lands during the restore, and the
+  // restore's own end, are not switches.
+  const settledRepoId = createMemo(() => (restored() ? selectedRepoId() : undefined));
   createEffect(
     on(
-      selectedRepoId,
-      () => {
-        setProviderPick('');
-        setRemotePick(null);
-        setAttachment(null);
+      settledRepoId,
+      (_, prev) => {
+        if (prev !== undefined) resetRepoPicks();
       },
       { defer: true },
     ),
@@ -254,7 +286,10 @@ function NewRunView() {
   const models = () => provider()?.models ?? [];
   // Picking the inherited agent is no pick: nothing to send, no accent.
   const pickProvider = (id: string): void => {
+    const before = provider()?.id;
     setProviderPick(id === inheritedProvider()?.id ? '' : id);
+    // As in pickRepo: the operator's own switch during the restore resets at once.
+    if (!restored() && provider()?.id !== before) resetCatalogPicks();
   };
 
   // Machine-level auth for the EFFECTIVE provider: the status route is
@@ -271,20 +306,26 @@ function NewRunView() {
 
   // '' = untouched → submit the resolved default. Tracking the operator's pick
   // separately keeps a late providers/settings load from clobbering it.
-  const [modelPick, setModelPick] = createSignal('');
-  const [effortPick, setEffortPick] = createSignal('');
+  const [modelPick, setModelPick] = createSignal(draft.modelPick);
+  const [effortPick, setEffortPick] = createSignal(draft.effortPick);
   // A pick belongs to the catalog it was made from: when the EFFECTIVE
-  // provider changes (a provider pick, a repo switch, a late defaults load),
-  // stale model/effort picks reset so a foreign value can never 400 a spawn.
+  // provider changes (a provider pick, a repo switch, a late defaults load
+  // after the restore), stale model/effort picks reset so a foreign value can
+  // never 400 a spawn. During the restore the check is dropStalePicks'.
+  const resetCatalogPicks = (): void => {
+    setModelPick('');
+    setEffortPick('');
+  };
   // Memoized for the same reason as selectedRepoId: provider() reads the
   // repos resource, and a refetch of the same repo must not count as a change.
+  // Settled like settledRepoId.
   const providerId = createMemo(() => provider()?.id);
+  const settledProviderId = createMemo(() => (restored() ? providerId() : undefined));
   createEffect(
     on(
-      providerId,
-      () => {
-        setModelPick('');
-        setEffortPick('');
+      settledProviderId,
+      (_, prev) => {
+        if (prev !== undefined) resetCatalogPicks();
       },
       { defer: true },
     ),
@@ -305,10 +346,12 @@ function NewRunView() {
   // the new model's catalog, drop it — mirrors the server's skip-layer
   // resolution so a stale pick can never 400 a spawn. With no stored defaults
   // this displays/sends the new model's default; a still-valid pick is kept.
+  // Held off during the restore like the resets (dropStalePicks checks then).
   createEffect(
     on(
       model,
       () => {
+        if (!restored()) return;
         const pick = effortPick();
         if (pick !== '' && !efforts().some((o) => o.value === pick)) setEffortPick('');
       },
@@ -356,7 +399,7 @@ function NewRunView() {
     return p !== null && !p.supports_remote ? p.display_name : null;
   };
 
-  const [label, setLabel] = createSignal('');
+  const [label, setLabel] = createSignal(draft.label);
   // The effective Runner: the repo's own, else the global runner_default.
   const runner = () => {
     const repo = selectedRepo();
@@ -385,9 +428,59 @@ function NewRunView() {
   };
 
   const [retrying, setRetrying] = createSignal(false);
-  const [text, setText] = createSignal('');
+  const [text, setText] = createSignal(draft.text);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+
+  // --- The draft (issue #92) ---
+
+  // The end of the restore window: once repos, providers and defaults have
+  // all settled, each restored pick is checked against what loaded and a
+  // stale one dropped on its own, so the rest of the restore stands. An
+  // errored resource offers nothing, so the picks it would vouch for go.
+  const loaded = (r: { state: string }): boolean =>
+    r.state !== 'unresolved' && r.state !== 'pending';
+  const dropStalePicks = (): void => {
+    const id = pickedId();
+    // A gone repo: selectedRepo() already fell back to the preselection.
+    if (id !== null && !repoList().some((r) => r.id === id)) setPickedId(null);
+    const att = attachment();
+    if (att !== null && att.repoId !== selectedRepo()?.id) setAttachment(null);
+    const pick = providerPick();
+    if (pick !== '' && !providerList().some((p) => p.id === pick)) setProviderPick('');
+    // The catalogs of the provider that resolved with the surviving picks.
+    const picked = modelPick();
+    if (picked !== '' && !models().some((m) => m.value === picked)) setModelPick('');
+    const resolved = models().find((m) => m.value === (modelPick() || modelDefault()));
+    const effortValue = effortPick();
+    if (effortValue !== '' && !(resolved?.efforts ?? []).some((o) => o.value === effortValue))
+      setEffortPick('');
+  };
+  createEffect(() => {
+    if (restored() || ![repos, providers, defaults].every(loaded)) return;
+    untrack(dropStalePicks);
+    setRestored(true);
+  });
+
+  // Every change writes the composition back; the untouched one clears the
+  // entry. Once a run started, its cleared draft stays cleared: nothing may
+  // write it back while the page is on its way out.
+  let started = false;
+  createEffect(() => {
+    const value: NewRunDraft = {
+      text: text(),
+      label: label(),
+      pickedId: pickedId(),
+      providerPick: providerPick(),
+      modelPick: modelPick(),
+      effortPick: effortPick(),
+      remotePick: remotePick(),
+      attachment: attachment(),
+    };
+    if (started) return;
+    if (isEmptyNewRunDraft(value)) clearDraft(NEW_RUN_DRAFT_KEY);
+    else writeDraft(NEW_RUN_DRAFT_KEY, value);
+  });
 
   const retry = async (): Promise<void> => {
     const repo = selectedRepo();
@@ -424,7 +517,7 @@ function NewRunView() {
   });
 
   const attach = (action: IssueAction, issue: IssueSummary): void => {
-    setAttachment({ action, issue });
+    setAttachment({ action, issue, repoId: selectedRepo()?.id ?? '' });
     inputEl?.focus();
   };
 
@@ -457,6 +550,10 @@ function NewRunView() {
         att !== null ? composeFirstMessage(att.action, att.issue, text()) : text().trim();
       if (body !== '') req.first_message = body;
       const run = await startInstance(repo.id, req);
+      // The composition left with the run: its draft goes (issue #92), so the
+      // next visit opens clean. A failure keeps it, like everything else.
+      started = true;
+      clearDraft(NEW_RUN_DRAFT_KEY);
       navigate('/runs/' + run.id);
     } catch (err) {
       // 409 (cap / provider logged out / repo not ready) et al. surface
@@ -559,6 +656,7 @@ function NewRunView() {
                     <textarea
                       ref={(el) => {
                         inputEl = el;
+                        // Also fits a box that mounts with restored draft text.
                         queueMicrotask(autoGrow);
                       }}
                       class="composer-input"
