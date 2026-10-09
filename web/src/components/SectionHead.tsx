@@ -16,18 +16,34 @@
 // The always-present `.spacer` replaces the row's old
 // `justify-content: space-between`: the row's height and the action's alignment
 // no longer depend on how many children the call site happens to pass.
+//
+// `subtitle` (issue #87, the phone New run header's selected repository) is a
+// muted line under the heading. With one, the h2 and the subtitle share a
+// `.section-head-text` column; without one the row is exactly the markup
+// above — h2, spacer, action — so no other page's head row moves. The line
+// stays on one line and ellipsizes (shell.css), never widening the row.
 
-import { type JSX } from 'solid-js';
+import { Show, type JSX } from 'solid-js';
 
 export default function SectionHead(props: {
   /** Page-section heading; renders as the `<h2>` of the row. */
   title: JSX.Element;
   /** Head-row action/controls slot, right-aligned by the always-present spacer. */
   action?: JSX.Element;
+  /** Optional muted line under the heading; omitted, the markup is unchanged. */
+  subtitle?: JSX.Element;
 }) {
   return (
     <div class="section-head">
-      <h2>{props.title}</h2>
+      <Show
+        when={props.subtitle !== undefined && props.subtitle !== null}
+        fallback={<h2>{props.title}</h2>}
+      >
+        <div class="section-head-text">
+          <h2>{props.title}</h2>
+          <p class="section-sub muted">{props.subtitle}</p>
+        </div>
+      </Show>
       {/* Always rendered: `.spacer` is flex: 1 and inert while empty, so the
           head row's markup is identical with and without an action. */}
       <span class="spacer" />

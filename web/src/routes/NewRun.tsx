@@ -2,23 +2,28 @@
 // gave the composer its own URL) — issue #66, design direction A ("Sheet",
 // revision 2; reference docs/reference/new-run-mockup.html). Below 1024px the
 // page opens with a "New run" header (the New tab's root, issue #76; the
-// desktop centered column has none — the rail's `+ New run` names it). Under
-// it the page is three things and nothing else: the repository pills
-// (RepoPills — recent repos plus "All N", which opens the repository picker,
-// never the Repositories page), the composer, and the Issues card of the
-// selected repo (IssuesCard — its AFK line replaces the old AFK strip; tapping
-// an issue attaches an action to the composer). Status shows only where it
-// blocks a run: ComposerBlockers, right above the field. Never auto-navigates
-// on load; the only navigations are a sent run (→ its chat), a blocker's
-// remedy and the Runner settings link.
+// desktop centered column has none — the rail's `+ New run` names it) whose
+// subtitle names the selected repository (issue #87). Otherwise the page is
+// three things and nothing else: the repository pills (RepoPills — recent
+// repos plus "All N", which opens the repository picker, never the
+// Repositories page), the composer, and the Issues card of the selected repo
+// (IssuesCard — its AFK line replaces the old AFK strip; tapping an issue
+// attaches an action to the composer). Status shows only where it blocks a
+// run: ComposerBlockers, right above the field. Never auto-navigates on load;
+// the only navigations are a sent run (→ its chat), a blocker's remedy and the
+// Runner settings link.
 //
 // The composer keeps the Chat's dock shape: below 1024px it is docked at the
 // bottom edge (sticky, safe-area inset; above the tab bar since issue #76), so
-// the field is where the Chat's composer will be a second later; from 1024px
-// it sits under the pills in a centered 720px column. One DOM order serves
-// both (pills, composer, Issues): it is the desktop visual order, so keyboard
-// focus follows what is seen where Tab is used most, and on the phone CSS
-// `order` moves the dock last (styles/newrun.css).
+// the field is where the Chat's composer will be a second later, and the pills
+// ride in the dock as its first row (issue #87) — the repo is picked where the
+// thumb already is, right above the blockers and the field. From 1024px the
+// pills sit above the composer in a centered 720px column. The DOM follows
+// each layout's reading order: desktop is pills, composer, Issues, so keyboard
+// focus follows what is seen where Tab is used most; on the phone the dock
+// (pills inside) precedes the Issues card and CSS `order` moves it last
+// (styles/newrun.css). One RepoPills serves both: the same node moves between
+// the two spots on a breakpoint crossing (see the hasRepos branch below).
 //
 // The field: an optional attached issue action (AttachmentChip), the
 // autogrowing textarea, and a bar with the run-option chips — Model, Effort
@@ -45,6 +50,9 @@ import {
   createSignal,
   on,
   onCleanup,
+  untrack,
+  type Accessor,
+  type JSX,
 } from 'solid-js';
 import {
   errorMessage,
@@ -121,6 +129,10 @@ function NewRunView() {
   const events = useEvents();
   const navigate = useNavigate();
   const desktop = createMediaQuery(DESKTOP_QUERY);
+  // Where the one pills row sits (issue #87): before the dock from 1024px, in
+  // it below. Follows `desktop`, but hands the node over in two steps — see
+  // createHandoff — so a breakpoint crossing moves it instead of losing it.
+  const pillsSpot = createHandoff(() => (desktop() ? 'top' : 'dock'));
 
   // repo.changed keeps clone_status and the readiness summary fresh, so a
   // cloning repo becomes startable (and its banner goes) the moment it lands.
@@ -478,10 +490,12 @@ function NewRunView() {
   return (
     <main class="page newrun" classList={{ 'newrun-docked': hasRepos() }}>
       {/* The phone page header (issue #76): the New tab's root names itself,
-          like Runs, Repos and More. Desktop keeps the bare centered column. */}
+          like Runs, Repos and More. Desktop keeps the bare centered column.
+          Its subtitle is the selected repository (issue #87): with the pills
+          down in the dock, the top of the page still says where a run goes. */}
       <Show when={!desktop()}>
         <div class="newrun-head">
-          <SectionHead title="New run" />
+          <SectionHead title="New run" subtitle={selectedRepo()?.name} />
         </div>
       </Show>
       <Switch>
@@ -497,135 +511,211 @@ function NewRunView() {
           </EmptyState>
         </Match>
         <Match when={hasRepos()}>
-          <div class="newrun-pills">
-            <RepoPills
-              repos={repoList()}
-              pills={pills()}
-              recentIds={recentIds()}
-              selectedId={selectedRepo()?.id ?? null}
-              progress={progress.progress}
-              onPick={pickRepo}
-            />
-          </div>
-
-          <div class="newrun-dock">
-            <Banner message={error()} onDismiss={() => setError(null)} />
-            <ComposerBlockers
-              blockers={blockers()}
-              hostRunner={runner() === 'host'}
-              onRetryClone={() => void retry()}
-              retrying={retrying()}
-            />
-            <div classList={{ 'composer-field': true, disabled: disabled() }}>
-              <Show when={attachment()}>
-                {(att) => (
-                  <AttachmentChip
-                    text={attachmentText(att().action, att().issue)}
-                    onRemove={() => {
-                      setAttachment(null);
-                      inputEl?.focus();
-                    }}
-                  />
-                )}
-              </Show>
-              <textarea
-                ref={(el) => {
-                  inputEl = el;
-                  queueMicrotask(autoGrow);
-                }}
-                class="composer-input"
-                rows={1}
-                aria-label="Task"
-                placeholder={composerPlaceholder(attachmentRef(), selectedRepo()?.name ?? '')}
-                value={text()}
-                onInput={(e) => setText(e.currentTarget.value)}
-                onKeyDown={onKeyDown}
-                disabled={disabled()}
-              />
-              <div class="composer-bar">
-                <div class="composer-chips">
-                  <ChoiceChip
-                    name="Model"
-                    value={model()}
-                    defaultValue={modelDefault()}
-                    options={modelOptions()}
-                    changed={modelPick() !== '' && modelPick() !== modelDefault()}
-                    defaultSource={defaultSource(selectedRepo()?.model_default, modelDefault())}
-                    onPick={pickModel}
-                    disabled={chipsDisabled() || models().length === 0}
-                  />
-                  {/* No efforts catalog = the model has no effort knob at
-                      all — hide the chip rather than pin a disabled control. */}
-                  <Show when={efforts().length > 0}>
-                    <ChoiceChip
-                      name="Effort"
-                      value={effort()}
-                      defaultValue={effortDefault()}
-                      options={effortOptions()}
-                      changed={effortPick() !== '' && effortPick() !== effortDefault()}
-                      defaultSource={defaultSource(selectedRepo()?.effort_default, effortDefault())}
-                      onPick={pickEffort}
-                      disabled={chipsDisabled()}
-                    />
-                  </Show>
-                  <MoreOptions
-                    providers={providerList().map((p) => ({ id: p.id, label: p.display_name }))}
-                    providerId={provider()?.id ?? ''}
-                    onProvider={pickProvider}
-                    remote={remote()}
-                    remoteSetHere={remoteSetHere()}
-                    remoteBlocker={remoteBlocker()}
-                    onRemote={setRemotePick}
-                    label={label()}
-                    onLabel={setLabel}
-                    runner={runner()}
-                    runnerInherited={selectedRepo()?.runner === null}
-                    runnerHref={`/repos/${encodeURIComponent(selectedRepo()?.id ?? '')}/settings/runner`}
-                    changed={providerPick() !== '' || remoteSetHere() || label().trim() !== ''}
-                    disabled={chipsDisabled()}
-                  />
-                </div>
-                <button
-                  type="button"
-                  class="composer-send icon-btn"
-                  classList={{ busy: busy() }}
-                  aria-label={sendLabel(attachmentRef())}
-                  title={attachment() === null ? 'Start run (Enter)' : sendLabel(attachmentRef())}
-                  disabled={!canSend()}
-                  onClick={() => void send()}
-                >
-                  <Icon name="send" />
-                </button>
+          {/* The pills row is built once for this branch (and disposed with
+              it) and placed by breakpoint (issue #87): before the dock from
+              1024px, as the dock's first row below it. The two spots are
+              exclusive and hold the SAME node — never a second RepoPills —
+              so a breakpoint crossing moves it (inserting an attached node
+              re-parents it) and its state, such as an open picker, survives. */}
+          <BuildOnce
+            node={() => (
+              <div class="newrun-pills">
+                <RepoPills
+                  repos={repoList()}
+                  pills={pills()}
+                  recentIds={recentIds()}
+                  selectedId={selectedRepo()?.id ?? null}
+                  progress={progress.progress}
+                  onPick={pickRepo}
+                />
               </div>
-            </div>
-          </div>
+            )}
+          >
+            {(pillsRow) => (
+              <>
+                <Show when={pillsSpot() === 'top'}>{pillsRow}</Show>
 
-          <div class="newrun-issues">
-            {/* Keyed on the repo id: another repo mounts a fresh card, so
-                nothing read for the previous repo (its issue list, an open
-                picker or sheet) can show under the new one. A refetch of the
-                same repo keeps the card. */}
-            <Show when={selectedRepo()?.id} keyed>
-              {(id) => (
-                <Show when={selectedRepo()?.id === id ? selectedRepo() : null}>
-                  {(repo) => (
-                    <IssuesCard
-                      repo={repo()}
-                      onAction={attach}
-                      onRepoChanged={reloadRepos}
-                      onStarted={(run) => toast.show(afkStartedMessage(run))}
-                      onError={setError}
+                <div class="newrun-dock">
+                  <Show when={pillsSpot() === 'dock'}>{pillsRow}</Show>
+                  <Banner message={error()} onDismiss={() => setError(null)} />
+                  <ComposerBlockers
+                    blockers={blockers()}
+                    hostRunner={runner() === 'host'}
+                    onRetryClone={() => void retry()}
+                    retrying={retrying()}
+                  />
+                  <div classList={{ 'composer-field': true, disabled: disabled() }}>
+                    <Show when={attachment()}>
+                      {(att) => (
+                        <AttachmentChip
+                          text={attachmentText(att().action, att().issue)}
+                          onRemove={() => {
+                            setAttachment(null);
+                            inputEl?.focus();
+                          }}
+                        />
+                      )}
+                    </Show>
+                    <textarea
+                      ref={(el) => {
+                        inputEl = el;
+                        queueMicrotask(autoGrow);
+                      }}
+                      class="composer-input"
+                      rows={1}
+                      aria-label="Task"
+                      placeholder={composerPlaceholder(attachmentRef(), selectedRepo()?.name ?? '')}
+                      value={text()}
+                      onInput={(e) => setText(e.currentTarget.value)}
+                      onKeyDown={onKeyDown}
+                      disabled={disabled()}
                     />
-                  )}
-                </Show>
-              )}
-            </Show>
-          </div>
+                    <div class="composer-bar">
+                      <div class="composer-chips">
+                        <ChoiceChip
+                          name="Model"
+                          value={model()}
+                          defaultValue={modelDefault()}
+                          options={modelOptions()}
+                          changed={modelPick() !== '' && modelPick() !== modelDefault()}
+                          defaultSource={defaultSource(
+                            selectedRepo()?.model_default,
+                            modelDefault(),
+                          )}
+                          onPick={pickModel}
+                          disabled={chipsDisabled() || models().length === 0}
+                        />
+                        {/* No efforts catalog = the model has no effort knob at
+                            all — hide the chip rather than pin a disabled control. */}
+                        <Show when={efforts().length > 0}>
+                          <ChoiceChip
+                            name="Effort"
+                            value={effort()}
+                            defaultValue={effortDefault()}
+                            options={effortOptions()}
+                            changed={effortPick() !== '' && effortPick() !== effortDefault()}
+                            defaultSource={defaultSource(
+                              selectedRepo()?.effort_default,
+                              effortDefault(),
+                            )}
+                            onPick={pickEffort}
+                            disabled={chipsDisabled()}
+                          />
+                        </Show>
+                        <MoreOptions
+                          providers={providerList().map((p) => ({
+                            id: p.id,
+                            label: p.display_name,
+                          }))}
+                          providerId={provider()?.id ?? ''}
+                          onProvider={pickProvider}
+                          remote={remote()}
+                          remoteSetHere={remoteSetHere()}
+                          remoteBlocker={remoteBlocker()}
+                          onRemote={setRemotePick}
+                          label={label()}
+                          onLabel={setLabel}
+                          runner={runner()}
+                          runnerInherited={selectedRepo()?.runner === null}
+                          runnerHref={`/repos/${encodeURIComponent(selectedRepo()?.id ?? '')}/settings/runner`}
+                          changed={
+                            providerPick() !== '' || remoteSetHere() || label().trim() !== ''
+                          }
+                          disabled={chipsDisabled()}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        class="composer-send icon-btn"
+                        classList={{ busy: busy() }}
+                        aria-label={sendLabel(attachmentRef())}
+                        title={
+                          attachment() === null ? 'Start run (Enter)' : sendLabel(attachmentRef())
+                        }
+                        disabled={!canSend()}
+                        onClick={() => void send()}
+                      >
+                        <Icon name="send" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="newrun-issues">
+                  {/* Keyed on the repo id: another repo mounts a fresh card, so
+                      nothing read for the previous repo (its issue list, an
+                      open picker or sheet) can show under the new one. A
+                      refetch of the same repo keeps the card. */}
+                  <Show when={selectedRepo()?.id} keyed>
+                    {(id) => (
+                      <Show when={selectedRepo()?.id === id ? selectedRepo() : null}>
+                        {(repo) => (
+                          <IssuesCard
+                            repo={repo()}
+                            onAction={attach}
+                            onRepoChanged={reloadRepos}
+                            onStarted={(run) => toast.show(afkStartedMessage(run))}
+                            onError={setError}
+                          />
+                        )}
+                      </Show>
+                    )}
+                  </Show>
+                </div>
+              </>
+            )}
+          </BuildOnce>
         </Match>
       </Switch>
       {toast.Toast()}
     </main>
   );
+}
+
+/**
+ * Calls `node` once — under this component's owner, so whatever it builds is
+ * disposed with it — and hands that one result to `children` (issue #87). The
+ * render function may place it in several spots, as long as they are mutually
+ * exclusive (opposite `Show`s): a DOM node can only be in one place, and
+ * inserting it into the newly shown spot moves it out of the other. Both
+ * calls are deliberately untracked: this runs once, like any component body,
+ * and reactivity lives inside what `node` and `children` build.
+ */
+function BuildOnce(props: {
+  node: () => JSX.Element;
+  children: (node: JSX.Element) => JSX.Element;
+}): JSX.Element {
+  return untrack(() => props.children(props.node()));
+}
+
+/**
+ * A spot for one shared node that releases before it acquires (issue #87).
+ * Two `Show`s keyed straight on one signal would swap in a single flush, in
+ * whatever order Solid runs their inserts — and a releasing insert cleans up
+ * in its node's CURRENT parent, so when the acquiring spot ran first, the
+ * release then pulled the freshly moved node out of its new home. Here a
+ * change of `target` first empties the spot (null) and only then names the
+ * new one; written from a microtask, outside any update, each write flushes on
+ * its own, so the release has finished before the acquire starts. Both land
+ * before the next paint, so the row never visibly blinks out.
+ */
+function createHandoff<T extends string>(target: () => T): Accessor<T | null> {
+  const [spot, setSpot] = createSignal<T | null>(untrack(target));
+  let disposed = false;
+  onCleanup(() => (disposed = true));
+  createEffect(
+    on(
+      target,
+      () =>
+        queueMicrotask(() => {
+          if (disposed) return;
+          setSpot(null);
+          setSpot(() => untrack(target));
+        }),
+      { defer: true },
+    ),
+  );
+  return spot;
 }
 
 /** Toast copy for an AFK start — the claimed issue is the run's issue_number. */

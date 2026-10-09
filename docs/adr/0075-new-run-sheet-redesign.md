@@ -6,7 +6,7 @@ The maintainer reviewed three mockups and chose direction A, "Sheet", revision 2
 
 The decisions, pinned:
 
-- **The page is three things: repository pills, an Issues card, the composer.** Below 1024px, the app's rail breakpoint, the pills row is at the top, the Issues card follows, and the composer is docked sticky at the bottom edge with the safe-area inset. The page root is `min-height: 100%`, so the dock sits at the bottom edge even when the card is short. From 1024px the page is a centered 720px column in the content area: pills, composer, Issues card, with the existing `clamp(1.5rem, 8vh, 5rem)` top margin. The dock has the Chat's shape (ADR-0072), so the composer is where the Chat composer will be a second later. Nothing on the page navigates away except a blocker's remedy.
+- **The page is three things: repository pills, an Issues card, the composer.** Below 1024px, the app's rail breakpoint, the pills row is at the top, the Issues card follows, and the composer is docked sticky at the bottom edge with the safe-area inset (amended by issue #87, 2026-10-09: the pills row now rides in the docked composer as its first row, and the phone header names the selected repo — see Status). The page root is `min-height: 100%`, so the dock sits at the bottom edge even when the card is short. From 1024px the page is a centered 720px column in the content area: pills, composer, Issues card, with the existing `clamp(1.5rem, 8vh, 5rem)` top margin. The dock has the Chat's shape (ADR-0072), so the composer is where the Chat composer will be a second later. Nothing on the page navigates away except a blocker's remedy.
 
 - **Repository pills replace the Repository chip.** The pills are the repositories used recently, last used first and preselected, at most four, plus an "All N" pill. A pill carries the repo's readiness dot from the summary's roll-up: green when it passes, red when it fails. "All N" opens the repository picker and never the Repositories page. The picker is a search field first (name or host as you type, Enter picks the first enabled match, the unified Select's `select-search` input reused), then a Recent group, then All repositories. Rows that cannot start a run (cloning with the live percent, clone failed) are shown disabled with their status text.
 
@@ -54,6 +54,8 @@ Accepted 2026-10-07. Resolves issue #66, the GitHub issue; the "issue #66" ADR-0
 - **ADR-0045:** unchanged. The remote-control knob, its "inherited / set here" semantics and the "ignored by this provider" state move from the `…` popover into More options.
 - **ADR-0050:** unchanged and relied on. The Issues card is one more reader of the bounded issue list, not a new kind of read.
 
+Amended by issue #87 (2026-10-09): the first pin's phone layout, "the pills row is at the top, the Issues card follows, and the composer is docked", is superseded below 1024px. The pills row now rides in the docked composer as its first row, above the blockers and the field, so the repository is picked where the thumb already is; the page reads header, Issues card, then the dock. With the pills no longer naming the repository at the top, the phone "New run" header carries the selected repo's name as its subtitle. From 1024px nothing changes: pills, composer, Issues card in the centered 720px column. There is still one pills row, not two: the same RepoPills instance moves between its two spots when the width crosses 1024px, so its state (an open repository picker) survives the move. Rejected: the pills at the bottom of the scrolling content, under the Issues card, where reach would depend on how long the card is and how far the page is scrolled; and the pills left at the top, out of reach of a thumb on a tall phone. Either way reach would be inconsistent or absent. Decided with the maintainer in a grill session on 2026-10-09.
+
 The user-facing docs for the New run page follow in the same change (the `update-docs` skill).
 
 ## Considered options
@@ -71,7 +73,7 @@ The user-facing docs for the New run page follow in the same change (the `update
 
 ## Consequences
 
-- A phone shows one row of pills, a short card and one docked field, with the options one tap away. At 390px no element overflows, the chip row scrolls, and every control is at least 44px tall.
+- A phone shows one row of pills, a short card and one docked field, with the options one tap away (since issue #87 the pills row is part of the dock, above the field, and the header names the selected repo; see Status). At 390px no element overflows, the chip row scrolls, and every control is at least 44px tall.
 - The New run page now shows issue data. It adds no forge request while the list is fresh, and none while the tracker check fails. A repo without a working tracker shows its detail in the card, not an empty list.
 - `lab.last-repo` holds a JSON array. The old single-id value is still read, and the next selection rewrites the key as a list.
 - Any code that opened a spawn chip or `MoreChip` by its old label, and the tests that asserted the AFK strip or the `…` popover, change with this ADR. The chip, picker, issue filter, first-message and recent-list logic is covered by unit tests in `web/src/lib/newRun.test.ts` and `web/src/components/Picker.test.tsx`.
