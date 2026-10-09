@@ -33,6 +33,8 @@ go run ./cmd/lab        # API on :8080
 cd web && npm run dev   # Vite dev server; proxies /api and /healthz → :8080
 ```
 
+The PNG icons under `web/public` (manifest icons and the iOS touch icon) are generated, not hand-edited: `web/scripts/icons.sh` redraws them all from one geometry with ImageMagick and overwrites the files in place; commit the result. The iOS touch icon is deliberately opaque and square-cornered — iOS fills transparency with black and masks the tile itself.
+
 The Go tests are integration-heavy by design: they run against real git repos, real tmux on a private socket, and real `prlimit` — not mocks. The store suite runs on SQLite always and additionally against a real PostgreSQL when `LAB_TEST_POSTGRES_DSN` is set.
 
 `nix flake check` is the authoritative gate: package builds (which carry the Go test suite and the SPA vitest suite), golangci-lint, and an eval-proven NixOS module with its unit invariants asserted.
