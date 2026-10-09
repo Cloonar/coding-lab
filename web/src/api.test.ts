@@ -739,6 +739,7 @@ describe('issue endpoints', () => {
     comments_count: 2,
     created_at: '2026-07-06T00:00:00.000Z',
     updated_at: '2026-07-06T01:00:00.000Z',
+    pull: null,
   };
 
   it('GET /repos/{id}/issues defaults to state=open and keeps the binding envelope', async () => {

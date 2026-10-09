@@ -263,11 +263,26 @@ type IssueEdit struct {
 // (PullOpen|PullMerged|PullClosed), and web URL. Head is the bare branch name
 // (e.g. afk/63), never owner:branch — matching against a run's branch is
 // client-side (PullState / PRPresent).
+//
+// Closes is the one derived fact the ref carries beyond that: the issue
+// numbers the pull's body references through a real closing directive
+// (ParseCloses — sorted ascending, deduplicated, never nil; empty means
+// none). It exists for the issue-list join (IssuePulls, issue #88), which
+// names the open pull resolving each issue so the New run page can offer to
+// land it — a pull whose head is not a claim branch (a human's feature/x
+// that says "Closes #47") resolves its issue only through this list. It is
+// derived AT THE BACKEND, from the body every forge list endpoint already
+// returns (or, built-in, from the persisted cr_closes rows), so the body
+// itself still never rides the hot path — PullDetail remains the one place
+// it travels — and no per-pull read is spent to learn it. A slice field makes
+// PullRef non-comparable: compare refs field-wise (or with reflect.DeepEqual
+// in tests), never with ==.
 type PullRef struct {
 	Number     int
 	HeadBranch string
 	State      string
 	URL        string
+	Closes     []int
 }
 
 // PullDetail is one pull request / change request in full: what PullRef

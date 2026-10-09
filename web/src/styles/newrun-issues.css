@@ -1,8 +1,8 @@
 /* New run redesign (issue #66): the Issues card (components/newrun/
    IssuesCard.tsx), the issue picker's rows (IssuePicker.tsx) and the issue
    action sheet (IssueActionSheet.tsx). The picker panel itself is picker.css;
-   the triage chip reuses the existing chip tints (chips.css .in-use and
-   .status-warn, instances.css .idle). */
+   the triage chip and the PR chip reuse the existing chip tints (chips.css
+   .in-use and .status-warn, instances.css .idle). */
 
 /* Card ------------------------------------------------------------------------ */
 
@@ -144,7 +144,8 @@
   overflow-wrap: anywhere;
 }
 
-.triage-chip {
+.triage-chip,
+.pr-chip {
   flex: none;
 }
 
@@ -232,6 +233,27 @@
   display: block;
   color: var(--muted);
   font-size: 0.83rem;
+}
+
+/* Land (issue #88): the PR's head branch, then the collision notes — a
+   notice tint, not an error: they inform and never disable the row. */
+.issue-action-branch {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.issue-action-note {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: var(--banner-bg);
+  color: var(--banner-text);
+  font-size: 0.8rem;
 }
 
 .chip.issue-action-suggested {

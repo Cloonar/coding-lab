@@ -366,6 +366,7 @@ func (c *Client) PullsForHead(ctx context.Context, head, base string) ([]tracker
 			HeadBranch: head, // the queried name, never the rendered head.ref (see above)
 			State:      state,
 			URL:        fj.HTMLURL,
+			Closes:     tracker.ParseCloses(fj.Body),
 		}}, nil
 	}
 	// Closed-unmerged: the rare fallback walk (see the doc comment).
@@ -674,6 +675,7 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 		HeadBranch: fj.Head.Ref,
 		State:      tracker.PullMerged,
 		URL:        fj.HTMLURL,
+		Closes:     tracker.ParseCloses(fj.Body),
 	}, nil
 }
 
@@ -1131,12 +1133,17 @@ func changesRequestedReviewers(reviews []tracker.Review) []string {
 	return out
 }
 
+// toPullRef reduces a Forgejo pull onto the PullRef vocabulary. Closes is
+// parsed from the body the list endpoint already carries (every pulls
+// listing returns full rows), so the issue-list join learns which issues a
+// pull resolves without a per-pull read; the body itself is dropped here.
 func toPullRef(fj fjPull) tracker.PullRef {
 	return tracker.PullRef{
 		Number:     fj.Number,
 		HeadBranch: fj.Head.Ref,
 		State:      derivePullState(fj.State, fj.Merged),
 		URL:        fj.HTMLURL,
+		Closes:     tracker.ParseCloses(fj.Body),
 	}
 }
 

@@ -1,11 +1,12 @@
 // The New run page's pure rules (issue #66): the recent repositories list and
 // its storage key (old and new format), the picker's rows and filter, the
-// triage state/filter/counts/age of the Issues card, the three first_message
-// shapes and the default label, the AFK line, and the composer's blockers
+// triage state/filter/counts/age of the Issues card, the four first_message
+// shapes and the default label, Land only with an open PR and its collision
+// notes (issue #88), the AFK line, and the composer's blockers
 // (a failing tracker warns but leaves the field enabled).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ReadinessCheck, Repo } from '../api';
+import type { Instance, IssuePull, ReadinessCheck, Repo } from '../api';
 import { baseRepo } from '../routes/repo-home/harness';
 import {
   afkLine,
@@ -20,8 +21,12 @@ import {
   HOST_RUNNER_WARNING,
   isStartable,
   ISSUE_ACTIONS,
+  issueActions,
   issueAge,
   issueFilterCounts,
+  LAND_NOTE_AUTOLAND,
+  LAND_NOTE_LIVE_LANDER,
+  landNotes,
   newestIssues,
   parseRecentRepos,
   preselectedRepo,
@@ -484,21 +489,56 @@ describe('issueAge', () => {
   });
 });
 
+const PULL: IssuePull = {
+  number: 88,
+  head_branch: 'afk/47',
+  url: 'https://github.com/o/r/pull/88',
+  escalated: false,
+};
+
 describe('issue actions', () => {
-  it('lists Triage, Implement, Discuss with the mockup copy', () => {
+  it('lists Triage, Implement, Discuss and Land with the mockup copy', () => {
     expect(ISSUE_ACTIONS.map((a) => [a.id, a.label])).toEqual([
       ['triage', 'Triage'],
       ['implement', 'Implement'],
       ['discuss', 'Discuss'],
+      ['land', 'Land'],
     ]);
-    const [triage, implement, discuss] = ISSUE_ACTIONS;
-    expect(triage?.describe(47)).toBe(
+    const [triage, implement, discuss, land] = ISSUE_ACTIONS;
+    expect(triage?.describe(47, null)).toBe(
       'Runs /triage #47: the agent reads it, asks you what is missing and sets the label.',
     );
-    expect(implement?.describe(47)).toBe('A run with #47 as its brief, on a branch of its own.');
-    expect(discuss?.describe(47)).toBe(
+    expect(implement?.describe(47, null)).toBe(
+      'A run with #47 as its brief, on a branch of its own.',
+    );
+    expect(discuss?.describe(47, null)).toBe(
       'Opens a chat with #47 as context. Nothing happens until you type.',
     );
+    expect(land?.describe(47, PULL)).toBe(
+      'Validate and merge PR #88. Runs /land-pr 88; it merges once you confirm.',
+    );
+  });
+
+  it('offers Land, as the fourth row, only for an issue with an open PR', () => {
+    expect(issueActions({ pull: null }).map((a) => a.id)).toEqual([
+      'triage',
+      'implement',
+      'discuss',
+    ]);
+    expect(issueActions({ pull: PULL }).map((a) => a.id)).toEqual([
+      'triage',
+      'implement',
+      'discuss',
+      'land',
+    ]);
+  });
+
+  it('suggests land whenever there is an open PR, before the label rules', () => {
+    expect(suggestedAction(['needs-triage'], PULL)).toBe('land');
+    expect(suggestedAction(['ready-for-agent'], PULL)).toBe('land');
+    expect(suggestedAction([], PULL)).toBe('land');
+    expect(suggestedAction(['needs-triage'], null)).toBe('triage');
+    expect(suggestedAction(['ready-for-agent'], null)).toBe('implement');
   });
 
   it('suggests triage, implement or discuss by the label', () => {
@@ -543,17 +583,34 @@ describe('composeFirstMessage', () => {
   it('keeps line breaks inside the typed text', () => {
     expect(composeFirstMessage('triage', issue, 'a\nb')).toBe('/triage #47\na\nb');
   });
+
+  it("land: /land-pr with the PR's number, then the typed text — the Triage shape", () => {
+    const withPull = { ...issue, pull: PULL };
+    expect(composeFirstMessage('land', withPull, '')).toBe('/land-pr 88');
+    expect(composeFirstMessage('land', withPull, '  \n ')).toBe('/land-pr 88');
+    expect(composeFirstMessage('land', withPull, '  note \n')).toBe('/land-pr 88\nnote');
+  });
+
+  it('land without a pull asks the skill for the PR resolving the issue', () => {
+    expect(composeFirstMessage('land', issue, '')).toBe('/land-pr the open PR resolving issue #47');
+    expect(composeFirstMessage('land', { ...issue, pull: null }, 'x')).toBe(
+      '/land-pr the open PR resolving issue #47\nx',
+    );
+  });
 });
 
 describe('labels and copy of an attached action', () => {
   const triage = { action: 'triage', number: 47 } as const;
   const discuss = { action: 'discuss', number: 47 } as const;
   const implement = { action: 'implement', number: 56 } as const;
+  const land = { action: 'land', number: 47 } as const;
 
   it('defaults the run label to <action>-<number>', () => {
     expect(defaultRunLabel('triage', 47)).toBe('triage-47');
     expect(defaultRunLabel('implement', 56)).toBe('implement-56');
     expect(defaultRunLabel('discuss', 3)).toBe('discuss-3');
+    expect(defaultRunLabel('land', 47)).toBe('land-47');
+    expect(runLabelFor('', land)).toBe('land-47');
   });
 
   it('lets a typed label win over the default, and defaults only when attached', () => {
@@ -572,12 +629,16 @@ describe('labels and copy of an attached action', () => {
       'Implement #56 · Record the Runner',
     );
     expect(attachmentText('discuss', { number: 1, title: 'x' })).toBe('Discuss #1 · x');
+    expect(attachmentText('land', { number: 47, title: 'Warpgate: dashboard' })).toBe(
+      'Land #47 · Warpgate: dashboard',
+    );
   });
 
   it('relabels Send', () => {
     expect(sendLabel(null)).toBe('Start run');
     expect(sendLabel(triage)).toBe('Start: Triage #47');
     expect(sendLabel(implement)).toBe('Start: Implement #56');
+    expect(sendLabel(land)).toBe('Start: Land #47');
   });
 
   it('words the placeholder', () => {
@@ -588,9 +649,59 @@ describe('labels and copy of an attached action', () => {
     expect(composerPlaceholder(implement, 'coding-lab')).toBe(
       'Anything the agent should know? (optional)',
     );
+    expect(composerPlaceholder(land, 'coding-lab')).toBe(
+      'Anything the agent should know? (optional)',
+    );
     expect(composerPlaceholder(discuss, 'coding-lab')).toBe(
       'Say what you want to discuss about #47…',
     );
+  });
+});
+
+describe('landNotes', () => {
+  type NoteRun = Pick<Instance, 'repo_id' | 'kind' | 'live' | 'pull_number'>;
+  const run = (overrides: Partial<NoteRun> = {}): NoteRun => ({
+    repo_id: 'repo_1',
+    kind: 'lander',
+    live: true,
+    pull_number: 88,
+    ...overrides,
+  });
+  const notes = (input: { pull?: IssuePull; autoland?: boolean; runs?: NoteRun[] }) =>
+    landNotes({
+      repoID: 'repo_1',
+      pull: input.pull ?? PULL,
+      autoland: input.autoland ?? false,
+      runs: input.runs ?? [],
+    });
+
+  it('notes Autoland while the switch is on and the PR is not escalated', () => {
+    expect(LAND_NOTE_AUTOLAND).toBe('Autoland is on for this repo');
+    expect(notes({ autoland: true })).toEqual([LAND_NOTE_AUTOLAND]);
+    expect(notes({ autoland: true, pull: { ...PULL, escalated: true } })).toEqual([]);
+    expect(notes({ autoland: false })).toEqual([]);
+  });
+
+  it('notes a live lander, fix or escalate run of this repo on this PR', () => {
+    expect(LAND_NOTE_LIVE_LANDER).toBe('A lander run is live on this PR');
+    for (const kind of ['lander', 'fix', 'escalate'] as const) {
+      expect(notes({ runs: [run({ kind })] })).toEqual([LAND_NOTE_LIVE_LANDER]);
+    }
+  });
+
+  it('ignores an ended run, another PR, another repo and other kinds', () => {
+    expect(notes({ runs: [run({ live: false })] })).toEqual([]);
+    expect(notes({ runs: [run({ pull_number: 89 })] })).toEqual([]);
+    expect(notes({ runs: [run({ repo_id: 'repo_2' })] })).toEqual([]);
+    expect(notes({ runs: [run({ kind: 'manual', pull_number: null })] })).toEqual([]);
+    expect(notes({ runs: [run({ kind: 'afk_auto' })] })).toEqual([]);
+  });
+
+  it('shows both notes, Autoland first, and only once each', () => {
+    expect(notes({ autoland: true, runs: [run(), run({ kind: 'fix' })] })).toEqual([
+      LAND_NOTE_AUTOLAND,
+      LAND_NOTE_LIVE_LANDER,
+    ]);
   });
 });
 

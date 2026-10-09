@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -444,7 +445,11 @@ func TestCreateComment(t *testing.T) {
 // sort=updated&direction=desc&per_page=50 — whose Link rel="next" header is
 // deliberately NOT followed (the bait is served and must rot). Open rows come
 // first; the merged state still derives from merged_at per row (no `merged`
-// bool on the list), so a merged pull in the window maps to "merged".
+// bool on the list), so a merged pull in the window maps to "merged". Each
+// ref's Closes is parsed off the body the LIST row already carries (issue
+// #88) — real directives only ("discloses #99" is not one), a null or absent
+// body the empty non-nil slice — and the request count above proves no
+// per-pull read was spent learning it.
 func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 	var requests, closedRequests int
 	var closedQuery url.Values
@@ -455,17 +460,17 @@ func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 		case "open":
 			if q.Get("page") == "1" {
 				setNextLink(w, r) // the open walk DOES follow Link
-				_, _ = io.WriteString(w, `[{"number":72,"state":"open","merged_at":null,"head":{"ref":"afk/63"},"html_url":"https://github.com/octocat/hello-world/pull/72"}]`)
+				_, _ = io.WriteString(w, `[{"number":72,"state":"open","merged_at":null,"body":"Closes #63","head":{"ref":"afk/63"},"html_url":"https://github.com/octocat/hello-world/pull/72"}]`)
 				return
 			}
 			// page 2, no Link → the walk stops.
-			_, _ = io.WriteString(w, `[{"number":80,"state":"open","merged_at":null,"head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/80"}]`)
+			_, _ = io.WriteString(w, `[{"number":80,"state":"open","merged_at":null,"body":"Fixes #7, resolves #12; discloses #99","head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/80"}]`)
 		case "closed":
 			closedRequests++
 			closedQuery = q
 			setNextLink(w, r) // the bait: the window must NOT follow it
 			_, _ = io.WriteString(w, `[
-			  {"number":40,"state":"closed","merged_at":"2026-01-01T00:00:00Z","head":{"ref":"afk/12"},"html_url":"https://github.com/octocat/hello-world/pull/40"},
+			  {"number":40,"state":"closed","merged_at":"2026-01-01T00:00:00Z","body":null,"head":{"ref":"afk/12"},"html_url":"https://github.com/octocat/hello-world/pull/40"},
 			  {"number":9,"state":"closed","merged_at":null,"head":{"ref":"afk/7"},"html_url":"https://github.com/octocat/hello-world/pull/9"}
 			]`)
 		default:
@@ -495,16 +500,16 @@ func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 		}
 	}
 	want := []tracker.PullRef{
-		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://github.com/octocat/hello-world/pull/72"},
-		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://github.com/octocat/hello-world/pull/80"},
-		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://github.com/octocat/hello-world/pull/40"},
-		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://github.com/octocat/hello-world/pull/9"},
+		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://github.com/octocat/hello-world/pull/72", Closes: []int{63}},
+		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://github.com/octocat/hello-world/pull/80", Closes: []int{7, 12}},
+		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://github.com/octocat/hello-world/pull/40", Closes: []int{}},
+		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://github.com/octocat/hello-world/pull/9", Closes: []int{}},
 	}
 	if len(pulls) != len(want) {
 		t.Fatalf("got %d pulls (%+v); want %d", len(pulls), pulls, len(want))
 	}
 	for i := range want {
-		if pulls[i] != want[i] {
+		if !reflect.DeepEqual(pulls[i], want[i]) {
 			t.Errorf("pull[%d] = %+v; want %+v", i, pulls[i], want[i])
 		}
 	}
@@ -1939,7 +1944,7 @@ func TestCreatePull(t *testing.T) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		gotBody = decodeBody(t, r)
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, `{"number":100,"state":"open","merged_at":null,"head":{"ref":"afk/63"},
+		_, _ = io.WriteString(w, `{"number":100,"state":"open","merged_at":null,"body":"Closes #63","head":{"ref":"afk/63"},
 		  "html_url":"https://github.com/octocat/hello-world/pull/100"}`)
 	})
 
@@ -1955,8 +1960,10 @@ func TestCreatePull(t *testing.T) {
 			t.Errorf("request body %s = %v; want %q", k, gotBody[k], want)
 		}
 	}
-	want := tracker.PullRef{Number: 100, HeadBranch: "afk/63", State: "open", URL: "https://github.com/octocat/hello-world/pull/100"}
-	if ref != want {
+	// The forge echoes the created pull's body, so Closes is parsed off it
+	// exactly as on the list path.
+	want := tracker.PullRef{Number: 100, HeadBranch: "afk/63", State: "open", URL: "https://github.com/octocat/hello-world/pull/100", Closes: []int{63}}
+	if !reflect.DeepEqual(ref, want) {
 		t.Errorf("returned PullRef = %+v; want %+v", ref, want)
 	}
 }
@@ -2002,8 +2009,8 @@ func TestMergePull_success(t *testing.T) {
 	if len(mergeBody) != 1 {
 		t.Errorf("merge body = %v; want only merge_method (no branch-delete flag)", mergeBody)
 	}
-	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://github.com/octocat/hello-world/pull/42"}
-	if ref != want {
+	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://github.com/octocat/hello-world/pull/42", Closes: []int{}}
+	if !reflect.DeepEqual(ref, want) {
 		t.Errorf("PullRef = %+v; want %+v", ref, want)
 	}
 }

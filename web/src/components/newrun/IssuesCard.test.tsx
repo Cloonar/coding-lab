@@ -12,11 +12,15 @@
 // - a failing tracker check shows its detail instead of rows; no open issues
 //   reads "No open issues."; a failed read shows its error inside the card;
 // - tapping a row (or picking in the picker) opens the action sheet with
-//   "Suggested" on the fitting action; choosing calls onAction.
+//   "Suggested" on the fitting action; choosing calls onAction;
+// - an issue with an open PR (issue #88) shows a "PR #88" chip in the run
+//   tint after its triage chip, on the card and in the picker alike, and its
+//   sheet offers Land with the repo's autoland switch and the live runs
+//   feeding the collision notes.
 
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Instance, IssueSummary, Repo, Run } from '../../api';
+import type { Instance, IssuePull, IssueSummary, Repo, Run } from '../../api';
 import { EventsProvider } from '../../events';
 import type { IssueAction } from '../../lib/newRun';
 import IssuesCard from './IssuesCard';
@@ -97,7 +101,20 @@ function issue(number: number, daysAgo: number, labels: string[], title = `Issue
     comments_count: 0,
     created_at: at,
     updated_at: at,
+    pull: null,
   } satisfies IssueSummary;
+}
+
+const PULL: IssuePull = {
+  number: 88,
+  head_branch: 'afk/47',
+  url: 'https://github.com/o/r/pull/88',
+  escalated: false,
+};
+
+/** The fixture issue with an open PR attached. */
+function withPull(base: IssueSummary, pull: IssuePull = PULL): IssueSummary {
+  return { ...base, pull };
 }
 
 function instance(overrides: Partial<Instance>): Partial<Instance> {
@@ -260,6 +277,33 @@ describe('IssuesCard rows', () => {
     expect(rows[0]!.querySelector('.issue-row-age')?.textContent).toBe('3 d');
   });
 
+  it('shows a "PR #88" chip in the run tint, after the triage chip, only for an issue with a PR', async () => {
+    openIssues = [withPull(issue(47, 8, ['needs-triage'])), issue(52, 5, ['needs-triage'])];
+    await mount(repoFixture());
+    const rows = card().querySelectorAll('.issue-row');
+    const chips = (i: number) =>
+      Array.from(rows[i]!.querySelectorAll('.chip')).map((c) => c.textContent);
+    expect(rowNumbers()).toEqual(['#52', '#47']);
+    expect(chips(1)).toEqual(['needs-triage', 'PR #88']);
+    expect(rows[1]!.querySelector('.pr-chip')?.classList.contains('in-use')).toBe(true);
+    expect(chips(0)).toEqual(['needs-triage']);
+    expect(card().querySelectorAll('.pr-chip')).toHaveLength(1);
+  });
+
+  it('shows the PR chip in the picker rows too', async () => {
+    openIssues = [
+      ...SIX().slice(1),
+      withPull(issue(40, 30, ['needs-info']), { ...PULL, number: 91 }),
+    ];
+    await mount(repoFixture());
+    button('All 6 open issues').click();
+    await settle();
+    const pickerChips = Array.from(issuePicker()!.querySelectorAll('.pr-chip')).map(
+      (c) => c.textContent,
+    );
+    expect(pickerChips).toEqual(['PR #91']);
+  });
+
   it('tints needs-info in the idle tint', async () => {
     openIssues = [issue(40, 1, ['needs-info'])];
     await mount(repoFixture());
@@ -414,5 +458,26 @@ describe('IssuesCard issue action', () => {
     button('Discuss', sheet()!).click();
     await settle();
     expect(actions).toEqual([{ action: 'discuss', issue: 30 }]);
+  });
+
+  it('an issue with a PR offers Land, noted from the autoland switch and the live runs', async () => {
+    openIssues = [withPull(issue(47, 8, ['needs-triage']))];
+    instances = [
+      instance({ id: 'run_l', kind: 'lander', pull_number: 88 }),
+      // Another repo's lander on a PR with the same number does not count.
+      instance({ id: 'run_x', repo_id: 'repo_2', kind: 'lander', pull_number: 88 }),
+    ];
+    await mount(repoFixture({ autoland_enabled: true }));
+    button('Issue 47').click();
+    await settle();
+    const suggested = sheet()!.querySelector('.issue-action.suggested');
+    expect(suggested?.textContent).toContain('Land');
+    expect(
+      Array.from(sheet()!.querySelectorAll('.issue-action-note')).map((n) => n.textContent),
+    ).toEqual(['Autoland is on for this repo', 'A lander run is live on this PR']);
+
+    button('Land', sheet()!).click();
+    await settle();
+    expect(actions).toEqual([{ action: 'land', issue: 47 }]);
   });
 });

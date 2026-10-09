@@ -700,12 +700,18 @@ func TestReadiness_RecordersFeedTheReport(t *testing.T) {
 		t.Fatalf("repeated failing reads published %d repo.changed, want none", n)
 	}
 
-	// The forge answers again: the verdict flips, once, and the open issue
-	// count that read carried is remembered.
+	// The forge answers again: the verdict flips, and the open issue count
+	// that read carried is remembered. The list's issue and pulls reads
+	// (issue #88) were both refused and both land concurrently now: pulls
+	// first, and the verdict stays failing on the issue 401 still on record
+	// until the issue read flips it and sets the count in one event; issue
+	// first, and the count arrives while the pulls 401 keeps the verdict
+	// failing (one event), then the pulls success flips it (a second). Each
+	// is a genuine report change; none or a third is not.
 	rs.stub.set(http.StatusOK, "", forgeIssue(1), forgeIssue(2, tracker.ReadyLabel), forgeIssue(3))
 	rs.getJSON(base + "/issues")
-	if n := rs.repoChanged(repo.ID); n != 1 {
-		t.Fatalf("failed → succeeded published %d repo.changed, want exactly 1", n)
+	if n := rs.repoChanged(repo.ID); n != 1 && n != 2 {
+		t.Fatalf("failed → succeeded published %d repo.changed, want 1 or 2", n)
 	}
 	wantCheck(t, rs.readiness(repo.ID), "tracker", "passing")
 	_, openIssues, _ := summaryOf(t, rs.getJSON(base))
@@ -1349,8 +1355,16 @@ func TestReadiness_TrackerOnlyDefinitiveAnswersAreEvidence(t *testing.T) {
 
 			rs.stub.set(http.StatusOK, "", forgeIssue(1), forgeIssue(2))
 			read()
-			if n := rs.repoChanged(repo.ID); n != 1 {
-				t.Fatalf("the first success published %d repo.changed, want 1", n)
+			// The issue list spends a Pulls read alongside its issue read
+			// (issue #88), concurrently, and both are recorded list reads.
+			// When the issue read lands first it flips the verdict and sets
+			// the open count in one record (one event; the pulls success
+			// after it changes nothing). When the pulls read lands first, the
+			// verdict flips on it and the count arrives with the issue read —
+			// two genuine report changes, two events. Either is correct; none
+			// or a third is not.
+			if n := rs.repoChanged(repo.ID); n != 1 && n != 2 {
+				t.Fatalf("the first success published %d repo.changed, want 1 or 2", n)
 			}
 			noise("after a success")
 			trackerDetail("passing")

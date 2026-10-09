@@ -25,6 +25,7 @@ function issue(number: number, daysAgo: number, labels: string[], title: string)
     comments_count: 0,
     created_at: at,
     updated_at: at,
+    pull: null,
   };
 }
 

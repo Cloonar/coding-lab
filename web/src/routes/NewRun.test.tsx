@@ -209,6 +209,7 @@ function issueFixture(overrides: Partial<IssueSummary> = {}): IssueSummary {
     comments_count: 0,
     created_at: '2026-10-01T00:00:00.000Z',
     updated_at: '2026-10-01T00:00:00.000Z',
+    pull: null,
     ...overrides,
   };
 }
@@ -507,7 +508,10 @@ function typeLabel(panel: HTMLElement, value: string): void {
 }
 
 /** Taps issue #n on the Issues card and chooses an action in the sheet. */
-async function attachAction(n: number, action: 'Triage' | 'Implement' | 'Discuss'): Promise<void> {
+async function attachAction(
+  n: number,
+  action: 'Triage' | 'Implement' | 'Discuss' | 'Land',
+): Promise<void> {
   const row = Array.from(
     container.querySelectorAll<HTMLButtonElement>('.issues-card .issue-row'),
   ).find((r) => r.querySelector('.issue-row-number')?.textContent === `#${n}`);
@@ -1455,7 +1459,8 @@ describe('NewRun repository pills', () => {
 
 // An issue's action (issue #66): tapping a row asks what the agent should do;
 // the choice attaches to the composer and rides as the run's first_message
-// with the `<action>-<n>` label default (a typed label wins).
+// with the `<action>-<n>` label default (a typed label wins). Land (issue
+// #88) seeds `/land-pr <PR>` — the PR's number, the issue's in the label.
 describe('NewRun issue actions', () => {
   beforeEach(() => {
     issuesOnServer = [
@@ -1490,6 +1495,31 @@ describe('NewRun issue actions', () => {
       first_message: '/triage #47\nCheck the labels too',
     });
     expect(container.textContent).toContain('run:run_new');
+  });
+
+  it('Land (issue #88): an issue with an open PR starts the run with /land-pr <PR> and label land-n', async () => {
+    issuesOnServer = [
+      issueFixture({
+        number: 47,
+        pull: { number: 88, head_branch: 'afk/47', url: 'https://h/o/r/pull/88', escalated: false },
+      }),
+    ];
+    await mountNewRun();
+
+    await attachAction(47, 'Land');
+
+    expect(container.querySelector('.composer-attach-text')?.textContent).toBe(
+      'Land #47 · Rename the module path',
+    );
+    expect(composerInput().placeholder).toBe('Anything the agent should know? (optional)');
+    expect(sendButton().getAttribute('aria-label')).toBe('Start: Land #47');
+
+    sendButton().click();
+    await settle();
+
+    expect(posts()).toEqual([
+      { label: 'land-47', model: 'sonnet', effort: 'low', first_message: '/land-pr 88' },
+    ]);
   });
 
   it('a typed label wins over the action default', async () => {
