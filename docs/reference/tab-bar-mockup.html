@@ -1,0 +1,838 @@
+<!doctype html>
+<!--
+  Reference mockup for the navigation redesign (design direction A, "Tab bar", revision 2).
+  A static design reference, not shipped code: the spec is the issue's agent brief, and this
+  file shows the intended layout, hierarchy, copy tone and interaction. Open it in a browser.
+  - The toolbar picks the frame (phone or desktop) and the state. The URL hash does the same,
+    which is how to screenshot a state with a headless browser. Tokens are joined by a dot:
+      phone:    #phone.runs, #phone.quiet, #phone.empty, #phone.history, #phone.new, #phone.repos,
+                #phone.repo, #phone.more, #phone.loggedout, #phone.settings, #phone.chat, #phone.working
+      desktop:  #desktop.runs, #desktop.chat, #desktop.new, #desktop.collapsed
+    Reload after changing the hash.
+  - Below 900px the phone frame fills the width so the mockup is used at real size.
+  - Everything inside the frames is clickable: rows open the chat, tabs switch sections, back
+    returns where you came from.
+  The maintainer chose this direction from three (tab bar, runs inbox, pocket pill) on 2026-10-09
+  and approved this revision. Sample runs and counts are invented; the issue titles are the
+  repo's real open issues at the time. Markup, CSS and script here are throwaway; follow the
+  app's own components, tokens and conventions when implementing.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>lab navigation mockup: tab bar</title>
+</head>
+<body>
+<style>
+/* The app's own vendored serif, loaded by relative path so the file needs no network. */
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-normal.woff2') format('woff2-variations'); font-weight: 200 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('../../web/public/fonts/source-serif-4-latin-wght-italic.woff2') format('woff2-variations'); font-weight: 200 900; font-style: italic; font-display: swap; }
+/* Layout: spec sheet. Sticky toolbar picks the frame (phone / desktop) and the state; frame beside numbered notes;
+   then anatomy, rules, route map, trade-offs, open questions. Tokens are lab's own (web/src/styles/tokens.css). */
+:root {
+  --bg: #faf9f5; --card: #ffffff; --text: #1f1e1d; --muted: #6b675c; --border: #e8e4da; --hover: #f1efe8;
+  --accent: #d97757; --accent-text: #2a1a12; --link: #b0532f; --danger: #c0362c; --danger-border: #e6b8b3; --ok: #1a9c5b;
+  --run-bg: #e7f2e1; --run-text: #1f6b3d; --idle-bg: #ece7db; --idle-text: #5f594c; --chip-bg: #eeeae0; --chip-text: #524c3f;
+  --banner-bg: #faf1d8; --banner-border: #e9cd8e; --banner-text: #5b4b16; --err-bg: #fbeae5; --err-border: #eec2b8; --err-text: #9c3324;
+  --attn-bg: #fbeae2; --attn-border: #efc3b1; --qpanel: #f9efe9;
+  --stage: #efece3; --bezel: #2b2a27;
+  --shadow: 0 1px 2px rgba(40, 32, 22, 0.06), 0 1px 3px rgba(40, 32, 22, 0.04); --shadow-lg: 0 1px 2px rgba(40,32,22,.06), 0 12px 32px rgba(40,32,22,.12);
+  --serif: 'Source Serif 4', Georgia, 'Times New Roman', serif; --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r-card: 14px; --r-ctl: 10px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #262624; --card: #30302e; --text: #ecebe6; --muted: #a5a196; --border: #3e3c37; --hover: #373631;
+  --accent: #d97757; --accent-text: #2a1a12; --link: #e08d70; --danger: #f28577; --danger-border: #5c2b27; --ok: #3ecf8e;
+  --run-bg: #17301d; --run-text: #6cd99a; --idle-bg: #35332e; --idle-text: #a8a398; --chip-bg: #3a3833; --chip-text: #d6d2c7;
+  --banner-bg: #2e2712; --banner-border: #5c4f20; --banner-text: #e6d9a6; --err-bg: #2e1613; --err-border: #5c2b27; --err-text: #f3aca2;
+  --attn-bg: #3b2a22; --attn-border: #6b4433; --qpanel: #3a2f2a; --stage: #1c1c1a; --bezel: #0e0e0d;
+  --shadow: 0 1px 2px rgba(0,0,0,.4); --shadow-lg: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.4); color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #262624; --card: #30302e; --text: #ecebe6; --muted: #a5a196; --border: #3e3c37; --hover: #373631;
+  --accent: #d97757; --accent-text: #2a1a12; --link: #e08d70; --danger: #f28577; --danger-border: #5c2b27; --ok: #3ecf8e;
+  --run-bg: #17301d; --run-text: #6cd99a; --idle-bg: #35332e; --idle-text: #a8a398; --chip-bg: #3a3833; --chip-text: #d6d2c7;
+  --banner-bg: #2e2712; --banner-border: #5c4f20; --banner-text: #e6d9a6; --err-bg: #2e1613; --err-border: #5c2b27; --err-text: #f3aca2;
+  --attn-bg: #3b2a22; --attn-border: #6b4433; --qpanel: #3a2f2a; --stage: #1c1c1a; --bezel: #0e0e0d;
+  --shadow: 0 1px 2px rgba(0,0,0,.4); --shadow-lg: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.4); color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-text-size-adjust: 100%; }
+a { color: var(--link); }
+svg.i { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.sheet { max-width: 1240px; margin: 0 auto; padding-block: 24px 72px; padding-inline: 16px; }
+.eyebrow { font: 600 12px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+h1 { font: 600 40px/1.1 var(--serif); margin: 0 0 12px; letter-spacing: -.01em; text-wrap: balance; }
+h2 { font: 600 24px/1.2 var(--serif); margin: 52px 0 14px; }
+h3 { font: 600 15px/1.3 var(--sans); margin: 0 0 8px; }
+.thesis { font: 400 19px/1.45 var(--serif); max-width: 62ch; margin: 0 0 8px; }
+.sub { color: var(--muted); max-width: 72ch; margin: 0 0 20px; }
+.sub strong, p strong { color: var(--text); font-weight: 600; }
+code { font: 12.5px/1.4 var(--mono); background: var(--chip-bg); padding: 1px 5px; border-radius: 5px; }
+.kbd { font: 12px/1 var(--mono); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 2px 5px; background: var(--card); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* toolbar */
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 50; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 0; margin: 0 0 20px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; background: var(--card); padding: 3px; }
+.seg button { border: 0; background: transparent; color: var(--muted); font: 600 13px/1 var(--sans); padding: 8px 14px; border-radius: 999px; cursor: pointer; }
+.seg button.on { background: var(--accent); color: var(--accent-text); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { border: 1px solid var(--border); background: var(--card); color: var(--text); font: 500 12.5px/1 var(--sans); padding: 8px 11px; border-radius: 999px; cursor: pointer; }
+.chips button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+.chips .lbl { font: 600 11px/1 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); align-self: center; margin-right: 2px; }
+
+/* frames grid */
+.frames { display: grid; grid-template-columns: 1fr; gap: 28px; align-items: start; }
+@media (min-width: 900px) { .frames { grid-template-columns: 400px minmax(0, 1fr); gap: 40px; } .frames.wide { grid-template-columns: 1fr; } }
+.notes { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.note { display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: start; }
+.note b { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font: 700 12px/1 var(--sans); margin-top: 2px; }
+.note p { margin: 0; }
+.note .try { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.co { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font: 700 11px/1 var(--sans); box-shadow: 0 0 0 2px var(--bg); flex: none; vertical-align: middle; }
+.co.abs { position: absolute; z-index: 6; }
+body[data-frame="phone"] .desk-only, body[data-frame="desktop"] .phone-only { display: none !important; }
+
+/* ---- phone frame ---- */
+.phone { position: relative; width: 390px; max-width: 100%; height: 820px; background: var(--bezel); border-radius: 46px; padding: 12px; box-shadow: var(--shadow-lg); margin: 0 auto; }
+.screen { position: relative; height: 100%; background: var(--bg); border-radius: 36px; overflow: hidden; display: flex; flex-direction: column; }
+.statusbar { height: 46px; flex: none; display: flex; align-items: flex-end; justify-content: space-between; padding: 0 30px 8px; font: 600 13px/1 var(--sans); }
+.app { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.view { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.view.on { display: flex; }
+.homebar { position: absolute; left: 50%; bottom: 7px; width: 124px; height: 5px; border-radius: 999px; background: var(--text); opacity: .22; transform: translateX(-50%); pointer-events: none; }
+@media (max-width: 899px) {
+  .phone { width: 100%; height: auto; background: none; padding: 0; border-radius: 0; box-shadow: none; }
+  .screen { height: calc(100dvh - 120px); min-height: 640px; border-radius: 16px; border: 1px solid var(--border); }
+  .statusbar { display: none; }
+}
+
+/* app chrome (phone) — mirrors shell.css / layout.css values */
+.pbar { flex: none; display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 6px 12px 6px 16px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
+.pbar h4 { margin: 0; font: 600 20px/1.2 var(--serif); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand { font: 650 18.5px/1 var(--serif); letter-spacing: .01em; }
+.brand i { color: var(--accent); font-style: normal; }
+.live { width: 9px; height: 9px; border-radius: 999px; background: var(--muted); display: inline-block; flex: none; }
+.live.on { background: var(--ok); }
+.ibtn { display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: var(--r-ctl); border: 0; background: transparent; color: var(--text); cursor: pointer; padding: 0; }
+.ibtn:hover { background: var(--hover); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 14px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--card); color: var(--text); font: 600 15px/1 var(--sans); cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.danger { color: var(--danger); border-color: var(--danger-border); }
+.btn.sm { min-height: 36px; padding: 0 12px; font-size: 14px; }
+.page { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 12px 24px; }
+.page.wide { padding: 12px 16px 24px; }
+.page h1.pt { font: 600 28px/1.2 var(--serif); margin: 6px 0 12px; }
+.seclabel { display: flex; align-items: center; gap: 8px; margin: 14px 4px 6px; font: 600 11.5px/1 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.seclabel .cnt { background: var(--chip-bg); color: var(--chip-text); border-radius: 999px; padding: 4px 7px; font-size: 11px; letter-spacing: 0; }
+.seclabel .cnt.attn { background: var(--attn-bg); color: var(--link); }
+.seglink { display: inline-flex; border: 1px solid var(--border); background: var(--card); border-radius: 999px; padding: 3px; margin: 2px 0 6px; }
+.seglink span { padding: 7px 14px; border-radius: 999px; font: 600 13px/1 var(--sans); color: var(--muted); cursor: pointer; }
+.seglink span.on { background: var(--chip-bg); color: var(--text); }
+.chip { display: inline-block; font: 600 11.5px/1 var(--sans); padding: 4px 8px; border-radius: 999px; background: var(--chip-bg); color: var(--chip-text); white-space: nowrap; }
+.chip.ok { background: var(--run-bg); color: var(--run-text); }
+.chip.attn { background: var(--attn-bg); color: var(--link); }
+.chip.warn { background: var(--banner-bg); color: var(--banner-text); }
+.chip.err { background: var(--err-bg); color: var(--err-text); }
+.chip.behind { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+/* run rows: ONE component on phone (page), rail (desktop) and the desktop Runs page */
+.rrow { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 8px 10px; border-radius: var(--r-ctl); color: inherit; text-decoration: none; cursor: pointer; position: relative; }
+.rrow:hover, .rrow.cur { background: var(--hover); }
+.rrow .dot { flex: none; width: 9px; height: 9px; border-radius: 999px; background: var(--muted); }
+.rrow .dot.attn { background: var(--accent); box-shadow: 0 0 0 4px var(--attn-bg); }
+.rrow .dot.work { background: var(--banner-text); }
+.rrow .dot.idle { background: var(--muted); opacity: .55; }
+.rrow .body { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; gap: 1px; }
+.rrow .t { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+.rrow .t span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rrow .s { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rrow .s em { font-style: normal; color: var(--link); font-weight: 500; }
+.rrow .ago { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rrow .chev { color: var(--muted); }
+.empty { margin: 32px 12px; text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.empty .big { font: 600 20px/1.3 var(--serif); color: var(--text); }
+/* tab bar */
+.tabbar { position: relative; flex: none; display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(10px); padding: 4px 6px 26px; }
+@media (max-width: 899px) { .tabbar { padding-bottom: 10px; } .homebar { display: none; } }
+.tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 49px; font: 500 11px/1 var(--sans); color: var(--muted); border: 0; background: transparent; cursor: pointer; border-radius: 10px; padding: 0; }
+.tab svg.i { width: 24px; height: 24px; }
+.tab.on { color: var(--link); }
+.tab.on svg.i { stroke-width: 2.3; }
+.tab .badge { position: absolute; top: 3px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font: 700 11px/18px var(--sans); text-align: center; box-shadow: 0 0 0 2px var(--card); }
+.tab .wdot { position: absolute; top: 6px; left: calc(50% + 8px); width: 9px; height: 9px; border-radius: 999px; background: var(--banner-text); box-shadow: 0 0 0 2px var(--card); }
+.tab.new .plus { width: 34px; height: 34px; border-radius: 999px; background: var(--accent); color: var(--accent-text); display: grid; place-items: center; margin-top: -2px; }
+.tab.new .plus svg.i { width: 20px; height: 20px; stroke-width: 2.6; }
+.tab.new.on .plus { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--accent); }
+body[data-p="chat"] .tabbar, body[data-p="working"] .tabbar, body[data-p="editor"] .tabbar { display: none; }
+/* composer page */
+.pills { display: flex; gap: 8px; padding: 10px 12px 2px; overflow-x: auto; flex: none; scrollbar-width: none; }
+.pill { flex: none; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); background: var(--card); border-radius: 999px; padding: 9px 14px; font: 600 14px/1 var(--sans); white-space: nowrap; }
+.pill .live { width: 8px; height: 8px; }
+.pill.sel { background: var(--attn-bg); color: var(--link); border-color: var(--attn-border); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; box-shadow: var(--shadow); }
+.card h5 { margin: 0; font: 600 19px/1.2 var(--serif); display: flex; align-items: center; gap: 8px; }
+.issue { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 9px 0; font-size: 14px; }
+.issue .num { font: 14px/1.4 var(--mono); color: var(--muted); }
+.issue .tt { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue .age { font-size: 12px; color: var(--muted); }
+.switch { width: 44px; height: 26px; border-radius: 999px; background: var(--ok); position: relative; flex: none; }
+.switch::after { content: ''; position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 999px; background: #fff; }
+.composer { flex: none; margin: 8px 12px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); padding: 14px 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+.composer .ta { min-height: 44px; color: var(--muted); font-size: 16px; }
+.composer .cbar { display: flex; align-items: center; gap: 6px; }
+.composer .cbar .chip { font-size: 13px; padding: 10px 12px; }
+.send { width: 42px; height: 42px; border-radius: 999px; background: var(--accent); color: var(--accent-text); display: grid; place-items: center; flex: none; margin-left: auto; }
+.send svg.i { width: 18px; height: 18px; stroke-width: 2; }
+/* repos */
+.filter { display: flex; align-items: center; gap: 10px; min-height: 44px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--card); padding: 0 12px; color: var(--muted); margin-bottom: 12px; }
+.needs { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-radius: var(--r-card); margin: 6px 0; font-size: 14px; }
+.needs.warn { background: var(--banner-bg); border: 1px solid var(--banner-border); color: var(--banner-text); }
+.needs.err { background: var(--err-bg); border: 1px solid var(--err-border); color: var(--err-text); }
+.needs .b { flex: 1; } .needs .b b { display: block; font-size: 15px; }
+.needs .btn { background: var(--card); color: var(--text); border-color: transparent; }
+.replist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); overflow: hidden; }
+.repo { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.repo:last-child { border-bottom: 0; }
+.repo .n { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.repo .r { grid-column: 1; font: 13px/1.5 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo .st { grid-column: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 14px; color: var(--muted); margin-top: 2px; }
+.repo .chev { grid-row: 1 / span 3; color: var(--muted); }
+.backlink { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-weight: 600; text-decoration: none; margin: 6px 0 10px; cursor: pointer; }
+.rtabs { display: flex; gap: 22px; border-bottom: 1px solid var(--border); margin: 10px 0 14px; font: 600 16px/1 var(--sans); }
+.rtabs span { padding: 8px 2px 10px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.rtabs span.on { color: var(--text); border-bottom: 2px solid var(--accent); margin-bottom: -1px; }
+.ready { display: flex; align-items: center; gap: 12px; }
+.ready .ok { width: 40px; height: 40px; border-radius: 999px; background: var(--run-bg); color: var(--run-text); display: grid; place-items: center; }
+/* more */
+.mrow { display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.mrow:last-child { border-bottom: 0; }
+.mrow svg.i { color: var(--muted); }
+.mrow .l { flex: 1; font-weight: 600; }
+.mrow .h { font-size: 13px; color: var(--muted); }
+.mlist { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); overflow: hidden; }
+.acct { margin-top: 14px; display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.acct .who { flex: 1; min-width: 0; }
+.acct .who .n { font-weight: 600; }
+.acct .who .s { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.srow { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 0 14px; border-bottom: 1px solid var(--border); }
+.srow:last-child { border-bottom: 0; }
+.srow .b { flex: 1; min-width: 0; } .srow .b b { display: block; } .srow .b span { font-size: 13px; color: var(--muted); }
+/* chat (phone) */
+.chead { flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 4px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.chead .tt { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.chead .tt .t { font: 600 16px/1.3 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chead .tt .s { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+.meter { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px 0 7px; border-radius: 999px; background: var(--chip-bg); color: var(--chip-text); font: 600 12.5px/1 var(--sans); font-variant-numeric: tabular-nums; flex: none; }
+.meter .ring { width: 16px; height: 16px; border-radius: 999px; background: conic-gradient(currentColor 0 62%, color-mix(in srgb, currentColor 25%, transparent) 62% 100%); -webkit-mask: radial-gradient(circle, transparent 4.5px, #000 5px); mask: radial-gradient(circle, transparent 4.5px, #000 5px); }
+.stream { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.me { align-self: flex-end; max-width: 85%; background: var(--idle-bg); border-radius: 16px; padding: 8px 13px; font-size: 15px; }
+.ai { font: 400 16.5px/1.5 var(--serif); margin: 0; }
+.ai code { font-size: 13.5px; }
+.copy { align-self: flex-end; font-size: 13px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+.copy svg.i { width: 14px; height: 14px; }
+.tool { font: 13px/1.5 var(--mono); color: var(--chip-text); border: 1px solid var(--border); border-radius: var(--r-ctl); padding: 10px 14px; background: var(--card); }
+.lifec { text-align: center; color: var(--muted); font-size: 13.5px; margin: 4px 0; }
+.dock { flex: none; border-top: 1px solid var(--border); background: var(--bg); padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.status { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 4px; font-size: 14px; }
+.status .pulse { width: 8px; height: 8px; border-radius: 999px; background: var(--ok); animation: pulse 1.6s infinite; flex: none; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .status .pulse { animation: none; } }
+.status b { font-weight: 600; }
+.status .det { font: 13px/1 var(--mono); color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status .act { margin-left: auto; color: var(--link); font-weight: 600; flex: none; }
+.qpanel { background: var(--qpanel); border: 1px solid var(--attn-border); border-radius: var(--r-card); padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.qpanel .qh { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.qpanel .qh b { font-weight: 600; } .qpanel .qh .n { margin-left: auto; color: var(--muted); }
+.qpanel .q { font: 600 16px/1.3 var(--sans); }
+.qopt { display: flex; align-items: flex-start; gap: 10px; min-height: 48px; padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r-ctl); }
+.qopt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+.qopt .m { width: 18px; height: 18px; border-radius: 999px; border: 2px solid var(--muted); flex: none; margin-top: 2px; }
+.qopt.on .m { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px); }
+.qopt .ob { display: flex; flex-direction: column; gap: 1px; } .qopt .ob b { font-size: 15px; } .qopt .ob b i { font: 500 12px/1 var(--sans); color: var(--link); margin-left: 4px; } .qopt .ob span { font-size: 13.5px; color: var(--muted); }
+.qchat { color: var(--link); font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
+.compose { display: flex; align-items: center; gap: 8px; }
+.compose .in { flex: 1; min-height: 46px; border: 1px solid var(--border); border-radius: 23px; background: var(--card); padding: 11px 14px; color: var(--muted); font-size: 15px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compose .btn.primary { border-radius: 23px; min-height: 46px; }
+
+/* ---- desktop frame ---- */
+.desk-wrap { width: 100%; overflow: hidden; }
+.desk { width: 1280px; height: 900px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); overflow: hidden; transform-origin: top left; display: flex; flex-direction: column; }
+.desk-bar { height: 38px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--card); border-bottom: 1px solid var(--border); font: 12.5px/1 var(--mono); color: var(--muted); }
+.desk-bar i { width: 11px; height: 11px; border-radius: 999px; background: var(--border); display: inline-block; }
+.desk-bar .url { margin-left: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+.desk-bar .tabtitle { margin-left: auto; }
+.desk-body { flex: 1; min-height: 0; display: flex; position: relative; }
+.dview { display: none; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
+.dview.on { display: flex; }
+/* rail: shell.css values */
+.rail { width: 260px; flex: none; border-right: 1px solid var(--border); background: var(--card); display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow: hidden; }
+.rail .rb { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 4px; }
+.rail .newrun { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; border-radius: var(--r-ctl); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.rail .seclabel { margin: 8px 2px 2px; }
+.rail .rrow { min-height: 42px; padding: 5px 8px; gap: 8px; }
+.rail .rrow .t { font-size: 15px; font-weight: 500; } .rail .rrow.cur .t { font-weight: 600; } .rail .rrow .s { font-size: 12.5px; }
+.rail .rrow .dot { width: 8px; height: 8px; } .rail .rrow .dot.attn { box-shadow: none; }
+.rail .sp { flex: 1; }
+.rail .nav { display: flex; flex-direction: column; gap: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
+.rail .nl { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 8px; border-radius: var(--r-ctl); font-weight: 550; color: var(--text); text-decoration: none; cursor: pointer; }
+.rail .nl svg.i { color: var(--muted); } .rail .nl.on { color: var(--link); font-weight: 650; } .rail .nl.on svg.i { color: var(--link); }
+.rail .rf { display: flex; align-items: center; gap: 8px; padding-top: 8px; margin-top: 4px; border-top: 1px solid var(--border); color: var(--muted); }
+.rail .rf .btn { margin-left: auto; min-height: 44px; }
+.rail-collapsed .rail { display: none; }
+.reopen { position: absolute; top: 12px; left: 12px; z-index: 5; width: 44px; height: 44px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--card); box-shadow: var(--shadow); display: none; place-items: center; }
+.rail-collapsed .reopen { display: grid; }
+.dcontent { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.dpage { width: 100%; max-width: 760px; margin: 0 auto; padding: 24px 12px 48px; }
+.dpage.wide { max-width: 1100px; padding: 24px 24px 48px; }
+.dhead { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.dhead h1 { font: 600 32px/1.2 var(--serif); margin: 0; flex: 1; }
+/* desktop runs table */
+.rtable { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); overflow: hidden; }
+.rtable .th, .rtable .tr { display: grid; grid-template-columns: 2.2fr 1.1fr 1.4fr 1fr 1.5fr .6fr .5fr; align-items: center; gap: 12px; padding: 0 14px; }
+.rtable .th { min-height: 36px; background: var(--bg); border-bottom: 1px solid var(--border); font: 600 11.5px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.rtable .tr { min-height: 58px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.rtable .tr:hover { background: var(--hover); }
+.rtable .tr:last-child { border-bottom: 0; }
+.rtable .tr .tt { display: flex; align-items: center; gap: 10px; font-weight: 600; min-width: 0; }
+.rtable .tr .tt span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rtable .tr .dot { flex: none; width: 9px; height: 9px; border-radius: 999px; background: var(--muted); }
+.rtable .tr .dot.attn { background: var(--accent); box-shadow: 0 0 0 4px var(--attn-bg); } .rtable .tr .dot.work { background: var(--banner-text); } .rtable .tr .dot.idle { opacity: .55; }
+.rtable .tr .mono { font: 13px/1.4 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rtable .tr .mu { color: var(--muted); font-size: 14px; }
+.rtable .tr .right { text-align: right; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rtable .grp { padding: 10px 14px 4px; font: 600 11.5px/1 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; gap: 8px; align-items: center; background: var(--card); border-bottom: 1px solid var(--border); min-height: 34px; }
+.rtable .grp .cnt { background: var(--attn-bg); color: var(--link); border-radius: 999px; padding: 3px 7px; font-size: 11px; letter-spacing: 0; }
+/* desktop chat */
+.dchat { flex: 1; min-height: 0; display: flex; flex-direction: column; max-width: 760px; width: 100%; margin: 0 auto; padding: 0 12px; }
+.dchat .chead { padding: 10px 0; gap: 8px; }
+.dchat .chead .tt .t { font-size: 17px; }
+.dchat .stream { padding: 14px 0; }
+.dchat .dock { padding: 10px 0 14px; }
+.stopbtn { width: 44px; height: 44px; border-radius: var(--r-ctl); border: 1px solid var(--danger-border); color: var(--danger); display: grid; place-items: center; }
+/* desktop composer */
+.dcomposer { display: flex; flex-direction: column; gap: 12px; align-items: center; padding-top: 48px; }
+.dcomposer .pills { padding: 0; justify-content: center; }
+.dcomposer .composer { width: 100%; margin: 0; }
+.dcomposer .card { width: 100%; }
+
+/* anatomy + tables */
+.anat { display: grid; grid-template-columns: 1fr; gap: 24px; align-items: start; }
+@media (min-width: 900px) { .anat { grid-template-columns: 420px 1fr; } }
+.anat .spec { position: relative; background: var(--stage); border-radius: var(--r-card); padding: 28px 20px 20px; }
+.anat .spec .tabbar { border-radius: var(--r-ctl); border: 1px solid var(--border); padding-bottom: 12px; }
+.dim { position: absolute; font: 11px/1 var(--mono); color: var(--muted); background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; }
+.rules { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.rules li { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.rules li b { font-weight: 600; }
+@media (max-width: 560px) { .rules li { grid-template-columns: 1fr; gap: 4px; } }
+table.map { border-collapse: collapse; width: 100%; font-size: 14px; }
+table.map th, table.map td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.map th { font: 600 11.5px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+table.map td code { white-space: nowrap; }
+.tablewrap { overflow-x: auto; }
+.cols { display: grid; grid-template-columns: 1fr; gap: 20px; }
+@media (min-width: 760px) { .cols { grid-template-columns: 1fr 1fr 1fr; } }
+.col h3 { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.col ul, .qs ul { margin: 0; padding-left: 18px; } .col li, .qs li { margin: 6px 0; }
+.qs li { margin: 10px 0; } .qs li b { font-weight: 600; }
+.changed { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 18px; margin: 0 0 24px; }
+.changed ul { margin: 6px 0 0; padding-left: 18px; } .changed li { margin: 4px 0; }
+.foot { margin-top: 48px; color: var(--muted); font-size: 13px; max-width: 70ch; }
+</style>
+
+<div class="sheet">
+  <p class="eyebrow">lab · navigation · direction A · revision 2</p>
+  <h1>Tab bar</h1>
+  <p class="thesis">Four destinations in a bottom bar on the phone: Runs, New, Repos, More. Runs is the launch screen. The hamburger, the drawer and the drag gesture are gone. On desktop the rail stays, and its run list becomes the same component the phone shows as a page.</p>
+  <p class="sub">Everything in the frame is clickable. The toolbar picks the frame and the state, and the URL hash does the same (<code>#phone.chat</code>, <code>#desktop.runs</code>), which is how to screenshot a state headlessly. Sample runs are invented; the issue titles are the repo's real open issues.</p>
+
+  <div class="changed">
+    <strong>Changed since round 1</strong>
+    <ul>
+      <li>The desktop frame now mirrors the shipped app (rail anatomy, chat header with back, meter, open, Stop and the <code>•••</code> menu, 760px column, dock). Round 1's desktop frame was broken by a layout bug and did not represent anything.</li>
+      <li>History moves out of More and onto the Runs tab as a <strong>Live / Ended</strong> switch. Ended runs are runs; the switch keeps History's own URL.</li>
+      <li>One route map for every width. <code>/</code> is Runs on the phone <em>and</em> on desktop, where it is a proper table. The composer gets its own URL, <code>/new</code>.</li>
+      <li>The rules are written down: when the bar hides, what Back does, what re-tapping a tab does, what each badge means.</li>
+    </ul>
+  </div>
+
+  <div class="bar">
+    <div class="seg" id="frameSeg"><button data-frame="phone" class="on">Phone</button><button data-frame="desktop">Desktop</button></div>
+    <div class="chips phone-only" id="pChips"><span class="lbl">State</span>
+      <button data-p="runs" class="on">Runs</button><button data-p="quiet">Runs, nothing waiting</button><button data-p="empty">Runs, none live</button><button data-p="history">Ended</button><button data-p="new">New</button><button data-p="repos">Repos</button><button data-p="repo">Repo home</button><button data-p="more">More</button><button data-p="loggedout">More, logged out</button><button data-p="settings">Settings</button><button data-p="chat">Chat, question</button><button data-p="working">Chat, working</button>
+    </div>
+    <div class="chips desk-only" id="dChips"><span class="lbl">State</span>
+      <button data-d="runs" class="on">Runs</button><button data-d="chat">Chat</button><button data-d="new">New run</button><button data-d="collapsed">Rail collapsed</button>
+    </div>
+  </div>
+
+  <!-- ===================== PHONE ===================== -->
+  <div class="frames phone-only">
+    <div class="phone"><div class="screen">
+      <div class="statusbar"><span>9:41</span><span>●●● ⌃ ▮</span></div>
+      <div class="app">
+
+        <!-- RUNS -->
+        <div class="view" data-view="runs">
+          <div class="pbar"><span class="brand">lab<i>.</i></span><span style="flex:1"></span><span class="live on" title="Live"></span></div>
+          <div class="page">
+            <div class="seglink"><span class="on">Live · 6</span><span data-go="history">Ended</span></div>
+            <div class="seclabel"><span class="co">1</span>Needs you <span class="cnt attn">2</span></div>
+            <a class="rrow" data-go="chat"><span class="dot attn"></span><span class="body"><span class="t"><span>Record the Runner on the run</span></span><span class="s">coding-lab · <em>asking a question</em></span></span><span class="ago">2m</span></a>
+            <a class="rrow" data-go="chat"><span class="dot attn"></span><span class="body"><span class="t"><span>Warpgate dashboard exposure</span></span><span class="s">coding-lab · <em>waiting for you</em></span></span><span class="ago">18m</span></a>
+            <div class="seclabel">Working</div>
+            <a class="rrow" data-go="working"><span class="dot work"></span><span class="body"><span class="t"><span>OneCLI refusals at eval time</span></span><span class="s">cloonar-nixos · running tests</span></span><span class="ago">1m</span></a>
+            <a class="rrow" data-go="working"><span class="dot work"></span><span class="body"><span class="t"><span>afk/56 Record the Runner</span></span><span class="s">coding-lab · AFK · ~1h 12m left</span></span><span class="ago">8m</span></a>
+            <div class="seclabel">Idle</div>
+            <a class="rrow" data-go="chat"><span class="dot idle"></span><span class="body"><span class="t"><span>Server container quickstart</span><span class="chip behind">3 behind</span></span><span class="s">coding-lab · idle</span></span><span class="ago">1h</span></a>
+            <a class="rrow" data-go="chat"><span class="dot idle"></span><span class="body"><span class="t"><span>Bump flake inputs</span></span><span class="s">cloonar-nixos · idle</span></span><span class="ago">3h</span></a>
+          </div>
+        </div>
+
+        <!-- RUNS, nothing waiting -->
+        <div class="view" data-view="quiet">
+          <div class="pbar"><span class="brand">lab<i>.</i></span><span style="flex:1"></span><span class="live on"></span></div>
+          <div class="page">
+            <div class="seglink"><span class="on">Live · 3</span><span data-go="history">Ended</span></div>
+            <div class="seclabel">Working</div>
+            <a class="rrow" data-go="working"><span class="dot work"></span><span class="body"><span class="t"><span>OneCLI refusals at eval time</span></span><span class="s">cloonar-nixos · running tests</span></span><span class="ago">1m</span></a>
+            <a class="rrow" data-go="working"><span class="dot work"></span><span class="body"><span class="t"><span>afk/56 Record the Runner</span></span><span class="s">coding-lab · AFK · ~1h 12m left</span></span><span class="ago">8m</span></a>
+            <div class="seclabel">Idle</div>
+            <a class="rrow" data-go="chat"><span class="dot idle"></span><span class="body"><span class="t"><span>Bump flake inputs</span></span><span class="s">cloonar-nixos · idle</span></span><span class="ago">3h</span></a>
+          </div>
+        </div>
+
+        <!-- RUNS, none live -->
+        <div class="view" data-view="empty">
+          <div class="pbar"><span class="brand">lab<i>.</i></span><span style="flex:1"></span><span class="live on"></span></div>
+          <div class="page">
+            <div class="seglink"><span class="on">Live</span><span data-go="history">Ended</span></div>
+            <div class="empty"><span class="big">No live runs</span><span>Start one from the New tab, or let an AFK run pick up a ready issue.</span><span class="btn primary" data-go="new">New run</span><span style="font-size:13px">Last ended: Fix chat dock overlap, 2 h ago · <a data-go="history">Ended runs</a></span></div>
+          </div>
+        </div>
+
+        <!-- ENDED (History) -->
+        <div class="view" data-view="history">
+          <div class="pbar"><span class="brand">lab<i>.</i></span><span style="flex:1"></span><span class="live on"></span></div>
+          <div class="page">
+            <div class="seglink"><span data-go="runs">Live · 6</span><span class="on">Ended</span></div>
+            <div class="seclabel">Today</div>
+            <a class="rrow"><span class="dot idle"></span><span class="body"><span class="t"><span>Fix chat dock overlap</span><span class="chip ok">merged</span></span><span class="s">coding-lab · PR #77 · 2 h ago</span></span><span class="chev"><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span></a>
+            <a class="rrow"><span class="dot idle"></span><span class="body"><span class="t"><span>afk/61 Autoland re-arm</span><span class="chip">pr open</span></span><span class="s">coding-lab · PR #76 · 5 h ago</span></span><span class="chev"><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span></a>
+            <div class="seclabel">Yesterday</div>
+            <a class="rrow"><span class="dot idle"></span><span class="body"><span class="t"><span>sched-7f3a · nightly deps</span><span class="chip err">died</span></span><span class="s">cloonar-nixos · budget exceeded</span></span><span class="chev"><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span></a>
+            <a class="rrow"><span class="dot idle"></span><span class="body"><span class="t"><span>Backfill events</span><span class="chip">stopped</span></span><span class="s">data-pipeline · parked work kept</span></span><span class="chev"><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span></a>
+          </div>
+        </div>
+
+        <!-- NEW -->
+        <div class="view" data-view="new">
+          <div class="pbar"><h4>New run</h4></div>
+          <div class="pills"><span class="pill sel"><span class="live on"></span>coding-lab</span><span class="pill"><span class="live on"></span>data-pipeline</span><span class="pill"><span class="live on"></span>cloonar-nixos</span><span class="pill">All 9 ⌄</span></div>
+          <div class="page" style="padding-top:10px">
+            <div class="card">
+              <h5>Issues <span class="chip">12</span><span style="flex:1"></span><span style="font-size:15px">Auto</span><span class="switch"></span></h5>
+              <p style="margin:6px 0 4px;color:var(--muted);font-size:14px">Auto on · 3 ready · 1 AFK run live · next claim when a slot frees</p>
+              <div class="issue"><span class="num">#56</span><span class="tt">Record the Runner a run was spawned with</span><span class="chip ok">ready-for-agent</span><span class="age">3 d</span></div>
+              <div class="issue"><span class="num">#47</span><span class="tt">Warpgate: dashboard exposure</span><span class="chip warn">needs-triage</span><span class="age">8 d</span></div>
+              <div class="issue"><span class="num">#45</span><span class="tt">Chat header context meter</span><span class="chip warn">needs-triage</span><span class="age">8 d</span></div>
+              <div class="issue"><span class="num">#44</span><span class="tt">Schedule editor loses raw cron</span><span class="chip ok">ready-for-agent</span><span class="age">12 d</span></div>
+              <p style="margin:8px 0 0;color:var(--link);font-weight:600">All 12 open issues ⌄</p>
+            </div>
+          </div>
+          <div class="composer"><span class="co abs" style="top:-10px;left:-6px">3</span><div class="ta">Describe a task for coding-lab…</div><div class="cbar"><span class="chip">Large ⌄</span><span class="chip">High ⌄</span><span class="chip">···</span><span class="send"><svg class="i" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></span></div></div>
+        </div>
+
+        <!-- REPOS -->
+        <div class="view" data-view="repos">
+          <div class="pbar"><h4>Repositories</h4><span class="btn primary sm"><svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px;stroke-width:2.4"><path d="M12 5v14M5 12h14"/></svg>Add</span></div>
+          <div class="page wide">
+            <div class="filter"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Filter by name or host</div>
+            <div class="seclabel" style="margin-top:4px">Needs you <span class="cnt">1</span></div>
+            <div class="needs warn"><svg class="i" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg><span class="b"><b>billing-api</b>AFK paused after 3 failed runs. 2 issues waiting.</span><span class="btn sm">Reset</span></div>
+            <div class="seclabel">All repositories <span class="cnt">9</span><span style="flex:1"></span><span style="letter-spacing:0;text-transform:none;font-weight:400">Latest run first</span></div>
+            <div class="replist">
+              <div class="repo" data-go="repo"><span class="n">coding-lab</span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg><span class="r">github.com/Cloonar/coding-lab</span><span class="st"><span><span class="live on" style="width:8px;height:8px"></span> 4 live</span><span class="chip attn">2 waiting</span><span>3 ready</span><span>Auto on</span></span></div>
+              <div class="repo"><span class="n">cloonar-nixos</span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg><span class="r">github.com/Cloonar/cloonar-nixos</span><span class="st"><span><span class="live on" style="width:8px;height:8px"></span> 2 live</span><span>0 ready</span><span>Auto off</span></span></div>
+              <div class="repo"><span class="n">data-pipeline</span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg><span class="r">github.com/Cloonar/data-pipeline</span><span class="st"><span>None</span><span>4 ready</span><span>Auto on</span></span></div>
+              <div class="repo"><span class="n">billing-api <span class="chip">incogni</span></span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg><span class="r">dev-new.cloonar.com/ops/billing-api</span><span class="st"><span>None</span><span>2 ready</span><span class="chip warn">Paused</span></span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- REPO HOME -->
+        <div class="view" data-view="repo">
+          <div class="pbar"><button class="ibtn" data-go="repos" aria-label="Back to repositories"><svg class="i" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button><h4>coding-lab</h4><span class="chip">forge · github</span></div>
+          <div class="page wide">
+            <span class="co abs" style="top:10px;right:14px">6</span>
+            <p style="margin:0;font:13px/1.5 var(--mono);color:var(--muted)">github.com/Cloonar/coding-lab</p>
+            <div class="rtabs"><span class="on">Overview</span><span>Issues <span class="chip">12</span></span><span>Settings</span></div>
+            <div class="card ready"><span class="ok"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></svg></span><span><b>Ready to run</b><br><span style="color:var(--muted);font-size:14px">All 6 checks pass.</span></span><span style="flex:1"></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+            <div class="card" style="margin-top:12px">
+              <h5>Live runs<span style="flex:1"></span><span class="btn danger sm">Stop all (4)</span></h5>
+              <div style="margin-top:6px">
+                <a class="rrow" data-go="chat" style="padding-left:4px;min-height:52px"><span class="dot attn"></span><span class="body"><span class="t"><span>Record the Runner on the run</span></span><span class="s">Asking a question</span></span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></a>
+                <a class="rrow" data-go="chat" style="padding-left:4px;min-height:52px"><span class="dot attn"></span><span class="body"><span class="t"><span>Warpgate dashboard exposure</span></span><span class="s">Waiting for you</span></span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></a>
+                <a class="rrow" data-go="working" style="padding-left:4px;min-height:52px"><span class="dot work"></span><span class="body"><span class="t"><span>afk/56 Record the Runner</span></span><span class="s">Working · ~1h 12m left</span></span><svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></a>
+              </div>
+            </div>
+            <div class="card" style="margin-top:12px"><h5>AFK</h5><p style="margin:6px 0 10px;color:var(--muted)">3 issues ready for an agent.</p><div style="display:flex;align-items:center;gap:10px"><span class="btn sm"><svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M6 4l14 8-14 8z"/></svg>Run one</span><span style="flex:1"></span><b>Auto</b><span class="switch"></span></div></div>
+          </div>
+        </div>
+
+        <!-- MORE -->
+        <div class="view" data-view="more">
+          <div class="pbar"><h4>More</h4></div>
+          <div class="page">
+            <div class="mlist">
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M15 8l2 2M18 5l2 2"/></svg><span class="l">Credentials</span><span class="h">Claude logged in</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-6z"/><path d="M13 5v14"/></svg><span class="l">Tokens</span><span class="h">2 active</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow" data-go="settings"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="l">Settings</span><span class="h">Runner · Agents · Automation…</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg><span class="l">Install app</span><span class="h">Add to Home Screen</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+            </div>
+            <div class="acct"><span class="co">4</span><span class="who"><span class="n">dominik</span><span class="s"><span class="live on"></span> Live · connected</span></span><span class="btn">Log out</span></div>
+            <p style="margin:8px 16px;font-size:12px;color:var(--muted)">lab 0.9.2 · claude-code 2.1.4 · codex 0.48</p>
+          </div>
+        </div>
+
+        <!-- MORE, logged out -->
+        <div class="view" data-view="loggedout">
+          <div class="pbar"><h4>More</h4></div>
+          <div class="page">
+            <div class="needs err" style="margin:0 0 12px"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg><span class="b"><b>Claude is logged out</b>New runs will fail at the login wall until you reconnect.</span><span class="btn sm">Reconnect</span></div>
+            <div class="mlist">
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M15 8l2 2M18 5l2 2"/></svg><span class="l">Credentials</span><span class="chip err">logged out</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-6z"/><path d="M13 5v14"/></svg><span class="l">Tokens</span><span class="h">2 active</span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow" data-go="settings"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/></svg><span class="l">Settings</span><span class="h"></span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="mrow"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg><span class="l">Install app</span><span class="h"></span><svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+            </div>
+            <div class="acct"><span class="who"><span class="n">dominik</span><span class="s"><span class="live on"></span> Live · connected</span></span><span class="btn">Log out</span></div>
+          </div>
+        </div>
+
+        <!-- SETTINGS (category index, as today, one level under More) -->
+        <div class="view" data-view="settings">
+          <div class="pbar"><button class="ibtn" data-go="more" aria-label="Back to More"><svg class="i" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button><h4>Settings</h4></div>
+          <div class="page">
+            <div class="mlist">
+              <div class="srow"><span class="b"><b>Agents</b><span>Large · High · claude-code</span></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="srow"><span class="b"><b>Runner</b><span>container · dev image set</span></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="srow"><span class="b"><b>Automation</b><span>AFK capacity 3 · Autoland off</span></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="srow"><span class="b"><b>Access</b><span>OneCLI gateway connected</span></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+              <div class="srow"><span class="b"><b>Appearance</b><span>Follows the OS theme</span></span><svg class="i" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M9 6l6 6-6 6"/></svg></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CHAT, question -->
+        <div class="view" data-view="chat">
+          <div class="chead">
+            <span class="co abs" style="top:-6px;left:2px">5</span>
+            <button class="ibtn" data-go="runs" aria-label="Back"><svg class="i" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
+            <span class="tt"><span class="t">Record the Runner on the run</span><span class="s">coding-l… <svg class="i" viewBox="0 0 24 24" style="width:13px;height:13px"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M18 8.5c0 4-12 2-12 7"/></svg> · Opus 4.8 · High</span></span>
+            <span class="meter"><span class="ring"></span>62%</span>
+            <button class="ibtn" aria-label="Menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
+          </div>
+          <div class="stream">
+            <div class="me">Record the Runner a run was spawned with on the run row, so History can show it.</div>
+            <p class="ai">On it. The run row has no column for it yet. I can add a nullable <code>runner</code> column and stamp it at spawn from the resolved Runner, which keeps History honest for runs that inherited the global default.</p>
+            <span class="copy"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>Copy</span>
+            <div class="tool">Edited 2 files, ran 1 command, read 2 files</div>
+            <p class="lifec">Claude Code is asking a question. Answer below.</p>
+          </div>
+          <div class="dock">
+            <div class="qpanel">
+              <div class="qh"><span class="dot" style="width:8px;height:8px;border-radius:999px;background:var(--accent)"></span><b>Claude Code is asking</b><span class="n">1 question ⌄</span></div>
+              <div class="q">Which name for the new column?</div>
+              <div class="qopt on"><span class="m"></span><span class="ob"><b>runner<i>Recommended</i></b><span>Matches the Runner term in CONTEXT.md and the settings UI.</span></span></div>
+              <div class="qopt"><span class="m"></span><span class="ob"><b>spawned_runner</b><span>Says when it was captured, at the cost of a longer name.</span></span></div>
+              <div class="qchat"><svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M21 12a8 8 0 0 1-8 8H6l-3 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>Chat about this</div>
+            </div>
+            <div class="compose"><span class="in">Or type your own answer…</span><span class="btn primary">Answer <svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></span></div>
+          </div>
+        </div>
+
+        <!-- CHAT, working -->
+        <div class="view" data-view="working">
+          <div class="chead">
+            <button class="ibtn" data-go="runs" aria-label="Back"><svg class="i" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
+            <span class="tt"><span class="t">OneCLI refusals at eval time</span><span class="s">cloonar-… · Opus 4.8 · High</span></span>
+            <span class="meter"><span class="ring"></span>38%</span>
+            <button class="ibtn" aria-label="Menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
+          </div>
+          <div class="stream">
+            <div class="me">Assert the two dead-setting OneCLI dashboard refusals at eval time, not at activation.</div>
+            <p class="ai">Both refusals live in the module's <code>config</code> block today, so they only fire when the service starts. I'll move them into assertions so <code>nix eval</code> catches them.</p>
+            <span class="copy"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>Copy</span>
+            <div class="tool">Edited 1 file, ran 2 commands</div>
+          </div>
+          <div class="dock">
+            <div class="status"><span class="pulse"></span><b>Working</b><span class="det">nix eval .#checks</span><span style="color:var(--muted);font-size:13px">4m</span><span class="act">Interrupt</span></div>
+            <div class="compose"><span class="ibtn" style="width:36px;height:36px;font-weight:600;color:var(--muted)">/</span><span class="in">Message…</span><span class="send" style="margin:0"><svg class="i" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></span></div>
+          </div>
+        </div>
+
+      </div>
+      <!-- tab bar: outside the views; CSS hides it in chat states -->
+      <div class="tabbar">
+        <span class="co abs" style="top:-10px;left:14px">2</span>
+        <button class="tab" data-go="runs" data-tab="runs"><svg class="i" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/></svg>Runs<span class="badge">2</span></button>
+        <button class="tab new" data-go="new" data-tab="new"><span class="plus"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>New</button>
+        <button class="tab" data-go="repos" data-tab="repos"><svg class="i" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repos</button>
+        <button class="tab" data-go="more" data-tab="more"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg>More<span class="wdot" hidden></span></button>
+      </div>
+      <div class="homebar"></div>
+    </div></div>
+
+    <div class="notes">
+      <h3>Phone</h3>
+      <div class="note"><b>1</b><p><strong>Runs is the launch screen.</strong> Needs you, Working, Idle, in the rail's order today, as a page with 56px rows. The brand and the live dot sit in its header, which is the only place the brand appears on a phone. A Live / Ended switch at the top is History: same page shape, grouped by day, with the outcome chip the row earned. <span class="try">Try: Ended, then a row, then the back arrow.</span></p></div>
+      <div class="note"><b>2</b><p><strong>The Runs badge is the attention count.</strong> It counts live runs in needs-input or question state, from the shell's existing instances list. It shows on every tab page, so you can be deep in a repo's settings and still see "2". The dot on More appears only for one thing: the agent provider is logged out. <span class="try">Try: More, logged out.</span></p></div>
+      <div class="note"><b>3</b><p><strong>New is the composer page, unchanged.</strong> Repo pills, the Issues card with Auto, the docked composer with model, effort and <code>···</code>. It gets a header so it is a page like the others, and it moves from <code>/</code> to <code>/new</code>. The accent circle marks it as the one tab that creates something.</p></div>
+      <div class="note"><b>4</b><p><strong>More holds four rows and the account.</strong> Credentials, Tokens, Settings, Install app, then who you are, the live dot and Log out. Each row carries one line of state (logged in, 2 active, the Runner), so More is also a glance at the setup. Settings keeps its category index one level below. <span class="try">Try: More, then Settings, then back.</span></p></div>
+      <div class="note"><b>5</b><p><strong>The chat hides the bar.</strong> The bottom edge belongs to the dock (ADR-0072). The chat keeps today's header: back, two-line title, meter, <code>•••</code>. Back returns to the page you came from (Runs, a repo's Overview, Ended), and to Runs when the chat was opened cold from a deep link. <span class="try">Try: Repo home, then a live run, then back.</span></p></div>
+      <div class="note"><b>6</b><p><strong>Sub-pages keep their tab lit.</strong> Repo home, issue detail, a settings category: the top bar gets a back chevron and the bar below still shows which section you are in. Re-tapping the lit tab returns to that section's root and scrolls it to the top. <span class="try">Try: Repo home, then tap Repos.</span></p></div>
+    </div>
+  </div>
+
+  <!-- ===================== DESKTOP ===================== -->
+  <div class="frames wide desk-only">
+    <div class="desk-wrap"><div class="desk" id="desk">
+      <div class="desk-bar"><i></i><i></i><i></i><span class="url" id="deskUrl">lab.cloonar.com/</span><span class="tabtitle" id="deskTitle">(2) lab</span></div>
+      <div class="desk-body">
+        <span class="reopen"><svg class="i" viewBox="0 0 24 24"><path d="M6 17l5-5-5-5M13 17l5-5-5-5"/></svg></span>
+        <nav class="rail">
+          <div class="rb"><span class="brand">lab<i>.</i></span><span class="ibtn" style="width:32px;height:32px;color:var(--muted)" data-dgo="collapsed"><svg class="i" viewBox="0 0 24 24"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg></span></div>
+          <a class="newrun" data-dgo="new">+ New run</a>
+          <div class="seclabel">Needs you <span class="cnt attn">2</span></div>
+          <a class="rrow" data-dgo="chat" data-cur="chat"><span class="dot attn"></span><span class="body"><span class="t"><span>Record the Runner on the run</span></span><span class="s">coding-lab</span></span></a>
+          <a class="rrow" data-dgo="chat"><span class="dot attn"></span><span class="body"><span class="t"><span>Warpgate dashboard exposure</span></span><span class="s">coding-lab</span></span></a>
+          <div class="seclabel">Working</div>
+          <a class="rrow" data-dgo="chat"><span class="dot work"></span><span class="body"><span class="t"><span>OneCLI refusals at eval time</span></span><span class="s">cloonar-nixos</span></span></a>
+          <a class="rrow" data-dgo="chat"><span class="dot work"></span><span class="body"><span class="t"><span>afk/56 Record the Runner</span></span><span class="s">coding-lab · ~1h 12m left</span></span></a>
+          <div class="seclabel">Idle</div>
+          <a class="rrow" data-dgo="chat"><span class="dot idle"></span><span class="body"><span class="t"><span>Server container quickstart</span><span class="chip behind">3 behind</span></span><span class="s">coding-lab</span></span></a>
+          <a class="rrow" data-dgo="chat"><span class="dot idle"></span><span class="body"><span class="t"><span>Bump flake inputs</span></span><span class="s">cloonar-nixos</span></span></a>
+          <span class="sp"></span>
+          <div class="nav">
+            <a class="nl" data-dgo="runs" data-cur="runs"><svg class="i" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/></svg>Runs</a>
+            <a class="nl"><svg class="i" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repos</a>
+            <a class="nl"><svg class="i" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M15 8l2 2M18 5l2 2"/></svg>Credentials</a>
+            <a class="nl"><svg class="i" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a2 2 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-6z"/><path d="M13 5v14"/></svg>Tokens</a>
+            <a class="nl"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>
+          </div>
+          <div class="rf"><span>dominik</span><span class="btn">Log out</span><span class="live on"></span></div>
+        </nav>
+
+        <!-- DESKTOP: Runs page -->
+        <div class="dview" data-dview="runs">
+          <div class="dcontent"><div class="dpage wide">
+            <div class="dhead"><h1>Runs</h1><div class="seglink" style="margin:0"><span class="on">Live · 6</span><span>Ended</span></div></div>
+            <div class="rtable">
+              <div class="th"><span>Run</span><span>Repository</span><span>State</span><span>Model</span><span>Branch</span><span>Base</span><span style="text-align:right">Last</span></div>
+              <div class="grp">Needs you <span class="cnt">2</span></div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot attn"></span><span>Record the Runner on the run</span></span><span class="mu">coding-lab</span><span style="color:var(--link);font-weight:500">Asking a question</span><span class="mu">Opus 4.8 · High</span><span class="mono">lab/20261009-0912</span><span class="mu">—</span><span class="right">2 min</span></div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot attn"></span><span>Warpgate dashboard exposure</span></span><span class="mu">coding-lab</span><span style="color:var(--link);font-weight:500">Waiting for you</span><span class="mu">Opus 4.8 · High</span><span class="mono">lab/20261009-0831</span><span class="mu">—</span><span class="right">18 min</span></div>
+              <div class="grp">Working</div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot work"></span><span>OneCLI refusals at eval time</span></span><span class="mu">cloonar-nixos</span><span class="mu">Working · nix eval</span><span class="mu">Opus 4.8 · High</span><span class="mono">lab/20261009-0905</span><span class="mu">—</span><span class="right">1 min</span></div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot work"></span><span>afk/56 Record the Runner</span></span><span class="mu">coding-lab</span><span class="mu">Working · ~1h 12m left</span><span class="mu">Large · High</span><span class="mono">afk/56</span><span class="mu">—</span><span class="right">8 min</span></div>
+              <div class="grp">Idle</div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot idle"></span><span>Server container quickstart</span></span><span class="mu">coding-lab</span><span class="mu">Idle</span><span class="mu">Opus 4.8 · High</span><span class="mono">lab/20261008-1740</span><span class="chip behind">3 behind</span><span class="right">1 h</span></div>
+              <div class="tr" data-dgo="chat"><span class="tt"><span class="dot idle"></span><span>Bump flake inputs</span></span><span class="mu">cloonar-nixos</span><span class="mu">Idle</span><span class="mu">Large · Medium</span><span class="mono">lab/20261008-1512</span><span class="mu">—</span><span class="right">3 h</span></div>
+            </div>
+            <p style="color:var(--muted);font-size:13.5px;margin:12px 4px">Rows open the Chat. Stop stays in the Chat header and on each repo's Overview, never on a row.</p>
+          </div></div>
+        </div>
+
+        <!-- DESKTOP: Chat -->
+        <div class="dview" data-dview="chat">
+          <div class="dchat">
+            <div class="chead">
+              <button class="ibtn" data-dgo="runs" aria-label="Back"><svg class="i" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
+              <span class="tt"><span class="t">Record the Runner on the run</span><span class="s">coding-lab <svg class="i" viewBox="0 0 24 24" style="width:13px;height:13px"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M18 8.5c0 4-12 2-12 7"/></svg> · Opus 4.8 · High</span></span>
+              <span class="meter"><span class="ring"></span>62%</span>
+              <span class="ibtn" title="Open in Claude"><svg class="i" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg></span>
+              <span class="stopbtn" title="Stop"><svg class="i" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></span>
+              <button class="ibtn" aria-label="Menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
+            </div>
+            <div class="stream">
+              <div class="me">Record the Runner a run was spawned with on the run row, so History can show it.</div>
+              <p class="ai">On it. The run row has no column for it yet. I can add a nullable <code>runner</code> column and stamp it at spawn from the resolved Runner, which keeps History honest for runs that inherited the global default.</p>
+              <span class="copy"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>Copy</span>
+              <div class="tool">Edited 2 files, ran 1 command, read 2 files</div>
+              <p class="lifec">Claude Code is asking a question. Answer below.</p>
+            </div>
+            <div class="dock">
+              <div class="qpanel">
+                <div class="qh"><span style="width:8px;height:8px;border-radius:999px;background:var(--accent)"></span><b>Claude Code is asking</b><span class="n">1 question ⌄</span></div>
+                <div class="q">Which name for the new column?</div>
+                <div class="qopt on"><span class="m"></span><span class="ob"><b>runner<i>Recommended</i></b><span>Matches the Runner term in CONTEXT.md and the settings UI.</span></span></div>
+                <div class="qopt"><span class="m"></span><span class="ob"><b>spawned_runner</b><span>Says when it was captured, at the cost of a longer name.</span></span></div>
+                <div class="qchat"><svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M21 12a8 8 0 0 1-8 8H6l-3 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg>Chat about this</div>
+              </div>
+              <div class="compose"><span class="in">Or type your own answer…</span><span class="btn primary">Answer <svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DESKTOP: New run -->
+        <div class="dview" data-dview="new">
+          <div class="dcontent"><div class="dpage dcomposer">
+            <div class="pills"><span class="pill sel"><span class="live on"></span>coding-lab</span><span class="pill"><span class="live on"></span>data-pipeline</span><span class="pill"><span class="live on"></span>cloonar-nixos</span><span class="pill"><span class="live on"></span>billing-api</span><span class="pill">All 9 ⌄</span></div>
+            <div class="composer"><div class="ta">Describe a task for coding-lab…</div><div class="cbar"><span class="chip">Large ⌄</span><span class="chip">High ⌄</span><span class="chip">···</span><span class="send"><svg class="i" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></span></div></div>
+            <div class="card">
+              <h5>Issues <span class="chip">12</span><span style="flex:1"></span><span style="font-size:15px">Auto</span><span class="switch"></span></h5>
+              <p style="margin:6px 0 4px;color:var(--muted);font-size:14px">Auto on · 3 ready · 1 AFK run live · next claim when a slot frees</p>
+              <div class="issue"><span class="num">#56</span><span class="tt">Record the Runner a run was spawned with on the run</span><span class="chip ok">ready-for-agent</span><span class="age">3 d</span></div>
+              <div class="issue"><span class="num">#47</span><span class="tt">Warpgate: dashboard exposure and per-run recordings deep link</span><span class="chip warn">needs-triage</span><span class="age">8 d</span></div>
+              <div class="issue"><span class="num">#45</span><span class="tt">Chat header context meter: the Large denominator is 200K but first-party logins run 1M</span><span class="chip warn">needs-triage</span><span class="age">8 d</span></div>
+              <div class="issue"><span class="num">#44</span><span class="tt">Schedule editor loses the raw cron on blur</span><span class="chip ok">ready-for-agent</span><span class="age">12 d</span></div>
+              <p style="margin:8px 0 0;color:var(--link);font-weight:600">All 12 open issues ⌄</p>
+            </div>
+          </div></div>
+        </div>
+      </div>
+    </div></div>
+
+    <div class="notes" style="margin-top:24px">
+      <h3>Desktop</h3>
+      <div class="note"><b>1</b><p><strong>The rail stays, with the phone's run list inside it.</strong> Brand, <code>+ New run</code>, the list, the section links, the account foot: today's anatomy, same widths, same <span class="kbd">Ctrl</span> <span class="kbd">B</span> collapse. The ACTIVE list becomes the grouped RunList the phone shows as a page, with Needs you, Working and Idle labels and the attention count. One component, two homes.</p></div>
+      <div class="note"><b>2</b><p><strong>Runs gets a real page.</strong> <code>/</code> on desktop is a table: state, repo, model, branch, commits behind the base, last activity. The rail is for switching; the page is for reading the whole state at once, which nothing on desktop offers today. The Live / Ended switch is History, as on the phone. <span class="try">Try: Runs, then a row, then back.</span></p></div>
+      <div class="note"><b>3</b><p><strong>The composer is one click, not the landing page.</strong> <code>+ New run</code> opens <code>/new</code>, the page you have today, centred in the 760px column. The rail's Runs link is new; everything below it is unchanged.</p></div>
+      <div class="note"><b>4</b><p><strong>The browser tab carries the count.</strong> <code>(2) lab</code> in the title while any run needs you, so a backgrounded desktop tab still reports attention. Same source as the phone's badge.</p></div>
+      <div class="note"><b>5</b><p><strong>Collapsed is unchanged.</strong> The fixed re-open chevron top-left, the content takes the width. <span class="try">Try: Rail collapsed.</span></p></div>
+    </div>
+  </div>
+
+  <h2>Tab bar anatomy</h2>
+  <div class="anat">
+    <div class="spec">
+      <span class="dim" style="top:6px;left:20px">49px + safe-area-inset-bottom</span>
+      <span class="dim" style="top:6px;right:20px">4 × 25% · 44px hit areas</span>
+      <div class="tabbar" style="margin-top:14px">
+        <button class="tab on"><svg class="i" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/></svg>Runs<span class="badge">2</span></button>
+        <button class="tab new"><span class="plus"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>New</button>
+        <button class="tab"><svg class="i" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repos</button>
+        <button class="tab"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg>More<span class="wdot"></span></button>
+      </div>
+      <span class="dim" style="bottom:4px;left:20px">24px icon · 11px label · active = --link, stroke 2.3</span>
+    </div>
+    <ul class="rules">
+      <li><b>Where it shows</b><span>Every authenticated page below 1024px except the Chat (<code>/runs/:id</code>) and the Schedule editor, which are immersive and own their back control. At 1024px the rail replaces it, as the drawer does today.</span></li>
+      <li><b>Runs badge</b><span>Count of live runs in needs-input or question state. Hidden at zero. Same data as the rail's dots: the shell's <code>listInstances</code> resource, patched by <code>run.messages.changed</code>, never a second fetch.</span></li>
+      <li><b>More dot</b><span>Only when the agent provider is logged out. It is the one setup fault that silently breaks every new run, and it is fixed on a page under More.</span></li>
+      <li><b>Active tab</b><span>Derived from the path prefix: <code>/</code>, <code>/history</code> → Runs; <code>/new</code> → New; <code>/repos…</code> → Repos; <code>/credentials</code>, <code>/tokens</code>, <code>/settings…</code> → More. Sub-pages keep their section's tab lit.</span></li>
+      <li><b>Re-tap</b><span>Tapping the lit tab navigates to the section root and scrolls to the top. Tapping it on the root only scrolls.</span></li>
+      <li><b>Back</b><span>The chat's back arrow pops the in-app history and falls back to <code>/</code> when the chat is the first entry (deep link, PWA shortcut, notification). Sub-pages use the top-bar chevron to their parent, as today. The OS back gesture stays the browser's.</span></li>
+      <li><b>Keyboard</b><span>When the on-screen keyboard is up, the bar is below it and out of reach anyway; nothing special is done. The composer page's docked input is already above the bar.</span></li>
+      <li><b>Safe area</b><span><code>padding-bottom: env(safe-area-inset-bottom)</code>, translucent card background with blur, 1px top border. The page below scrolls under it with matching bottom padding.</span></li>
+      <li><b>Gestures retired</b><span>The follow-finger drawer drag and its state machine go. No hot zones, no scrim. Every destination is a visible control.</span></li>
+      <li><b>PWA</b><span>Manifest <code>start_url</code> is <code>/</code> (Runs). Shortcuts: New run (<code>/new</code>), Repos. The app badge API, where available, mirrors the Runs count.</span></li>
+    </ul>
+  </div>
+
+  <h2>Route map</h2>
+  <div class="tablewrap"><table class="map">
+    <thead><tr><th>Path</th><th>Page</th><th>Phone</th><th>Desktop</th><th>Today</th></tr></thead>
+    <tbody>
+      <tr><td><code>/</code></td><td>Runs, live</td><td>Runs tab root</td><td>Runs table; rail link</td><td>New-run composer</td></tr>
+      <tr><td><code>/history</code></td><td>Runs, ended</td><td>Runs tab, Ended switch</td><td>Runs table, Ended switch</td><td>Rail link "History"</td></tr>
+      <tr><td><code>/new</code></td><td>New run</td><td>New tab root</td><td><code>+ New run</code> in the rail</td><td>Was <code>/</code></td></tr>
+      <tr><td><code>/runs/:id</code></td><td>Chat</td><td>Immersive, bar hidden</td><td>Rail + chat column</td><td>Same</td></tr>
+      <tr><td><code>/repos</code>, <code>/repos/new</code>, <code>/repos/:id/…</code></td><td>Repos, repo home and tabs</td><td>Repos tab; sub-pages with a chevron</td><td>Rail link "Repos"</td><td>Same</td></tr>
+      <tr><td><code>/credentials</code>, <code>/tokens</code></td><td>Credentials, Tokens</td><td>Rows under More, chevron back to More</td><td>Rail links</td><td>Rail links</td></tr>
+      <tr><td><code>/settings/:section?</code></td><td>Settings</td><td>Row under More; category index as today</td><td>Rail link, master-detail as today</td><td>Same</td></tr>
+      <tr><td><code>/more</code></td><td>More</td><td>More tab root</td><td>Redirects to <code>/settings</code></td><td>New</td></tr>
+      <tr><td><code>/runs</code></td><td>redirect</td><td colspan="2">→ <code>/</code> (was → <code>/history</code>)</td><td>→ <code>/history</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Trade-offs</h2>
+  <div class="cols">
+    <div class="col"><h3>Does well</h3><ul>
+      <li>No learning curve. Every destination is visible, named and in thumb reach.</li>
+      <li>One tap from launch to the run that needs you; the count is visible from every page.</li>
+      <li>Phone and desktop share one route map and one RunList component. The rail is not a special case any more.</li>
+      <li>The composer, Repos, repo home, the chat and settings keep their current designs. Only the frame changes.</li>
+    </ul></div>
+    <div class="col"><h3>Costs</h3><ul>
+      <li>About 80px of bottom chrome on every list page on the phone. Not in the chat.</li>
+      <li>Chat to another chat is still two taps: back, then a row. The list is visible during the switch, so it is a better two taps, but not one.</li>
+      <li>Desktop lands on Runs instead of the composer. One extra click to start typing on a desktop, in exchange for a page that shows every run at once.</li>
+      <li>Credentials and Tokens sink one level. They are set-once pages, and More shows their state inline, so this should rarely matter.</li>
+    </ul></div>
+    <div class="col"><h3>What moves in code</h3><ul>
+      <li><code>AppShell.tsx</code>: the top strip, drawer, scrim and <code>lib/drawerGesture.ts</code> are replaced by a <code>TabBar</code> below 1024px. The rail path and the instances resource stay as they are.</li>
+      <li><code>SideNav.tsx</code> splits: a <code>RunList</code> component (grouped rows) used by the rail and by the new <code>routes/Runs.tsx</code> page; the rail keeps brand, New run, links and foot.</li>
+      <li><code>index.tsx</code>: <code>/</code> → Runs, <code>/new</code> → the composer, <code>/more</code> on the phone. <code>History.tsx</code> becomes the Ended view of Runs.</li>
+      <li><code>ChatHeader.tsx</code>: back pops history with a <code>/</code> fallback. <code>document.title</code> gains the count.</li>
+      <li>No API change. No migration.</li>
+    </ul></div>
+  </div>
+
+  <h2>Open questions to settle next</h2>
+  <div class="qs"><ul>
+    <li><b>Desktop landing page.</b> This revision makes <code>/</code> the Runs table at every width. The alternative is to keep the composer as the desktop landing page and have <code>/</code> redirect by width, which keeps today's desktop habit but makes deep links behave differently per device. I would not do that; say so if you disagree.</li>
+    <li><b>Tab memory.</b> iOS tabs remember their stack: Repos → coding-lab → Issues, tap Runs, tap Repos, you are back on Issues. The mockup's rule is simpler (re-tap goes to the root). Memory is a small in-memory map of last path per tab; worth it if you move between a repo's issues and runs a lot.</li>
+    <li><b>History on the Runs tab.</b> The Live / Ended switch is the one grouping change from round 1. If you would rather keep History as a row under More, nothing else moves.</li>
+    <li><b>Fourth tab name.</b> "More" is honest but says nothing. "Settings" would be truthful once History leaves, with Credentials and Tokens as its first rows, and the logged-out dot reads better on a tab called Settings.</li>
+    <li><b>Runs row content.</b> The rows show state phrase, AFK budget and the behind chip. A one-line preview of the agent's last message (direction B's idea) would need the API to expose it; it can be added later without changing the frame.</li>
+    <li><b>Tablet widths.</b> 640 to 1023px keeps the tab bar. A 10-inch tablet in landscape could carry the rail instead; the breakpoint is one number.</li>
+  </ul></div>
+  <p class="foot">Reference mockup, revision 2 of direction A. Tokens, type, the rail, the chat header, the dock and the pages follow the shipped app (web/src/styles, docs/reference/*-screenshots). Markup here is throwaway; follow the app's own components when implementing.</p>
+</div>
+
+<script>
+(() => {
+  const body = document.body;
+  const TAB_OF = { runs: 'runs', quiet: 'runs', empty: 'runs', history: 'runs', new: 'new', repos: 'repos', repo: 'repos', more: 'more', loggedout: 'more', settings: 'more', chat: null, working: null };
+  const DURL = { runs: 'lab.cloonar.com/', chat: 'lab.cloonar.com/runs/8f2c', new: 'lab.cloonar.com/new', collapsed: 'lab.cloonar.com/runs/8f2c' };
+  const st = { frame: 'phone', p: 'runs', d: 'runs' };
+  const q = (s, r = document) => r.querySelector(s), qa = (s, r = document) => [...r.querySelectorAll(s)];
+
+  function apply(push = true) {
+    body.dataset.frame = st.frame; body.dataset.p = st.p; body.dataset.d = st.d;
+    qa('#frameSeg button').forEach(b => b.classList.toggle('on', b.dataset.frame === st.frame));
+    qa('#pChips button').forEach(b => b.classList.toggle('on', b.dataset.p === st.p));
+    qa('#dChips button').forEach(b => b.classList.toggle('on', b.dataset.d === st.d));
+    // phone
+    qa('.phone .view').forEach(v => v.classList.toggle('on', v.dataset.view === st.p));
+    const tab = TAB_OF[st.p];
+    qa('.phone .tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+    const badge = q('.phone .tab[data-tab="runs"] .badge');
+    if (badge) badge.hidden = (st.p === 'quiet' || st.p === 'empty' || st.p === 'history');
+    const wdot = q('.phone .tab[data-tab="more"] .wdot');
+    if (wdot) wdot.hidden = st.p !== 'loggedout';
+    // desktop
+    const dv = st.d === 'collapsed' ? 'chat' : st.d;
+    qa('.desk .dview').forEach(v => v.classList.toggle('on', v.dataset.dview === dv));
+    q('#desk').classList.toggle('rail-collapsed', st.d === 'collapsed');
+    qa('.desk [data-cur]').forEach(el => el.classList.toggle('cur', el.dataset.cur === dv), qa('.desk .nl').forEach(el => el.classList.toggle('on', el.dataset.cur === dv)));
+    q('#deskUrl').textContent = DURL[st.d];
+    if (push) history.replaceState(null, '', `#${st.frame}.${st.frame === 'phone' ? st.p : st.d}`);
+    fitDesk();
+  }
+  qa('#frameSeg button').forEach(b => b.addEventListener('click', () => { st.frame = b.dataset.frame; apply(); }));
+  qa('#pChips button').forEach(b => b.addEventListener('click', () => { st.p = b.dataset.p; apply(); }));
+  qa('#dChips button').forEach(b => b.addEventListener('click', () => { st.d = b.dataset.d; apply(); }));
+  qa('.phone [data-go]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); st.p = el.dataset.go; apply(); }));
+  qa('.desk [data-dgo]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); st.d = el.dataset.dgo; apply(); }));
+  q('.desk .reopen').addEventListener('click', () => { st.d = 'chat'; apply(); });
+
+  function fitDesk() {
+    const w = q('.desk-wrap'); if (!w || st.frame !== 'desktop') return;
+    const s = Math.min(1, w.clientWidth / 1280);
+    q('#desk').style.transform = `scale(${s})`;
+    w.style.height = `${900 * s}px`;
+  }
+  window.addEventListener('resize', fitDesk);
+
+  const h = location.hash.replace('#', '').split('.');
+  if (h[0] === 'desktop') { st.frame = 'desktop'; if (h[1] && DURL[h[1]]) st.d = h[1]; }
+  else if (h[0] === 'phone' || h[0] === '') { if (h[1] && TAB_OF.hasOwnProperty(h[1])) st.p = h[1]; }
+  else if (TAB_OF.hasOwnProperty(h[0])) { st.p = h[0]; }
+  apply(false);
+})();
+</script>
+</body>
+</html>
