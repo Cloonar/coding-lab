@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -69,4 +70,67 @@ func (e *Engine) Fetch(ctx context.Context, bareDir string, extraEnv []string) e
 	}
 	_, _ = e.run(ctx, bareDir, extraEnv, "remote", "set-head", "origin", "--auto")
 	return nil
+}
+
+// DeleteRemoteBranch deletes refs/heads/<branch> on the bare repo's ORIGIN —
+// the merge-time head delete of ADR-0081 (issue #90), run from the bare
+// reference clone with extraEnv carrying the credential the vault
+// materialized. It never touches the LOCAL refs/heads/<branch>: the local
+// branch lifecycle stays with guarded teardown and the sweep.
+//
+// The contract is "absent on origin afterwards", not "this call removed it":
+// nil means refs/heads/<branch> does not exist on origin once DeleteRemoteBranch
+// returns — whether the push deleted it now, a previous (convergent) attempt
+// already did, or the branch was never pushed at all. Detecting the
+// already-absent case does NOT parse git's "remote ref does not exist" text
+// (porcelain prose that differs across git versions and transports, and a
+// false match would hide a real refusal); instead, when the deletion push
+// fails, a `git ls-remote origin refs/heads/<branch>` asks origin directly
+// and its output is matched on the EXACT ref name (ls-remote patterns match
+// on path tails, so any listed line is not proof by itself). Absent there →
+// nil; still listed, or the ls-remote itself failing (origin unreachable) →
+// the PUSH's error, which carries git's own
+// stderr verbatim (an origin hook decline wraps ErrPushRejected, like the
+// merge push — see pushOrigin). Git anonymizes credentials in the URLs it
+// prints, and the credential itself lives in a materialized helper file, so
+// the error text is safe to surface.
+//
+// The pre-push leak guard lab installs in the bare repo skips deletions (an
+// all-zero local sha pushes no commits), so the guard never blocks this.
+// A successful deletion push also removes refs/remotes/origin/<branch> (the
+// clone's standard fetch refspec maps it, and git updates tracking refs on
+// push); on the already-absent path a lingering tracking ref is dropped
+// best-effort so the bare clone does not keep advertising a branch origin no
+// longer has (UnpushedCount and the guard's --not --remotes=origin read it).
+func (e *Engine) DeleteRemoteBranch(ctx context.Context, bareDir, branch string, extraEnv []string) error {
+	if branch == "" {
+		return errors.New("delete remote branch: empty branch name")
+	}
+	ref := "refs/heads/" + branch
+	pushErr := e.pushOrigin(ctx, bareDir, ":"+ref, extraEnv)
+	if pushErr == nil {
+		return nil
+	}
+	present, lsErr := e.remoteRefExists(ctx, bareDir, ref, extraEnv)
+	if lsErr != nil || present {
+		return pushErr
+	}
+	_, _ = e.run(ctx, bareDir, extraEnv, "update-ref", "-d", "refs/remotes/origin/"+branch)
+	return nil
+}
+
+// remoteRefExists reports whether origin advertises exactly ref — `git
+// ls-remote origin <ref>` with an exact match on the listed name. A failed
+// ls-remote (network, auth) is an error, never a "no".
+func (e *Engine) remoteRefExists(ctx context.Context, bareDir, ref string, extraEnv []string) (bool, error) {
+	out, err := e.run(ctx, bareDir, extraEnv, "ls-remote", "origin", ref)
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.Lines(string(out)) {
+		if _, name, ok := strings.Cut(strings.TrimRight(line, "\r\n"), "\t"); ok && name == ref {
+			return true, nil
+		}
+	}
+	return false, nil
 }

@@ -279,8 +279,8 @@ func (s *scanner) CheckLog(ctx context.Context, number int, name string) (tracke
 	return s.inner.CheckLog(ctx, number, name)
 }
 
-func (s *scanner) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
-	return s.inner.MergePull(ctx, number)
+func (s *scanner) MergePull(ctx context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
+	return s.inner.MergePull(ctx, number, opts)
 }
 
 // Reviews is a read and RerequestReview carries no agent-authored content (it

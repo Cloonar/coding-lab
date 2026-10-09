@@ -174,13 +174,15 @@ type fakeForge struct {
 	pullRef      tracker.PullRef
 	createdPull  *[4]string // head, base, title, body
 	pulls        []tracker.PullRef
-	pullDetail   *tracker.PullDetail // served by Pull when the number matches
-	mergeRef     tracker.PullRef     // returned by MergePull on success
-	mergeErr     error               // returned by MergePull when set
-	mergedNumber int                 // records the last MergePull argument
-	checks       []tracker.Check     // returned by Checks (single-shot tests)
-	checksSeq    [][]tracker.Check   // consecutive Checks() results (--wait); overrides checks when set
-	checksCall   int                 // index into checksSeq
+	pullDetail   *tracker.PullDetail    // served by Pull when the number matches
+	mergeRef     tracker.PullRef        // returned by MergePull on success
+	mergeErr     error                  // returned by MergePull when set
+	mergedNumber int                    // records the last MergePull argument
+	mergeHead    tracker.HeadResult     // head outcome returned by MergePull on success
+	mergeOpts    []tracker.MergeOptions // records every MergePull options value
+	checks       []tracker.Check        // returned by Checks (single-shot tests)
+	checksSeq    [][]tracker.Check      // consecutive Checks() results (--wait); overrides checks when set
+	checksCall   int                    // index into checksSeq
 
 	checkLogs     map[string][]byte // returned by CheckLog as a plain attempt-1 result, keyed by check name
 	checkLogErr   error             // CheckLog-only error (Checks can still succeed) — the log-fetch failure path
@@ -266,12 +268,13 @@ func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string
 	f.createdPull = &[4]string{head, base, title, body}
 	return f.pullRef, nil
 }
-func (f *fakeForge) MergePull(_ context.Context, number int) (tracker.PullRef, error) {
+func (f *fakeForge) MergePull(_ context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
 	f.mergedNumber = number
+	f.mergeOpts = append(f.mergeOpts, opts)
 	if f.mergeErr != nil {
-		return tracker.PullRef{}, f.mergeErr
+		return tracker.MergeResult{}, f.mergeErr
 	}
-	return f.mergeRef, nil
+	return tracker.MergeResult{PullRef: f.mergeRef, Head: f.mergeHead}, nil
 }
 func (f *fakeForge) Reviews(context.Context, int) ([]tracker.Review, error) {
 	if f.reviews == nil {
@@ -849,24 +852,51 @@ func TestPRCreateBuiltinChangeRequest(t *testing.T) {
 // state/head/url metadata lines, then the FULL body — the captured-card-YAML
 // retrieval path, no raw forge fallback. An unknown number is the server's
 // 404 envelope → message on stderr, exit 1 (never 2, never a panic).
-// TestPRMergeOutput: `labctl pr merge <n>` prints one parseable line
-// (#number<TAB>state<TAB>url) and passes the number through to MergePull.
+// TestPRMergeOutput: `labctl pr merge <n>` prints ONE tab-separated line —
+// #number, state, url, then the head outcome (ADR-0081): head-deleted |
+// head-kept: <reason> | head-delete-failed: <backend's words> — and passes the
+// number through to MergePull. Exit is zero in all three cases: a failed head
+// delete never turns a landed merge into a failure.
 func TestPRMergeOutput(t *testing.T) {
-	fk := &fakeForge{mergeRef: tracker.PullRef{
-		Number: 12, HeadBranch: "afk/1", State: tracker.PullMerged, URL: "https://forge.example/pr/12",
-	}}
-	f := newAgentFixture(t, store.TrackerBindingForge,
-		resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
+	const prefix = "#12\tmerged\thttps://forge.example/pr/12"
+	tests := []struct {
+		name string
+		head tracker.HeadResult
+		want string
+	}{
+		{"deleted", tracker.HeadResult{Outcome: tracker.HeadDeleted}, prefix + "\thead-deleted\n"},
+		{"kept setting off", tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}, prefix + "\thead-kept: setting off\n"},
+		{"kept fork", tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head lives in alice/r"}, prefix + "\thead-kept: head lives in alice/r\n"},
+		{"failed", tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: "Reference update failed"}, prefix + "\thead-delete-failed: Reference update failed\n"},
+		{"failed multi-line words stay one line", tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: "remote: denied\n\tby hook"}, prefix + "\thead-delete-failed: remote: denied by hook\n"},
+		// A server that predates the head outcome sends no fields: the line
+		// keeps its original three and gains no dangling tab.
+		{"older server sends no outcome", tracker.HeadResult{}, prefix + "\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fk := &fakeForge{mergeRef: tracker.PullRef{
+				Number: 12, HeadBranch: "afk/1", State: tracker.PullMerged, URL: "https://forge.example/pr/12",
+			}, mergeHead: tc.head}
+			f := newAgentFixture(t, store.TrackerBindingForge,
+				resolverFunc(func(context.Context, store.Repo) (tracker.Tracker, error) { return fk, nil }))
 
-	code, stdout, stderr := run(t, []string{"pr", "merge", "12"}, f.env())
-	if code != 0 {
-		t.Fatalf("exit = %d, stderr %q", code, stderr)
-	}
-	if stdout != "#12\tmerged\thttps://forge.example/pr/12\n" {
-		t.Errorf("stdout = %q, want #12<TAB>merged<TAB>url", stdout)
-	}
-	if fk.mergedNumber != 12 {
-		t.Errorf("MergePull arg = %d, want 12", fk.mergedNumber)
+			code, stdout, stderr := run(t, []string{"pr", "merge", "12"}, f.env())
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+			}
+			if stdout != tc.want {
+				t.Errorf("stdout = %q, want %q", stdout, tc.want)
+			}
+			if fk.mergedNumber != 12 {
+				t.Errorf("MergePull arg = %d, want 12", fk.mergedNumber)
+			}
+			// The seeded/absent merge_delete_head setting defaults on: the
+			// server hands DeleteHead=true to the tracker.
+			if len(fk.mergeOpts) != 1 || !fk.mergeOpts[0].DeleteHead {
+				t.Errorf("MergePull opts = %+v, want one call with DeleteHead=true", fk.mergeOpts)
+			}
+		})
 	}
 }
 

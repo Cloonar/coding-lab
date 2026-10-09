@@ -113,8 +113,17 @@ export const TEXT_SETTING_KEYS = [
  * therefore TRI-STATE: `null` means "inherit the base", distinct from an
  * explicit `false`. That is why these cannot reuse the text keys' ''-as-unset
  * convention — `false` is a legal value, so only null/absent can mean unset.
+ *
+ * `merge_delete_head` (issue #90, ADR-0081) is a plain global bool seeded true:
+ * whether a merge deletes the PR/CR head branch on origin. It has no inherit
+ * state (no per-repo override), so unlike the AFK override it is never null on
+ * the wire. Edited in global Settings › General.
  */
-export const BOOL_SETTING_KEYS = ['spawn_remote_default', 'spawn_remote_default_afk'] as const;
+export const BOOL_SETTING_KEYS = [
+  'spawn_remote_default',
+  'spawn_remote_default_afk',
+  'merge_delete_head',
+] as const;
 
 export type IntSettingKey = (typeof INT_SETTING_KEYS)[number];
 export type TextSettingKey = (typeof TEXT_SETTING_KEYS)[number];

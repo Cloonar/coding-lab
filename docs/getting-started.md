@@ -88,7 +88,7 @@ The unattended loop:
 2. **Label it `ready-for-agent`.**
 3. **Start an AFK run** with **Run one** on the repo's Overview or on the AFK line of the **Issues** card on New run (or switch **Auto** on in either place, and the scheduler starts runs by itself). The engine claims the lowest ready issue by creating the run's branch, spawns a session with a seed prompt pointing at the issue, and walks away.
 4. **The done-signal is a PR** (or change request on built-in-tracker repos) whose head branch is the run's branch, with `Closes #N` in the body. Session death without a PR counts as a failure; each run also has a budget clock (default 2 h). Three consecutive failures pause AFK on that repo until you press **Reset** — on the repo's Overview, on the Issues card's AFK line on New run, or in the **Needs you** block on Repositories.
-5. **Review and merge** — a forge PR on your forge, or a change request right in lab's UI with a live diff and one-tap merge; merging a CR closes the linked issue.
+5. **Review and merge** — a forge PR on your forge, or a change request right in lab's UI with a live diff and one-tap merge; merging a CR closes the linked issue. A merge made through lab (the CR merge, or `labctl pr merge` when an agent lands a PR) also deletes the head branch on origin; the setting `merge_delete_head` turns that off.
 
 Everything is observable from the phone throughout: the **Runs** page shows each instance's live conversational state (the side rail on a wide screen shows the same list), **Runs** → **Ended** records every outcome, the Runs tab and the browser tab title count the runs waiting for you, and Web Push can notify you when a session needs input.
 

@@ -16,6 +16,9 @@ import {
   pageSection,
   save,
   saveBarTitle,
+  settle,
+  switchButton,
+  switchOn,
   typeField,
 } from '../harness';
 
@@ -79,6 +82,31 @@ describe('General: transcript retention (issue #81)', () => {
     await save();
     expect(fieldError('transcript_retention_days')).toBe('Use a whole number from 0 to 365.');
     expect(h.patchBodies).toEqual([]);
+  });
+});
+
+describe('General: merge deletes the head branch (issue #90)', () => {
+  it('renders the switch on, with the one-line hint', async () => {
+    await mountPage();
+    expect(fieldLabel('merge_delete_head')).toBe('Delete head branch after merge');
+    expect(fieldHint('merge_delete_head')).toBe(
+      'Deletes the PR/CR head branch on origin after a merge; local branches are unaffected.',
+    );
+    expect(switchOn('merge_delete_head')).toBe(true);
+  });
+
+  it('seeds off from a stored false', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, merge_delete_head: false };
+    await mountPage();
+    expect(switchOn('merge_delete_head')).toBe(false);
+  });
+
+  it('turning it off saves exactly merge_delete_head: false', async () => {
+    await mountPage();
+    switchButton('merge_delete_head').click();
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ merge_delete_head: false }]);
   });
 });
 

@@ -132,9 +132,19 @@ type fjReview struct {
 	Dismissed bool   `json:"dismissed"`
 }
 
+// fjPullRepo is the repository a pull's head (or base) lives in. MergePull's
+// same-repo guard reads full_name ("owner/name") off it to tell a branch on
+// this repository from one on a fork. fjPullHead carries it as a pointer so a
+// null or absent repo (a deleted head fork) reads as "head repository
+// unknown", never as "same repository".
+type fjPullRepo struct {
+	FullName string `json:"full_name"`
+}
+
 type fjPullHead struct {
-	Ref string `json:"ref"`
-	Sha string `json:"sha"`
+	Ref  string      `json:"ref"`
+	Sha  string      `json:"sha"`
+	Repo *fjPullRepo `json:"repo"`
 }
 
 type fjPull struct {
@@ -639,44 +649,94 @@ func (c *Client) CreatePull(ctx context.Context, head, base, title, body string)
 }
 
 // MergePull merges pull request `number` on the forge and returns its merged
-// PullRef. The forge — not lab — decides mergeability: MergePull does NOT
-// pre-check required status checks or branch protection. It first GETs the
-// pull so an already-merged one is a convergent no-op success (naming the
-// merged state), then POSTs the fixed "merge" method (a merge commit; the
-// forge applies its own configured strategy and enforces its own protections).
-// A refusal — a required check unsatisfied, a protected base, a conflict — is
-// the forge's own non-2xx answer, wrapped in tracker.ErrMergeRejected with
-// that answer's body verbatim (the actionable message); an unknown number
-// stays tracker.ErrNotFound. The merge is authorized by this client's server-
-// side forge token, so no forge credential ever reaches the agent session
-// (ADR-0014). The head branch is not deleted (delete_branch_after_merge omitted
-// → false).
-func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, error) {
+// PullRef plus what became of the head ref (ADR-0081). The forge — not lab —
+// decides mergeability: MergePull does NOT pre-check required status checks or
+// branch protection. It first GETs the pull so an already-merged one is a
+// convergent no-op success (naming the merged state), then POSTs the fixed
+// "merge" method (a merge commit; the forge applies its own configured strategy
+// and enforces its own protections). A refusal — a required check unsatisfied,
+// a protected base, a conflict — is the forge's own non-2xx answer, wrapped in
+// tracker.ErrMergeRejected with that answer's body verbatim (the actionable
+// message); an unknown number stays tracker.ErrNotFound. The merge is
+// authorized by this client's server-side forge token, so no forge credential
+// ever reaches the agent session (ADR-0014).
+//
+// The merge request deliberately omits Forgejo's delete_branch_after_merge:
+// it would delete the ref inside the forge's merge, bypassing the same-repo
+// guard and leaving lab unable to report the outcome. Instead, only after the
+// forge confirmed the merge — or on the convergent already-merged path, so a
+// retry after a lost delete finishes the job — the head outcome is computed
+// (deleteHead). A failed delete is reported in Head and is NEVER an error: the
+// merge is the irreversible part and has already succeeded.
+func (c *Client) MergePull(ctx context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
 	var fj fjPull
 	if err := c.do(ctx, http.MethodGet, c.pullPath(number), nil, nil, &fj); err != nil {
-		return tracker.PullRef{}, err // 404 → tracker.ErrNotFound
+		return tracker.MergeResult{}, err // 404 → tracker.ErrNotFound
 	}
 	if derivePullState(fj.State, fj.Merged) == tracker.PullMerged {
-		return toPullRef(fj), nil // convergent no-op: already merged
+		// convergent no-op: already merged — the head delete still runs.
+		return tracker.MergeResult{PullRef: toPullRef(fj), Head: c.deleteHead(ctx, fj.Head, opts)}, nil
 	}
 	req := struct {
 		Do string `json:"Do"`
 	}{Do: "merge"}
 	if err := c.do(ctx, http.MethodPost, c.pullPath(number)+"/merge", nil, req, nil); err != nil {
 		if errors.Is(err, tracker.ErrNotFound) {
-			return tracker.PullRef{}, err
+			return tracker.MergeResult{}, err
 		}
-		return tracker.PullRef{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
+		return tracker.MergeResult{}, fmt.Errorf("%w: %s", tracker.ErrMergeRejected, err.Error())
 	}
 	// Merged. The head ref and web URL do not change on merge; report the
 	// merged state over the pre-merge read.
-	return tracker.PullRef{
-		Number:     fj.Number,
-		HeadBranch: fj.Head.Ref,
-		State:      tracker.PullMerged,
-		URL:        fj.HTMLURL,
-		Closes:     tracker.ParseCloses(fj.Body),
+	return tracker.MergeResult{
+		PullRef: tracker.PullRef{
+			Number:     fj.Number,
+			HeadBranch: fj.Head.Ref,
+			State:      tracker.PullMerged,
+			URL:        fj.HTMLURL,
+			Closes:     tracker.ParseCloses(fj.Body),
+		},
+		Head: c.deleteHead(ctx, fj.Head, opts),
 	}, nil
+}
+
+// deleteHead computes MergePull's head outcome for a pull the forge has
+// merged. The checks run in order, and every one that refuses ends in HeadKept
+// without a network call:
+//
+//   - opts.DeleteHead false → kept, tracker.HeadKeptSettingOff.
+//   - no head ref name → kept: there is nothing to address.
+//   - same-repo guard (strict): head.repo.full_name must equal this client's
+//     owner/repo, case-insensitively. A different repository is a fork's
+//     branch — kept, "head lives in <fork>". A null/empty head.repo is "head
+//     repository unknown" and is kept too: lab never deletes a ref it cannot
+//     prove is on origin.
+//
+// Otherwise it DELETEs branches/{branch}. 204 → deleted. A branch that is
+// already absent — Forgejo answers 404 — is also deleted: the outcome means
+// "the ref is absent on origin afterwards" (the merge just succeeded, so the
+// repository itself is known to be visible to the token). Any other refusal
+// (a protected branch is 403) or network error → failed, carrying the error
+// text do() produced (method, path, status, the forge's own body snippet;
+// never the token).
+func (c *Client) deleteHead(ctx context.Context, head fjPullHead, opts tracker.MergeOptions) tracker.HeadResult {
+	if !opts.DeleteHead {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}
+	}
+	if head.Ref == "" {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head branch unknown"}
+	}
+	if head.Repo == nil || head.Repo.FullName == "" {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head repository unknown"}
+	}
+	if !strings.EqualFold(head.Repo.FullName, c.owner+"/"+c.repo) {
+		return tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head lives in " + head.Repo.FullName}
+	}
+	err := c.do(ctx, http.MethodDelete, c.branchPath(head.Ref), nil, nil, nil)
+	if err == nil || errors.Is(err, tracker.ErrNotFound) {
+		return tracker.HeadResult{Outcome: tracker.HeadDeleted}
+	}
+	return tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: err.Error()}
 }
 
 // Reviews lists the submitted reviews on pull `number`, oldest first — the read
@@ -975,6 +1035,18 @@ func (c *Client) pullsPath() string      { return c.repoPath("/pulls") }
 func (c *Client) labelsPath() string     { return c.repoPath("/labels") }
 func (c *Client) issuePath(n int) string { return c.repoPath("/issues/" + strconv.Itoa(n)) }
 func (c *Client) pullPath(n int) string  { return c.repoPath("/pulls/" + strconv.Itoa(n)) }
+
+// branchPath is the branch route for one head branch: branches/{branch}.
+// Branch names carry '/' (afk/90) and Forgejo's branch routes take the name as
+// a wildcard tail, so the '/' separators stay literal and each segment is
+// escaped on its own.
+func (c *Client) branchPath(branch string) string {
+	segs := strings.Split(branch, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return c.repoPath("/branches/" + strings.Join(segs, "/"))
+}
 
 // pullByBaseHeadPath is Forgejo's by-base-head pull lookup for one base/head
 // branch pair (PullsForHead's fast path). Branch names may carry '/'

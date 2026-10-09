@@ -1577,8 +1577,10 @@ func runBuiltinCycle(t *testing.T, w *cycleWorld, repo store.Repo, out string, i
 //     directive), the reaper classifies success off builtin Pulls, the
 //     teardown keeps the unmerged branch; POST /crs/1/merge fast-forwards
 //     origin main to the head sha, auto-closes the built-in issue, publishes
-//     cr.changed + issue.changed; the runtime sweep then GCs the now-merged
-//     branch.
+//     cr.changed + issue.changed, and — merge_delete_head at its default
+//     (on) — deletes the pushed head ref on ORIGIN (ADR-0081) while the LOCAL
+//     head branch is left alone; the runtime sweep then GCs the now-merged
+//     local branch, exactly as before (local lifecycle did not move).
 //  2. merge-commit path: a second cycle, but origin main advances between the
 //     reap and the merge → POST /crs/2/merge builds a real merge commit
 //     (parent1 = origin's advanced tip, parent2 = the head) authored with the
@@ -1596,6 +1598,9 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 	ok := t.Run("builtin success cycle and ff merge", func(t *testing.T) {
 		_, headSHA := runBuiltinCycle(t, w, repo, out1, 1, 1)
 
+		// The fake claude's `git push origin HEAD` published the head.
+		gitCmd(t, w.home, origin, "rev-parse", "--verify", "--quiet", "refs/heads/afk/1")
+
 		// Merge through the REAL operator API: fast-forward path (origin main
 		// never moved), watched on the world's bus.
 		evts, cancel := w.bus.Subscribe(w.ctx)
@@ -1611,6 +1616,14 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 		if got := gitCmd(t, w.home, origin, "rev-parse", "refs/heads/main"); got != headSHA {
 			t.Errorf("origin main = %s, want the head sha %s (fast-forward)", got, headSHA)
 		}
+		// ADR-0081: the setting defaults on, so the merge deleted the head on
+		// ORIGIN once the CR row was recorded, and said so.
+		if hd, _ := body["head"].(map[string]any); hd == nil || hd["outcome"] != "deleted" {
+			t.Errorf("merge head outcome = %v, want deleted", body["head"])
+		}
+		if cycleBranchExists(w.env, origin, "afk/1") {
+			t.Error("origin still carries afk/1 after the merge, want the head deleted there")
+		}
 		// The CR's built-in issue auto-closed, and both events fired.
 		is, err := w.st.IssueByRepoNumber(w.ctx, repo.ID, 1)
 		if err != nil {
@@ -1621,7 +1634,9 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 		}
 		waitForBusEvents(t, evts, httpapi.EventCRChanged, "issue.changed")
 
-		// The runtime sweep GCs the now-merged branch — the full circle.
+		// The runtime sweep GCs the now-merged branch — the full circle. The
+		// LOCAL branch survived the merge (the origin delete never touches
+		// it; its lifecycle stays with the sweep).
 		if !cycleBranchExists(w.env, w.bare(repo), "afk/1") {
 			t.Fatal("merged branch afk/1 gone before the sweep ran")
 		}
@@ -1689,7 +1704,14 @@ func TestAFKCycleBuiltinIntegration(t *testing.T) {
 		}
 		waitForBusEvents(t, evts, httpapi.EventCRChanged, "issue.changed")
 
-		// And the sweep completes the circle again.
+		// The merge-commit path deletes the origin head too; the local
+		// branch waits for the sweep, which completes the circle again.
+		if cycleBranchExists(w.env, origin, "afk/2") {
+			t.Error("origin still carries afk/2 after the merge, want the head deleted there")
+		}
+		if !cycleBranchExists(w.env, w.bare(repo), "afk/2") {
+			t.Fatal("merged branch afk/2 gone before the sweep ran")
+		}
 		w.recon.RuntimeSweep(w.ctx)
 		if cycleBranchExists(w.env, w.bare(repo), "afk/2") {
 			t.Error("runtime sweep kept the merged branch afk/2")

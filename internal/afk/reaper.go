@@ -130,8 +130,10 @@ func (s *Service) reapActiveRuns(ctx context.Context, now time.Time) {
 			// (issue #176) — sound for the verdict kinds too: their
 			// pre-existing PR was created by the same agentapi handlePRCreate
 			// (head = the run's branch, base = the repo default branch), and
-			// its head branch outlives the run (MergePull never deletes the
-			// head branch, and reap-time teardown runs only after this read),
+			// its head branch outlives the run (reap-time teardown runs only
+			// after this read; MergePull deletes at most the head ref on
+			// ORIGIN, and only after the merge is recorded — ADR-0081 — while
+			// the local branch and the pull's recorded head name survive),
 			// so PullsForHead's LIVE-branch contract holds for every kind.
 			// Base is repo.DefaultBranch because that is the base the agent
 			// API pins for EVERY lab-created PR (the caller names neither).

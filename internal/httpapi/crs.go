@@ -21,6 +21,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/crmerge"
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
+	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
 
 // EventCRChanged is the SSE event name published on any change-request
@@ -203,6 +204,19 @@ func (s *Server) handleCRGet(w http.ResponseWriter, r *http.Request) {
 // the state, gitx's typed refusals surface their own words as the 409 body,
 // and the no-author-identity refusal is a 409 too — exactly the M6 status
 // codes, now shared byte-for-byte with the agent surface.
+//
+// Head delete (ADR-0081, issue #90): this route is one of the TWO places the
+// global merge_delete_head setting is read (the other is the agent merge
+// handler behind `labctl pr merge`), via GetBool(key, true) — a missing row
+// means on — so a CR merged from the web UI behaves exactly like one landed
+// by an agent: once the merge is recorded the service deletes the head ref
+// on origin (the local branch stays with teardown/the sweep). The setting is
+// read BEFORE the merge, so an unreadable row fails the request while
+// nothing has landed yet. The response stays {"cr": ...} for existing
+// consumers, plus a {"head": {"outcome", "reason"}} object naming what became
+// of the head on origin — deleted | kept | failed; a failed delete is still a
+// 200 (the merge is the irreversible part and it succeeded; the service
+// already logged the failure at warn).
 func (s *Server) handleCRMerge(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -217,7 +231,13 @@ func (s *Server) handleCRMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	merged, err := s.crmerge.Merge(r.Context(), repo.ID, n)
+	deleteHead, err := s.store.GetBool(r.Context(), store.SettingMergeDeleteHead, true)
+	if err != nil {
+		s.internalError(w, "reading merge_delete_head setting", err)
+		return
+	}
+
+	merged, head, err := s.crmerge.Merge(r.Context(), repo.ID, n, tracker.MergeOptions{DeleteHead: deleteHead})
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
@@ -231,7 +251,18 @@ func (s *Server) handleCRMerge(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cr": crFullJSON(merged)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cr":   crFullJSON(merged),
+		"head": crMergeHeadJSON{Outcome: head.Outcome, Reason: head.Reason},
+	})
+}
+
+// crMergeHeadJSON is the merge response's head outcome (ADR-0081): Outcome is
+// deleted | kept | failed; Reason says why it was kept or carries git's own
+// words on a failure, and is empty on deleted.
+type crMergeHeadJSON struct {
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason"`
 }
 
 // handleCRClose is POST /api/v1/repos/{id}/crs/{n}/close: open → closed

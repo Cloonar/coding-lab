@@ -950,13 +950,30 @@ func TestBuiltin_CreatePullRefusesDuplicateOpenHead(t *testing.T) {
 // tracker's error-mapping and convergence logic without a git fixture.
 type fakeMerger struct {
 	cr    store.CR
+	head  tracker.HeadResult
 	err   error
 	calls int
+	opts  []tracker.MergeOptions // every Merge call's options, in order
+
+	// DeleteHead (the convergent path's standalone delete) is scripted
+	// separately: deleteHeads records each head it was asked to delete and
+	// deleteResult is what it answers.
+	deleteHeads  []string
+	deleteResult tracker.HeadResult
 }
 
-func (f *fakeMerger) Merge(_ context.Context, _ string, _ int) (store.CR, error) {
+func (f *fakeMerger) Merge(_ context.Context, _ string, _ int, opts tracker.MergeOptions) (store.CR, tracker.HeadResult, error) {
 	f.calls++
-	return f.cr, f.err
+	f.opts = append(f.opts, opts)
+	if f.err != nil {
+		return store.CR{}, tracker.HeadResult{}, f.err
+	}
+	return f.cr, f.head, nil
+}
+
+func (f *fakeMerger) DeleteHead(_ context.Context, _ string, head string) tracker.HeadResult {
+	f.deleteHeads = append(f.deleteHeads, head)
+	return f.deleteResult
 }
 
 // newTrackerWithMerger builds a built-in tracker wired to a CR-merge service.
@@ -967,20 +984,40 @@ func newTrackerWithMerger(s *store.Store, repoID string, m tracker.CRMerger) *Tr
 }
 
 // TestBuiltin_MergePull_success: the service merges; the returned PullRef is
-// the merged CR.
+// the merged CR, the options reach the service verbatim (the adapter never
+// reads the setting itself), and the service's head outcome — whatever it is,
+// a failed delete included — rides the result of a SUCCESSFUL merge.
 func TestBuiltin_MergePull_success(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	repo := seedRepo(t, s)
 	merged := store.CR{RepoID: repo.ID, Number: 1, HeadBranch: "afk/1", State: store.CRStateMerged}
-	tr := newTrackerWithMerger(s, repo.ID, &fakeMerger{cr: merged})
 
-	pr, err := tr.MergePull(ctx, 1)
-	if err != nil {
-		t.Fatalf("MergePull: %v", err)
-	}
-	if pr.Number != 1 || pr.State != tracker.PullMerged || pr.HeadBranch != "afk/1" {
-		t.Errorf("PullRef = %+v, want #1 afk/1 merged", pr)
+	for _, head := range []tracker.HeadResult{
+		{Outcome: tracker.HeadDeleted},
+		{Outcome: tracker.HeadFailed, Reason: "push rejected by origin: deletion protected"},
+		{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff},
+	} {
+		m := &fakeMerger{cr: merged, head: head}
+		tr := newTrackerWithMerger(s, repo.ID, m)
+		opts := tracker.MergeOptions{DeleteHead: head.Outcome != tracker.HeadKept}
+
+		res, err := tr.MergePull(ctx, 1, opts)
+		if err != nil {
+			t.Fatalf("MergePull (head %s): %v", head.Outcome, err)
+		}
+		if res.Number != 1 || res.State != tracker.PullMerged || res.HeadBranch != "afk/1" {
+			t.Errorf("PullRef = %+v, want #1 afk/1 merged", res.PullRef)
+		}
+		if res.Head != head {
+			t.Errorf("Head = %+v, want the service's %+v", res.Head, head)
+		}
+		if len(m.opts) != 1 || m.opts[0] != opts {
+			t.Errorf("service saw options %+v, want exactly [%+v]", m.opts, opts)
+		}
+		if len(m.deleteHeads) != 0 {
+			t.Errorf("success path called DeleteHead(%v); the service's Merge owns the delete", m.deleteHeads)
+		}
 	}
 }
 
@@ -997,15 +1034,39 @@ func TestBuiltin_MergePull_alreadyMergedConverges(t *testing.T) {
 	if _, err := s.MergeCR(ctx, repo.ID, 1, "abc1234", fixedNow); err != nil {
 		t.Fatalf("MergeCR: %v", err)
 	}
-	m := &fakeMerger{err: fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, "merged")}
+	m := &fakeMerger{
+		err:          fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, "merged"),
+		deleteResult: tracker.HeadResult{Outcome: tracker.HeadDeleted},
+	}
 	tr := newTrackerWithMerger(s, repo.ID, m)
 
-	pr, err := tr.MergePull(ctx, 1)
+	res, err := tr.MergePull(ctx, 1, tracker.MergeOptions{DeleteHead: true})
 	if err != nil {
 		t.Fatalf("MergePull (convergent) err = %v, want success", err)
 	}
-	if pr.State != tracker.PullMerged || pr.Number != 1 {
-		t.Errorf("convergent PullRef = %+v, want #1 merged", pr)
+	if res.State != tracker.PullMerged || res.Number != 1 {
+		t.Errorf("convergent PullRef = %+v, want #1 merged", res.PullRef)
+	}
+	// The convergent re-merge still reports truthfully: it ran the standalone
+	// origin delete for the merged CR's head and carries its outcome.
+	if len(m.deleteHeads) != 1 || m.deleteHeads[0] != "afk/1" {
+		t.Errorf("DeleteHead calls = %v, want exactly [afk/1]", m.deleteHeads)
+	}
+	if res.Head != (tracker.HeadResult{Outcome: tracker.HeadDeleted}) {
+		t.Errorf("convergent Head = %+v, want deleted", res.Head)
+	}
+
+	// Setting off: no delete attempted, the head reads kept/"setting off".
+	m.deleteHeads = nil
+	res, err = tr.MergePull(ctx, 1, tracker.MergeOptions{})
+	if err != nil {
+		t.Fatalf("MergePull (convergent, option off) err = %v", err)
+	}
+	if len(m.deleteHeads) != 0 {
+		t.Errorf("option off still called DeleteHead(%v)", m.deleteHeads)
+	}
+	if res.Head != (tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}) {
+		t.Errorf("convergent Head (option off) = %+v, want kept/setting off", res.Head)
 	}
 }
 
@@ -1024,8 +1085,11 @@ func TestBuiltin_MergePull_closedUnmergedRejected(t *testing.T) {
 	m := &fakeMerger{err: fmt.Errorf("%w (state %q)", store.ErrCRNotOpen, "closed")}
 	tr := newTrackerWithMerger(s, repo.ID, m)
 
-	if _, err := tr.MergePull(ctx, 1); !errors.Is(err, tracker.ErrMergeRejected) {
+	if _, err := tr.MergePull(ctx, 1, tracker.MergeOptions{DeleteHead: true}); !errors.Is(err, tracker.ErrMergeRejected) {
 		t.Fatalf("MergePull on closed CR err = %v, want ErrMergeRejected", err)
+	}
+	if len(m.deleteHeads) != 0 {
+		t.Errorf("a closed-unmerged CR's head was deleted: %v", m.deleteHeads)
 	}
 }
 
@@ -1039,7 +1103,7 @@ func TestBuiltin_MergePull_gitRefusalIsRejected(t *testing.T) {
 	m := &fakeMerger{err: fmt.Errorf("%w: protected branch main", gitx.ErrPushRejected)}
 	tr := newTrackerWithMerger(s, repo.ID, m)
 
-	_, err := tr.MergePull(ctx, 1)
+	_, err := tr.MergePull(ctx, 1, tracker.MergeOptions{DeleteHead: true})
 	if !errors.Is(err, tracker.ErrMergeRejected) {
 		t.Fatalf("err = %v, want ErrMergeRejected", err)
 	}
@@ -1059,7 +1123,7 @@ func TestBuiltin_MergePull_internalErrorIsNotRejected(t *testing.T) {
 	m := &fakeMerger{err: errors.New("database is locked")}
 	tr := newTrackerWithMerger(s, repo.ID, m)
 
-	_, err := tr.MergePull(ctx, 1)
+	_, err := tr.MergePull(ctx, 1, tracker.MergeOptions{DeleteHead: true})
 	if err == nil {
 		t.Fatal("MergePull err = nil, want the internal error surfaced")
 	}
@@ -1076,7 +1140,7 @@ func TestBuiltin_MergePull_notFound(t *testing.T) {
 	m := &fakeMerger{err: fmt.Errorf("cr %s#9: %w", repo.ID, store.ErrNotFound)}
 	tr := newTrackerWithMerger(s, repo.ID, m)
 
-	if _, err := tr.MergePull(ctx, 9); !errors.Is(err, store.ErrNotFound) {
+	if _, err := tr.MergePull(ctx, 9, tracker.MergeOptions{DeleteHead: true}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
@@ -1090,7 +1154,7 @@ func TestBuiltin_MergePull_noServiceWiredFailsLoud(t *testing.T) {
 	repo := seedRepo(t, s)
 	tr := newTracker(s, repo.ID) // no Merger
 
-	_, err := tr.MergePull(ctx, 1)
+	_, err := tr.MergePull(ctx, 1, tracker.MergeOptions{DeleteHead: true})
 	if err == nil || errors.Is(err, tracker.ErrMergeRejected) {
 		t.Fatalf("err = %v, want a plain wiring error (not a merge rejection)", err)
 	}

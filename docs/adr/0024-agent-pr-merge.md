@@ -14,7 +14,7 @@ The pins, decided:
 
 ## Status
 
-Accepted. Extends ADR-0011 (which scoped merge to the operator/built-in surface; it gains a status pointer here) and ADR-0014's agent surface (`MergePull` joins `CreatePull`/`Pull`/`Pulls`). The reject → re-queue loop and `pr close`/`pr comment` stay out of scope, tracked separately.
+Accepted. Extends ADR-0011 (which scoped merge to the operator/built-in surface; it gains a status pointer here) and ADR-0014's agent surface (`MergePull` joins `CreatePull`/`Pull`/`Pulls`). The reject → re-queue loop and `pr close`/`pr comment` stay out of scope, tracked separately. The "head branch is never deleted on merge" pin (and the rejected option to delete it) is narrowed by [ADR-0081](0081-merge-deletes-head-ref-on-origin.md): once the merge is recorded, the merge deletes the head ref on origin behind the `merge_delete_head` setting, while the branch in the bare clone stays with guarded teardown and the sweep.
 
 ## Considered options
 

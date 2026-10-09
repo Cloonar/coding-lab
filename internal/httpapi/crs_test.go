@@ -14,6 +14,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -386,6 +387,75 @@ func TestCRMergeFastForwardEndToEnd(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+// originHasRef reports whether the fixture's bare origin carries ref.
+func (f *crRepoFixture) originHasRef(t *testing.T, ref string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+	cmd.Dir = f.origin
+	cmd.Env = append(os.Environ(), testutil.HermeticGitEnv(f.x.home)...)
+	return cmd.Run() == nil
+}
+
+// TestCRMergeDeletesHeadPerSetting pins the operator half of ADR-0081 (issue
+// #90): the route reads merge_delete_head via GetBool(key, true) and hands it
+// to the service, so with the setting at its default (no row → on) a merged
+// CR's PUSHED head is gone from origin and the response names it deleted;
+// with the setting "false" origin keeps the head and the response says
+// kept/"setting off". Either way the LOCAL head branch survives (teardown/the
+// sweep own it) and the {"cr"} envelope is unchanged.
+func TestCRMergeDeletesHeadPerSetting(t *testing.T) {
+	cases := []struct {
+		name        string
+		setting     string // "" = no row (the GetBool default applies)
+		wantOutcome string
+		wantReason  string
+		wantOnOrig  bool
+	}{
+		{"default on", "", tracker.HeadDeleted, "", false},
+		{"setting off", "false", tracker.HeadKept, tracker.HeadKeptSettingOff, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newCRServer(t)
+			f := newCRRepo(t, x, "proj", nil)
+			setAuthorIdentity(t, x, "Real Author", "real@example.invalid")
+			if tc.setting != "" {
+				if err := x.st.SetSetting(context.Background(), store.SettingMergeDeleteHead, tc.setting); err != nil {
+					t.Fatalf("SetSetting: %v", err)
+				}
+			}
+			head := f.addHead(t, "afk/1", func(dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+					t.Fatalf("write fix.txt: %v", err)
+				}
+			})
+			// The agent's `git push origin HEAD`: origin carries the head.
+			repoGitCmd(t, x.home, f.bare, "push", "-q", "origin", "refs/heads/afk/1:refs/heads/afk/1")
+			seedCR(t, x, f.repo.ID, "fix: wobble", "", "afk/1")
+
+			resp := x.do("POST", "/api/v1/repos/"+f.repo.ID+"/crs/1/merge", nil, csrfHeaders(x.ts.URL))
+			wantStatus(t, resp, http.StatusOK)
+			body := decodeBody(t, resp)
+			if cr, ok := body["cr"].(map[string]any); !ok || cr["state"] != store.CRStateMerged {
+				t.Fatalf("merge response = %v, want {cr: merged}", body)
+			}
+			hd, ok := body["head"].(map[string]any)
+			if !ok {
+				t.Fatalf("merge response = %v, want a head object", body)
+			}
+			if hd["outcome"] != tc.wantOutcome || hd["reason"] != tc.wantReason {
+				t.Errorf("head = %v, want outcome %q reason %q", hd, tc.wantOutcome, tc.wantReason)
+			}
+			if got := f.originHasRef(t, "refs/heads/afk/1"); got != tc.wantOnOrig {
+				t.Errorf("origin refs/heads/afk/1 present = %v, want %v", got, tc.wantOnOrig)
+			}
+			if sha := repoGitCmd(t, x.home, f.bare, "rev-parse", "refs/heads/afk/1"); sha != head {
+				t.Errorf("local head afk/1 = %q after merge, want it untouched at %s", sha, head)
+			}
+		})
+	}
+}
+
 // TestCRMergeCommitPathUsesRepoIdentity drives the non-fast-forward path
 // (origin's main advanced after the fork) and pins D15 measure 5: the merge
 // commit is authored with the repo's configured identity, which overrides
@@ -662,9 +732,11 @@ func TestAgentBuiltinPRCreateFullLoop(t *testing.T) {
 // builtin-bound repo entirely over the run-token agent surface: the agent's
 // POST /agent/v1/prs/{n}/merge lands the CR through the SAME crmerge service
 // the operator route uses (ff push here), closing every Closes #N and emitting
-// cr.changed/issue.changed; the head branch survives the merge (teardown/sweep
-// GCs it, not merge); and a re-merge is a convergent no-op success rather than
-// an error.
+// cr.changed/issue.changed; the LOCAL head branch survives the merge
+// (teardown/sweep GCs it, not merge — merge deletes at most the head on
+// ORIGIN, ADR-0081, and this head was never pushed, so it reads deleted); and
+// a re-merge is a convergent no-op success rather than an error, reporting the
+// head outcome truthfully again.
 func TestAgentBuiltinPRMergeFullLoop(t *testing.T) {
 	x := newCRServer(t)
 	f := newCRRepo(t, x, "proj", nil)
@@ -720,8 +792,15 @@ func TestAgentBuiltinPRMergeFullLoop(t *testing.T) {
 	waitForBusEvent(t, log, EventCRChanged)
 	waitForBusEvent(t, log, EventIssueChanged)
 
-	// The head branch still exists immediately after the merge — teardown/the
-	// sweep GCs a merged head, merge does not touch it (acceptance criterion).
+	// merge_delete_head defaults on (no row → GetBool's true): the never-pushed
+	// head is absent on origin, which IS "deleted" (ADR-0081).
+	if merged["head_outcome"] != tracker.HeadDeleted {
+		t.Errorf("head_outcome = %v, want %q", merged["head_outcome"], tracker.HeadDeleted)
+	}
+
+	// The LOCAL head branch still exists immediately after the merge —
+	// teardown/the sweep GCs a merged head, merge never touches the local
+	// branch (acceptance criterion).
 	if sha := repoGitCmd(t, x.home, f.bare, "rev-parse", "refs/heads/afk/1"); sha != head {
 		t.Fatalf("head branch afk/1 = %q after merge, want it still at %s", sha, head)
 	}
@@ -730,7 +809,11 @@ func TestAgentBuiltinPRMergeFullLoop(t *testing.T) {
 	// error (unlike the operator route's 409 — the agent land step is retried).
 	resp = doWith(t, http.DefaultClient, x.ts.URL, "POST", "/agent/v1/prs/1/merge", nil, auth)
 	wantStatus(t, resp, http.StatusOK)
-	if again := decodeBody(t, resp); again["state"] != store.CRStateMerged {
+	again := decodeBody(t, resp)
+	if again["state"] != store.CRStateMerged {
 		t.Fatalf("re-merge state = %v, want a convergent merged no-op", again["state"])
+	}
+	if again["head_outcome"] != tracker.HeadDeleted {
+		t.Errorf("re-merge head_outcome = %v, want %q (still absent on origin)", again["head_outcome"], tracker.HeadDeleted)
 	}
 }

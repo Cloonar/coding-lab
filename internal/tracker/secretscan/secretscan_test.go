@@ -159,8 +159,8 @@ func (r *recTracker) CreatePull(_ context.Context, head, base, title, body strin
 	r.pulls = append(r.pulls, pullCall{head, base, title, body})
 	return r.pullRet, nil
 }
-func (r *recTracker) MergePull(context.Context, int) (tracker.PullRef, error) {
-	return tracker.PullRef{}, nil
+func (r *recTracker) MergePull(context.Context, int, tracker.MergeOptions) (tracker.MergeResult, error) {
+	return tracker.MergeResult{}, nil
 }
 func (r *recTracker) Reviews(context.Context, int) ([]tracker.Review, error) { return nil, nil }
 func (r *recTracker) RerequestReview(context.Context, int) error             { return nil }

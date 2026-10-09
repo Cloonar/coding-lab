@@ -881,6 +881,48 @@ func TestAPI_SettingsDevImageFallback(t *testing.T) {
 	}
 }
 
+// merge_delete_head (issue #90, ADR-0081): seeded true and typed as a JSON bool
+// on GET; PATCH takes only a strict JSON bool — null (there is no inherit state
+// on a global-only knob), strings and numbers are 400s that write nothing.
+func TestAPI_SettingsMergeDeleteHead(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+	ctx := context.Background()
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if v, ok := got[store.SettingMergeDeleteHead].(bool); !ok || !v {
+		t.Errorf("seeded merge_delete_head = %v (%T), want the JSON bool true",
+			got[store.SettingMergeDeleteHead], got[store.SettingMergeDeleteHead])
+	}
+
+	for _, want := range []bool{false, true} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingMergeDeleteHead: want}, h)
+		wantStatus(t, resp, http.StatusOK)
+		got = settingsOf(t, decodeBody(t, resp))
+		if v, ok := got[store.SettingMergeDeleteHead].(bool); !ok || v != want {
+			t.Errorf("PATCH %v echoed %v (%T)", want, got[store.SettingMergeDeleteHead], got[store.SettingMergeDeleteHead])
+		}
+		if v, err := x.st.GetBool(ctx, store.SettingMergeDeleteHead, !want); err != nil || v != want {
+			t.Errorf("stored merge_delete_head = %v (%v), want %v", v, err, want)
+		}
+	}
+
+	for _, bad := range []any{nil, "true", 1} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{store.SettingMergeDeleteHead: bad}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		body := decodeBody(t, resp)
+		if body["error"] != "merge_delete_head must be a boolean" {
+			t.Errorf("PATCH %v error = %v, want %q", bad, body["error"], "merge_delete_head must be a boolean")
+		}
+		assertErrorField(t, body, store.SettingMergeDeleteHead)
+	}
+	if v, err := x.st.GetBool(ctx, store.SettingMergeDeleteHead, false); err != nil || !v {
+		t.Errorf("merge_delete_head after rejected PATCHes = %v (%v), want true", v, err)
+	}
+}
+
 // transcript_retention_days (issue #81): seeded 30 and typed as a JSON number
 // on GET; both bounds (0 = the off switch, 365 = the cap) PATCH and persist
 // where TranscriptRetentionDays reads them; one past either bound is a 400

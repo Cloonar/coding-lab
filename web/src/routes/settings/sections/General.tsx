@@ -1,7 +1,9 @@
-// Global settings › General (issues #198, #81, #85): the git author identity
-// commits use unless a repo overrides it, and how long ended runs keep their
-// transcript — a thin renderer over the form store. Every control edits a
-// draft; the page's save bar sends the changed ones (form.tsx, fields.ts).
+// Global settings › General (issues #198, #81, #85, #90): the git author
+// identity commits use unless a repo overrides it, how long ended runs keep
+// their transcript, and whether a merge deletes the PR/CR head branch on
+// origin (global only, no per-repo override; ADR-0081) — a thin renderer over
+// the form store. Every control edits a draft; the page's save bar sends the
+// changed ones (form.tsx, fields.ts).
 // Transcript retention is a whole number from 0 (keep none) to the server's
 // cap, checked at the field before anything is sent.
 //
@@ -13,7 +15,7 @@
 import { TRANSCRIPT_RETENTION_MAX_DAYS } from '../../../api';
 import BastionStatus from '../../../components/BastionStatus';
 import CredentialGatewayStatus from '../../../components/CredentialGatewayStatus';
-import { FieldGroup, TextField } from '../Field';
+import { FieldGroup, SwitchField, TextField } from '../Field';
 
 export default function GeneralSection() {
   return (
@@ -32,6 +34,12 @@ export default function GeneralSection() {
             name="transcript_retention_days"
             type="number"
             hint={`Ended runs keep their transcript for this many days; 0 keeps none (max ${TRANSCRIPT_RETENTION_MAX_DAYS}).`}
+          />
+        </FieldGroup>
+        <FieldGroup title="Merging">
+          <SwitchField
+            name="merge_delete_head"
+            hint="Deletes the PR/CR head branch on origin after a merge; local branches are unaffected."
           />
         </FieldGroup>
       </div>

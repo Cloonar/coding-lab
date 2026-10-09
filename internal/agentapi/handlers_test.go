@@ -6,10 +6,12 @@ package agentapi
 // flowing into cr_closes), and the 404/409/502 tracker error mapping.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,15 +32,17 @@ type fakeTracker struct {
 
 	createdPull   *pullArgs
 	pullRef       tracker.PullRef
-	mergeRef      tracker.PullRef   // returned by MergePull on success
-	merged        []int             // records MergePull arguments
-	reviews       []tracker.Review  // returned by Reviews
-	reviewsErr    error             // Reviews-only error (Pull can still succeed) — the pr-view partial-failure path
-	pullComments  []commentArgs     // records CommentPull arguments
-	rerequested   []int             // records RerequestReview arguments
-	rerequestErr  error             // RerequestReview-only error (CommentPull can still succeed) — the best-effort ping path
-	prComments    []tracker.Comment // returned by PullComments
-	prCommentsErr error             // PullComments-only error (Pull/Reviews can still succeed) — the pr-view partial-failure path
+	mergeRef      tracker.PullRef        // returned by MergePull on success
+	merged        []int                  // records MergePull arguments
+	mergeOpts     []tracker.MergeOptions // records MergePull options, parallel to merged
+	mergeHead     tracker.HeadResult     // head outcome returned by MergePull on success
+	reviews       []tracker.Review       // returned by Reviews
+	reviewsErr    error                  // Reviews-only error (Pull can still succeed) — the pr-view partial-failure path
+	pullComments  []commentArgs          // records CommentPull arguments
+	rerequested   []int                  // records RerequestReview arguments
+	rerequestErr  error                  // RerequestReview-only error (CommentPull can still succeed) — the best-effort ping path
+	prComments    []tracker.Comment      // returned by PullComments
+	prCommentsErr error                  // PullComments-only error (Pull/Reviews can still succeed) — the pr-view partial-failure path
 	pulls         []tracker.PullRef
 	pullDetails   []tracker.PullDetail
 	checks        []tracker.Check   // returned by Checks (with f.err)
@@ -156,12 +160,13 @@ func (f *fakeTracker) CreatePull(_ context.Context, head, base, title, body stri
 	f.createdPull = &pullArgs{head: head, base: base, title: title, body: body}
 	return f.pullRef, nil
 }
-func (f *fakeTracker) MergePull(_ context.Context, number int) (tracker.PullRef, error) {
+func (f *fakeTracker) MergePull(_ context.Context, number int, opts tracker.MergeOptions) (tracker.MergeResult, error) {
 	if f.err != nil {
-		return tracker.PullRef{}, f.err
+		return tracker.MergeResult{}, f.err
 	}
 	f.merged = append(f.merged, number)
-	return f.mergeRef, nil
+	f.mergeOpts = append(f.mergeOpts, opts)
+	return tracker.MergeResult{PullRef: f.mergeRef, Head: f.mergeHead}, nil
 }
 func (f *fakeTracker) Reviews(context.Context, int) ([]tracker.Review, error) {
 	if f.reviewsErr != nil {
@@ -1156,7 +1161,7 @@ func TestPRMerge_forge(t *testing.T) {
 	fk := &fakeTracker{mergeRef: tracker.PullRef{
 		Number: 9, HeadBranch: "afk/9", State: tracker.PullMerged,
 		URL: "https://git.example.com/o/r/pulls/9",
-	}}
+	}, mergeHead: tracker.HeadResult{Outcome: tracker.HeadDeleted}}
 	rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/merge", token, "")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("merge: status = %d, body %s", rr.Code, rr.Body.String())
@@ -1165,7 +1170,7 @@ func TestPRMerge_forge(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := prMergeResponse{Number: 9, State: "merged", Head: "afk/9", URL: "https://git.example.com/o/r/pulls/9"}
+	want := prMergeResponse{Number: 9, State: "merged", Head: "afk/9", URL: "https://git.example.com/o/r/pulls/9", HeadOutcome: "deleted"}
 	if got != want {
 		t.Errorf("merge response = %+v, want %+v", got, want)
 	}
@@ -1190,6 +1195,102 @@ func TestPRMerge_forge(t *testing.T) {
 		t.Fatalf("unknown merge: status = %d, want 404 (body %s)", rr.Code, rr.Body.String())
 	}
 }
+
+// TestPRMerge_headOutcome pins the ADR-0081 head-branch contract of the merge
+// handler: the response carries the tracker's head outcome and reason under the
+// exact wire names head_outcome / head_reason (head_reason omitted when empty);
+// the merge_delete_head setting is read via GetBool(key, true) and handed to
+// MergePull as DeleteHead — default (no row) true, an explicit "false" row
+// false, a garbled row an internal error BEFORE anything is merged; and a
+// failed delete is still a 200 (the merge landed) logged at warn with repo, PR
+// number and head.
+func TestPRMerge_headOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		setting    *string // nil = no row (the default applies)
+		head       tracker.HeadResult
+		wantDelete bool
+		wantReason string
+	}{
+		{"default on, deleted", nil, tracker.HeadResult{Outcome: tracker.HeadDeleted}, true, ""},
+		{"explicit true, deleted", ptr("true"), tracker.HeadResult{Outcome: tracker.HeadDeleted}, true, ""},
+		{"setting off, kept", ptr("false"), tracker.HeadResult{Outcome: tracker.HeadKept, Reason: tracker.HeadKeptSettingOff}, false, "setting off"},
+		{"fork guard, kept", nil, tracker.HeadResult{Outcome: tracker.HeadKept, Reason: "head lives in alice/r"}, true, "head lives in alice/r"},
+		{"delete failed", nil, tracker.HeadResult{Outcome: tracker.HeadFailed, Reason: "Reference update failed"}, true, "Reference update failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.seedRepoBinding(t, "repo_h", "forge", "forgejo")
+			f.seedRunKind(t, "run_h", "repo_h", "afk_auto", "active", intp(9), "afk/9")
+			token := f.seedToken(t, "run_h", nil)
+			if tc.setting != nil {
+				if err := f.st.SetSetting(context.Background(), store.SettingMergeDeleteHead, *tc.setting); err != nil {
+					t.Fatalf("set setting: %v", err)
+				}
+			}
+			fk := &fakeTracker{
+				mergeRef:  tracker.PullRef{Number: 9, HeadBranch: "afk/9", State: tracker.PullMerged, URL: "https://git.example.com/o/r/pulls/9"},
+				mergeHead: tc.head,
+			}
+			var logs bytes.Buffer
+			srv := f.forgeServer(fk)
+			srv.log = slog.New(slog.NewJSONHandler(&logs, nil))
+
+			rr := doJSON(t, srv.Handler(), "POST", "/agent/v1/prs/9/merge", token, "")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 even on a failed delete (body %s)", rr.Code, rr.Body.String())
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			for k, want := range map[string]any{"number": float64(9), "state": "merged", "head": "afk/9",
+				"url": "https://git.example.com/o/r/pulls/9", "head_outcome": tc.head.Outcome} {
+				if raw[k] != want {
+					t.Errorf("response[%q] = %v, want %v", k, raw[k], want)
+				}
+			}
+			reason, hasReason := raw["head_reason"]
+			if tc.wantReason == "" && hasReason {
+				t.Errorf("head_reason = %v, want it omitted", reason)
+			}
+			if tc.wantReason != "" && reason != tc.wantReason {
+				t.Errorf("head_reason = %v, want %q", reason, tc.wantReason)
+			}
+			if len(fk.mergeOpts) != 1 || fk.mergeOpts[0].DeleteHead != tc.wantDelete {
+				t.Errorf("MergePull opts = %+v, want one call with DeleteHead=%v", fk.mergeOpts, tc.wantDelete)
+			}
+			warned := strings.Contains(logs.String(), `"level":"WARN"`) &&
+				strings.Contains(logs.String(), `"repo":"repo_h"`) &&
+				strings.Contains(logs.String(), `"pr":9`) &&
+				strings.Contains(logs.String(), `"head":"afk/9"`)
+			if failed := tc.head.Outcome == tracker.HeadFailed; warned != failed {
+				t.Errorf("warn log with repo/pr/head = %v, want %v (logs: %s)", warned, failed, logs.String())
+			}
+		})
+	}
+
+	t.Run("garbled setting is a 500 before the merge", func(t *testing.T) {
+		f := newFixture(t)
+		f.seedRepoBinding(t, "repo_h", "forge", "forgejo")
+		f.seedRunKind(t, "run_h", "repo_h", "afk_auto", "active", intp(9), "afk/9")
+		token := f.seedToken(t, "run_h", nil)
+		if err := f.st.SetSetting(context.Background(), store.SettingMergeDeleteHead, "banana"); err != nil {
+			t.Fatalf("set setting: %v", err)
+		}
+		fk := &fakeTracker{mergeRef: tracker.PullRef{Number: 9, State: tracker.PullMerged}}
+		rr := doJSON(t, f.forgeServer(fk).Handler(), "POST", "/agent/v1/prs/9/merge", token, "")
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500 (body %s)", rr.Code, rr.Body.String())
+		}
+		if len(fk.merged) != 0 {
+			t.Errorf("MergePull called %v despite an unreadable setting, want no merge", fk.merged)
+		}
+	})
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func TestPRViewAndList_forge(t *testing.T) {
 	f := newFixture(t)

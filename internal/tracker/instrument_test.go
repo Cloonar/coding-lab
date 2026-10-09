@@ -33,10 +33,12 @@ func (f failingTracker) CheckLog(context.Context, int, string) (CheckLogResult, 
 func (f failingTracker) CreatePull(context.Context, string, string, string, string) (PullRef, error) {
 	return PullRef{}, f.err
 }
-func (f failingTracker) MergePull(context.Context, int) (PullRef, error) { return PullRef{}, f.err }
-func (f failingTracker) Reviews(context.Context, int) ([]Review, error)  { return nil, f.err }
-func (f failingTracker) RerequestReview(context.Context, int) error      { return f.err }
-func (f failingTracker) CommentPull(context.Context, int, string) error  { return f.err }
+func (f failingTracker) MergePull(context.Context, int, MergeOptions) (MergeResult, error) {
+	return MergeResult{}, f.err
+}
+func (f failingTracker) Reviews(context.Context, int) ([]Review, error) { return nil, f.err }
+func (f failingTracker) RerequestReview(context.Context, int) error     { return f.err }
+func (f failingTracker) CommentPull(context.Context, int, string) error { return f.err }
 func (f failingTracker) PullComments(context.Context, int) ([]Comment, error) {
 	return nil, f.err
 }
@@ -100,7 +102,7 @@ func driveAll(t *testing.T, trk Tracker) {
 	_, _ = trk.Checks(ctx, 1)
 	_, _ = trk.CheckLog(ctx, 1, "ci/build")
 	_, _ = trk.CreatePull(ctx, "afk/1", "main", "t", "b")
-	_, _ = trk.MergePull(ctx, 1)
+	_, _ = trk.MergePull(ctx, 1, MergeOptions{})
 	_, _ = trk.Reviews(ctx, 1)
 	_ = trk.RerequestReview(ctx, 1)
 	_ = trk.CommentPull(ctx, 1, "body")

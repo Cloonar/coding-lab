@@ -97,6 +97,7 @@ export function baseSettings(): Record<string, unknown> {
     git_author_name: '',
     git_author_email: '',
     transcript_retention_days: 30,
+    merge_delete_head: true,
     runner_default: 'host',
     dev_image_default: '',
     dev_image_fallback: '',

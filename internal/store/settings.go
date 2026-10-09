@@ -149,6 +149,16 @@ const (
 	// so shortening the window applies retroactively at the next reconcile
 	// sweep — intended. Read through TranscriptRetentionDays.
 	SettingTranscriptRetentionDays = "transcript_retention_days"
+
+	// SettingMergeDeleteHead (issue #90, ADR-0081): when "true", a merge —
+	// `labctl pr merge` or the operator CR merge route — deletes the PR/CR
+	// head branch on ORIGIN once the merge is durably recorded; local
+	// branches stay with guarded teardown and the sweep. Global only, no
+	// per-repo override. Seeded "true"; read in exactly two places (the agent
+	// merge handler and the operator merge route) via GetBool(key, true) —
+	// the tracker adapters never read settings, they take
+	// tracker.MergeOptions.
+	SettingMergeDeleteHead = "merge_delete_head"
 )
 
 // Transcript retention bounds (issue #81) — the ONE source shared by the seed,
@@ -338,6 +348,9 @@ func (s *Store) TranscriptRetentionDays(ctx context.Context) (int, error) {
 // container — survives re-seeding untouched. transcript_retention_days
 // (issue #81) is seeded DefaultTranscriptRetentionDays on the same
 // insert-if-absent footing: an operator's 0 (off) or 365 is never reset.
+// merge_delete_head (issue #90, ADR-0081) is a boolean knob, so it states its
+// "true" default out loud like spawn_remote_default; an operator's "false"
+// survives re-seeding.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
@@ -357,6 +370,8 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingRunnerDefault:        RunnerHost,
 
 		SettingTranscriptRetentionDays: strconv.Itoa(DefaultTranscriptRetentionDays),
+
+		SettingMergeDeleteHead: "true",
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

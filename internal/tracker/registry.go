@@ -78,9 +78,14 @@ var (
 // and no cycle forms. Merge lands the repo's open CR `number` and returns the
 // merged row; a non-open CR yields the current row plus store.ErrCRNotOpen so
 // the caller can decide whether an already-merged CR is a convergent success
-// (the agent seam) or a conflict (the operator route).
+// (the agent seam) or a conflict (the operator route). With opts.DeleteHead,
+// a successful Merge deletes the head ref on origin after the row is recorded
+// and reports the outcome (ADR-0081); DeleteHead alone runs that same
+// best-effort origin delete for an already-merged CR's head, so the agent
+// seam's convergent re-merge reports a truthful outcome too.
 type CRMerger interface {
-	Merge(ctx context.Context, repoID string, number int) (store.CR, error)
+	Merge(ctx context.Context, repoID string, number int, opts MergeOptions) (store.CR, HeadResult, error)
+	DeleteHead(ctx context.Context, repoID, head string) HeadResult
 }
 
 // BuiltinConfig is everything the store-backed tracker needs for one repo.
