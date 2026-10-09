@@ -1,540 +1,324 @@
-// Global settings › Runner coverage (issue #55): the fourth section, mirroring
-// the repo-settings Runner section — Runner, Dev image and Container limits
-// cards in one form, each saved through the settings PATCH as a
-// dirty-fields-only body, server 400s in the section banner. The Runner card's
-// inheriting-repo count and its one switch-to-host confirmation, and the Dev
-// image card's blank-field fallback hint, are the section's own behavior.
-// Mounted at /settings/runner.
+// Global settings › Runner (issues #55, #205, #85): the Runner pick (the repo
+// page's two picks, no inherit segment) with the unsandboxed-host warning and
+// the inheriting-repo count line; Dev image, whose hint names what a blank
+// falls through to; Container limits. Nothing folds: Dev image and the limits
+// show whatever the Runner is, and the note says they apply to container runs,
+// including repos pinned to container.
+//
+// Switching the default TO host asks at Save, in an in-page dialog naming the
+// inheriting repos: Cancel sends nothing and keeps every edit, Switch to host
+// saves the whole pending patch. A switch to container never asks, and
+// neither does any other Save — the leave dialog's "Save and leave" asks too.
 
 import { describe, expect, it, vi } from 'vitest';
 import {
-  cardByHeading,
-  chooseFromSelect,
   container,
+  dialogButton,
+  fieldError,
+  fieldHint,
   h,
+  history,
   input,
   installSettingsHooks,
-  mountAt,
-  optionRows,
+  leaveToOther,
+  mountPage,
+  openDialog,
+  pageSection,
+  pick,
   repoWithRunner,
-  selectTrigger,
-  selectedLabel,
+  save,
+  saveBar,
+  saveBarTitle,
+  segmentLabels,
+  segmentValue,
   settle,
-  submitForm,
-  typeInto,
-  waitFor,
+  toastText,
+  typeField,
 } from '../harness';
 
 installSettingsHooks();
 
-const HOST_LABEL = 'Host — unsandboxed, full host access';
-const CONTAINER_LABEL = 'Container — rootless podman';
-const FALLBACK = 'ghcr.io/cloonar/dev:1.4@sha256:0123456789abcdef';
+const runnerText = (): string => pageSection('runner').textContent ?? '';
+const hostWarning = (): Element | null =>
+  pageSection('runner').querySelector('.banner') as Element | null;
 
-/** The stored settings of a fresh install after the Runner slice: host default,
- *  no global dev image, the three seeded limits, and the read-only fallback. */
-function seed(over: Record<string, unknown> = {}): void {
-  h.settingsOnServer = {
-    runner_default: 'host',
-    dev_image_default: '',
-    dev_image_fallback: '',
-    container_memory: '8g',
-    container_pids: 4096,
-    container_nofile: 16384,
-    ...over,
-  };
+function inheriting(count: number): void {
+  h.reposOnServer = [
+    ...Array.from({ length: count }, (_, i) => repoWithRunner(`inherits-${i}`, null)),
+    repoWithRunner('pinned', 'container'),
+  ];
 }
 
-async function mountRunner(): Promise<void> {
-  await mountAt('/settings/runner');
-  await waitFor(() => container.querySelector('button[name="runner_default"]'), 'runner select');
-}
-
-const text = () => container.textContent ?? '';
-
-/** The Dev image card's field hint — the `.hint` directly under the input. */
-const imageHint = () =>
-  container.querySelector<HTMLElement>('input[name="dev_image_default"] + small.hint')
-    ?.textContent ?? '';
-
-describe('Settings runner section — structure', () => {
-  it('renders the Runner, Dev image and Container limits cards in that order with one Save button', async () => {
-    seed();
-    await mountRunner();
-
-    const headings = Array.from(container.querySelectorAll('section.card h2')).map(
-      (el) => el.textContent,
+describe('Runner: the pick', () => {
+  it("offers the repo page's two picks, with no inherit segment", async () => {
+    await mountPage();
+    expect(segmentLabels('runner_default')).toEqual(['Container', 'Host']);
+    expect(segmentValue('runner_default')).toBe('host');
+    expect(fieldHint('runner_default')).toBe(
+      'Where sessions run for every repo that inherits the default. A repo can pin its own.',
     );
-    expect(headings).toEqual(['Runner', 'Dev image', 'Container limits']);
-
-    // One form, one submit button.
-    expect(container.querySelectorAll('form')).toHaveLength(1);
-    const submits = Array.from(container.querySelectorAll('button[type="submit"]'));
-    expect(submits.map((b) => b.textContent?.trim())).toEqual(['Save settings']);
-
-    // Each field lives in its own card.
-    expect(cardByHeading('Runner').querySelector('button[name="runner_default"]')).not.toBeNull();
-    expect(
-      cardByHeading('Dev image').querySelector('input[name="dev_image_default"]'),
-    ).not.toBeNull();
-    const limits = cardByHeading('Container limits');
-    for (const name of ['container_memory', 'container_pids', 'container_nofile']) {
-      expect(limits.querySelector(`input[name="${name}"]`)).not.toBeNull();
-    }
   });
 
-  it('seeds every field from the stored settings', async () => {
-    seed({
-      runner_default: 'container',
-      dev_image_default: 'docker.io/library/debian:bookworm@sha256:abc',
-      container_memory: '4g',
-      container_pids: 2048,
-      container_nofile: 8192,
-    });
-    await mountRunner();
+  it('warns about host runs only while Host is drafted', async () => {
+    await mountPage();
+    expect(hostWarning()?.textContent).toContain('Host runs are unsandboxed');
 
-    expect(selectedLabel('runner_default')).toBe(CONTAINER_LABEL);
-    expect(input('dev_image_default').value).toBe('docker.io/library/debian:bookworm@sha256:abc');
-    expect(input('container_memory').value).toBe('4g');
-    expect(input('container_pids').value).toBe('2048');
-    expect(input('container_nofile').value).toBe('8192');
+    await pick('runner_default', 'container');
+    expect(hostWarning()).toBeNull();
+    await pick('runner_default', 'host');
+    expect(hostWarning()).not.toBeNull();
   });
 
-  it('a clean submit notes "Nothing to save." and never PATCHes', async () => {
-    seed();
-    await mountRunner();
-
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([]);
-    expect(text()).toContain('Nothing to save.');
-  });
-});
-
-describe('Settings runner section — Runner card', () => {
-  it('offers the same two options and labels as the repo page, with no inherit row', async () => {
-    seed();
-    await mountRunner();
-
-    selectTrigger('runner_default').click();
-    await settle();
-
-    expect(optionRows().map((r) => r.querySelector('.select-option-label')?.textContent)).toEqual([
-      CONTAINER_LABEL,
-      HOST_LABEL,
-    ]);
+  it('says how many repos inherit the default — plural, singular, none', async () => {
+    inheriting(3);
+    await mountPage();
+    expect(runnerText()).toContain('3 repos inherit this default.');
   });
 
-  it('shows the unsandboxed hint only while Host is selected', async () => {
-    seed({ runner_default: 'container' });
-    await mountRunner();
-    expect(text()).not.toContain('Host runs are unsandboxed');
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    expect(text()).toContain(
-      'Host runs are unsandboxed — the agent has full host access to the server.',
-    );
-
-    await chooseFromSelect('runner_default', CONTAINER_LABEL);
-    expect(text()).not.toContain('Host runs are unsandboxed');
-  });
-
-  it('states how many repos inherit the default (plural)', async () => {
-    seed();
-    h.reposOnServer = [
-      repoWithRunner('a', null),
-      repoWithRunner('b', null),
-      repoWithRunner('c', null),
-      repoWithRunner('d', 'host'),
-      repoWithRunner('e', 'container'),
-    ];
-    await mountRunner();
-
-    expect(text()).toContain('3 repos inherit this default.');
-  });
-
-  it('states the singular for one inheriting repo', async () => {
-    seed();
-    h.reposOnServer = [repoWithRunner('a', null), repoWithRunner('b', 'host')];
-    await mountRunner();
-
-    expect(text()).toContain('1 repo inherits this default.');
+  it('says it in the singular for one repo', async () => {
+    inheriting(1);
+    await mountPage();
+    expect(runnerText()).toContain('1 repo inherits this default.');
   });
 
   it('says so when no repo inherits the default', async () => {
-    seed();
-    h.reposOnServer = [repoWithRunner('a', 'host'), repoWithRunner('b', 'container')];
-    await mountRunner();
-
-    expect(text()).toContain('No repos inherit this default.');
+    inheriting(0);
+    await mountPage();
+    expect(runnerText()).toContain('No repos inherit this default.');
   });
 
-  it('omits the count line and still saves when the repo list cannot be fetched', async () => {
-    seed({ runner_default: 'host' });
+  it('leaves the line out when the repo list cannot be loaded', async () => {
     h.reposError = true;
-    await mountRunner();
-
-    expect(text()).not.toContain('inherit this default');
-    expect(text()).not.toContain('inherits this default');
-
-    await chooseFromSelect('runner_default', CONTAINER_LABEL);
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ runner_default: 'container' }]);
-  });
-
-  it('switching to Host asks one confirmation naming the inheriting repo count, then saves', async () => {
-    seed({ runner_default: 'container' });
-    h.reposOnServer = [
-      repoWithRunner('a', null),
-      repoWithRunner('b', null),
-      repoWithRunner('c', null),
-      repoWithRunner('d', 'container'),
-    ];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    // Picking is not saving: no prompt yet.
-    expect(confirm).not.toHaveBeenCalled();
-
-    submitForm();
-    await settle();
-
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm).toHaveBeenCalledWith(
-      'Switch the global runner default to Host? 3 repos inherit it and their next sessions will run unsandboxed with full host access.',
-    );
-    expect(h.patchBodies).toEqual([{ runner_default: 'host' }]);
-    expect(h.settingsOnServer.runner_default).toBe('host');
-  });
-
-  it('names a single inheriting repo in the singular', async () => {
-    seed({ runner_default: 'container' });
-    h.reposOnServer = [repoWithRunner('a', null)];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    submitForm();
-    await settle();
-
-    expect(confirm).toHaveBeenCalledWith(
-      'Switch the global runner default to Host? 1 repo inherits it and its next session will run unsandboxed with full host access.',
-    );
-  });
-
-  it('still asks, without a number, when the repo list could not be fetched', async () => {
-    seed({ runner_default: 'container' });
-    h.reposError = true;
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    submitForm();
-    await settle();
-
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm).toHaveBeenCalledWith(
-      'Switch the global runner default to Host? Repos that inherit it will run their next sessions unsandboxed with full host access.',
-    );
-    expect(h.patchBodies).toEqual([{ runner_default: 'host' }]);
-  });
-
-  it('cancelling the confirmation saves nothing — not even other dirty fields — and keeps the drafts', async () => {
-    seed({ runner_default: 'container' });
-    h.reposOnServer = [repoWithRunner('a', null)];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    typeInto(input('container_memory'), '4g');
-    submitForm();
-    await settle();
-
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(h.patchBodies).toEqual([]);
-    expect(text()).not.toContain('Saved.');
-    // Nothing was refetched/remounted: the operator's edits are still there.
-    expect(selectedLabel('runner_default')).toBe(HOST_LABEL);
-    expect(input('container_memory').value).toBe('4g');
-  });
-
-  it('switching to Container never asks for confirmation', async () => {
-    seed({ runner_default: 'host' });
-    h.reposOnServer = [repoWithRunner('a', null), repoWithRunner('b', null)];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', CONTAINER_LABEL);
-    submitForm();
-    await settle();
-
-    expect(confirm).not.toHaveBeenCalled();
-    expect(h.patchBodies).toEqual([{ runner_default: 'container' }]);
-  });
-
-  it('saving another field while the default is already Host does not ask', async () => {
-    seed({ runner_default: 'host' });
-    h.reposOnServer = [repoWithRunner('a', null)];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await mountRunner();
-
-    typeInto(input('container_memory'), '4g');
-    submitForm();
-    await settle();
-
-    expect(confirm).not.toHaveBeenCalled();
-    expect(h.patchBodies).toEqual([{ container_memory: '4g' }]);
-  });
-
-  it('a server 400 on the runner default shows in the section banner', async () => {
-    seed({ runner_default: 'container' });
-    h.patchError = 'runner_default must be "host" or "container"';
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await mountRunner();
-
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    submitForm();
-    await settle();
-
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'runner_default must be "host" or "container"',
-    );
-    expect(selectedLabel('runner_default')).toBe(HOST_LABEL);
+    await mountPage();
+    expect(runnerText()).not.toContain('inherit this default');
+    expect(runnerText()).not.toContain('inherits this default');
   });
 });
 
-describe('Settings runner section — Dev image card', () => {
-  it('names the deployed image in the hint while the field is blank', async () => {
-    seed({ dev_image_default: '', dev_image_fallback: FALLBACK });
-    await mountRunner();
-
-    expect(imageHint()).toContain(`Blank uses the deployed image ${FALLBACK}`);
-    // The ref is rendered as code, not prose.
-    expect(
-      container.querySelector('input[name="dev_image_default"] + small.hint code')?.textContent,
-    ).toBe(FALLBACK);
+describe('Runner: dev image and container limits never fold', () => {
+  it('shows them with Host as with Container, saying whom they apply to', async () => {
+    await mountPage();
+    for (const runner of ['host', 'container']) {
+      await pick('runner_default', runner);
+      for (const key of [
+        'dev_image_default',
+        'container_memory',
+        'container_pids',
+        'container_nofile',
+      ]) {
+        expect(container.querySelector(`[data-field="${key}"]`)).not.toBeNull();
+      }
+      expect(runnerText()).toContain(
+        'The dev image and the container limits apply to container runs — including repos pinned to container while the default is Host.',
+      );
+    }
+    expect(runnerText()).not.toContain('Show anyway');
   });
 
-  it('says no image is configured when the fallback is empty too', async () => {
-    seed({ dev_image_default: '', dev_image_fallback: '' });
-    await mountRunner();
+  it('seeds the limits from the stored settings', async () => {
+    await mountPage();
+    expect(input('container_memory').value).toBe('8g');
+    expect(input('container_pids').value).toBe('4096');
+    expect(input('container_nofile').value).toBe('16384');
+  });
 
-    expect(imageHint()).toContain(
+  it('names the deployed image while the dev image is blank, and the pinning once one is typed', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, dev_image_fallback: 'ghcr.io/lab/dev:full' };
+    await mountPage();
+    expect(fieldHint('dev_image_default')).toBe(
+      'Blank uses the deployed image ghcr.io/lab/dev:full.',
+    );
+    expect(container.querySelector('[data-field="dev_image_fallback"]')).toBeNull();
+
+    await typeField('dev_image_default', 'ghcr.io/acme/dev:1');
+    expect(fieldHint('dev_image_default')).toBe('Resolved and pinned to a digest on save.');
+
+    await typeField('dev_image_default', '');
+    expect(fieldHint('dev_image_default')).toContain('Blank uses the deployed image');
+  });
+
+  it('says no image is configured when there is no fallback either', async () => {
+    await mountPage();
+    expect(fieldHint('dev_image_default')).toBe(
       'No dev image is configured — container spawns are refused until one is set here, per repo, or on the server.',
     );
-    expect(imageHint()).not.toContain('Blank uses the deployed image');
   });
 
-  it('treats an absent dev_image_default like a blank one', async () => {
-    h.settingsOnServer = { runner_default: 'host', dev_image_fallback: FALLBACK };
-    await mountRunner();
+  it('a typed image ref is sent trimmed; clearing a stored one sends ""', async () => {
+    await mountPage();
+    await typeField('dev_image_default', '  ghcr.io/acme/dev:1  ');
+    await save();
+    expect(h.patchBodies).toEqual([{ dev_image_default: 'ghcr.io/acme/dev:1' }]);
 
-    expect(input('dev_image_default').value).toBe('');
-    expect(imageHint()).toContain(`Blank uses the deployed image ${FALLBACK}`);
+    await typeField('dev_image_default', '');
+    await save();
+    expect(h.patchBodies.at(-1)).toEqual({ dev_image_default: '' });
   });
 
-  it('drops the fallback hint while the field has a value and brings it back when cleared', async () => {
-    seed({ dev_image_fallback: FALLBACK });
-    await mountRunner();
-    expect(imageHint()).toContain('Blank uses the deployed image');
-
-    typeInto(input('dev_image_default'), 'docker.io/library/debian:bookworm');
-    await settle();
-    expect(imageHint()).not.toContain('Blank uses the deployed image');
-    expect(imageHint()).not.toContain(FALLBACK);
-    expect(imageHint()).toContain('Resolved and pinned to a digest on save.');
-
-    // Whitespace alone is still blank.
-    typeInto(input('dev_image_default'), '   ');
-    await settle();
-    expect(imageHint()).toContain(`Blank uses the deployed image ${FALLBACK}`);
-  });
-
-  it('shows no fallback hint when the stored default is set', async () => {
-    seed({
-      dev_image_default: 'docker.io/library/debian:bookworm@sha256:abc',
-      dev_image_fallback: FALLBACK,
-    });
-    await mountRunner();
-
-    expect(imageHint()).not.toContain('Blank uses the deployed image');
-    expect(imageHint()).not.toContain('No dev image is configured');
-  });
-
-  it('never shows the fallback as its own field or row', async () => {
-    seed({ dev_image_fallback: FALLBACK });
-    await mountRunner();
-
-    expect(container.querySelector('input[name="dev_image_fallback"]')).toBeNull();
-    const values = Array.from(container.querySelectorAll('input')).map((el) => el.value);
-    expect(values).not.toContain(FALLBACK);
-    expect(container.querySelectorAll('section.card')).toHaveLength(3);
-  });
-
-  it('typing an image ref PATCHes dev_image_default alone, trimmed', async () => {
-    seed({ dev_image_fallback: FALLBACK });
-    await mountRunner();
-
-    typeInto(input('dev_image_default'), '  docker.io/library/debian:bookworm ');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ dev_image_default: 'docker.io/library/debian:bookworm' }]);
-  });
-
-  it('clearing a stored image PATCHes an empty string', async () => {
-    seed({ dev_image_default: 'docker.io/library/debian:bookworm@sha256:abc' });
-    await mountRunner();
-
-    typeInto(input('dev_image_default'), '');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ dev_image_default: '' }]);
-    expect(h.settingsOnServer.dev_image_default).toBe('');
-  });
-
-  it('never sends dev_image_fallback in a PATCH, whatever else is saved', async () => {
-    seed({ dev_image_fallback: FALLBACK, runner_default: 'container' });
-    h.reposOnServer = [repoWithRunner('a', null)];
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await mountRunner();
-
-    // Dirty every field of the section at once.
-    await chooseFromSelect('runner_default', HOST_LABEL);
-    typeInto(input('dev_image_default'), 'docker.io/library/debian:bookworm');
-    typeInto(input('container_memory'), '4g');
-    typeInto(input('container_pids'), '2048');
-    typeInto(input('container_nofile'), '8192');
-    submitForm();
-    await settle();
-
+  it('edits all three limits in one PATCH', async () => {
+    await mountPage();
+    await typeField('container_memory', '4g');
+    await typeField('container_pids', '512');
+    await typeField('container_nofile', '2048');
+    await save();
     expect(h.patchBodies).toEqual([
-      {
-        runner_default: 'host',
-        dev_image_default: 'docker.io/library/debian:bookworm',
-        container_memory: '4g',
-        container_pids: 2048,
-        container_nofile: 8192,
-      },
+      { container_memory: '4g', container_pids: 512, container_nofile: 2048 },
     ]);
-    for (const body of h.patchBodies) expect(body).not.toHaveProperty('dev_image_fallback');
-    // And the server stub (which 400s a read-only key) accepted the save.
-    expect(text()).not.toContain('read-only');
   });
 
-  it('a server 400 on the image ref shows in the section banner and keeps the draft', async () => {
-    seed();
-    h.patchError = 'resolve docker.io/nope/nothing:1: manifest unknown';
-    await mountRunner();
+  it('a blank memory limit and a zero process limit are problems at their fields', async () => {
+    await mountPage();
+    await typeField('container_memory', ' ');
+    await typeField('container_pids', '0');
+    await save();
 
-    typeInto(input('dev_image_default'), 'docker.io/nope/nothing:1');
-    submitForm();
-    await settle();
+    expect(h.patchBodies).toEqual([]);
+    expect(fieldError('container_memory')).toBe('Enter a memory limit, for example 8g.');
+    expect(fieldError('container_pids')).toBe('Use a whole number, 1 or more.');
+    expect(saveBarTitle()).toBe('2 problems to fix');
+  });
 
-    expect(h.patchBodies).toEqual([{ dev_image_default: 'docker.io/nope/nothing:1' }]);
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'resolve docker.io/nope/nothing:1: manifest unknown',
-    );
-    expect(input('dev_image_default').value).toBe('docker.io/nope/nothing:1');
+  it("a bad memory grammar is the server's call, shown at the field", async () => {
+    await mountPage();
+    await typeField('container_memory', 'lots');
+    h.patchRefusal = {
+      error: 'container_memory must look like a podman --memory value, e.g. "8g"',
+      field: 'container_memory',
+    };
+    await save();
+
+    expect(fieldError('container_memory')).toContain('podman --memory');
+    expect(input('container_memory').value).toBe('lots');
   });
 });
 
-describe('Settings runner section — Container limits card', () => {
-  it('edits all three limits in one PATCH', async () => {
-    seed();
-    await mountRunner();
+describe('Runner: switching the default to host', () => {
+  async function mountOnContainer(count = 2): Promise<void> {
+    inheriting(count);
+    h.settingsOnServer = { ...h.settingsOnServer, runner_default: 'container' };
+    await mountPage();
+  }
 
-    typeInto(input('container_memory'), '512m');
-    typeInto(input('container_pids'), '2048');
-    typeInto(input('container_nofile'), '8192');
-    submitForm();
-    await settle();
+  it('Save asks in an in-page dialog naming the inheriting repos, before sending anything', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    await mountOnContainer(2);
+    await pick('runner_default', 'host');
 
-    expect(h.patchBodies).toEqual([
-      { container_memory: '512m', container_pids: 2048, container_nofile: 8192 },
+    await save();
+
+    const dialog = openDialog();
+    expect(dialog?.getAttribute('role')).toBe('alertdialog');
+    expect(dialog?.querySelector('.dialog-title')?.textContent).toBe(
+      'Switch the global runner default to Host?',
+    );
+    expect(dialog?.textContent).toContain(
+      '2 repos inherit it and their next sessions will run unsandboxed with full host access.',
+    );
+    expect(Array.from(dialog?.querySelectorAll('button') ?? []).map((b) => b.textContent)).toEqual([
+      'Cancel',
+      'Switch to host',
     ]);
-    expect(h.settingsOnServer.container_memory).toBe('512m');
-    expect(h.settingsOnServer.container_pids).toBe(2048);
-    expect(h.settingsOnServer.container_nofile).toBe(8192);
-  });
-
-  it('sends only the limits that were edited', async () => {
-    seed();
-    await mountRunner();
-
-    typeInto(input('container_pids'), '1024');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ container_pids: 1024 }]);
-  });
-
-  it('shows concrete values, not an inherit hint', async () => {
-    seed();
-    await mountRunner();
-
-    expect(cardByHeading('Container limits').textContent).not.toContain('Inherit global default');
-  });
-
-  it('a blank whole-number limit is a client-side error and sends nothing', async () => {
-    seed();
-    await mountRunner();
-
-    typeInto(input('container_pids'), '');
-    submitForm();
-    await settle();
-
+    expect(document.activeElement).toBe(dialogButton('Cancel'));
     expect(h.patchBodies).toEqual([]);
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'Container PID limit must be a whole number.',
-    );
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
 
-    typeInto(input('container_pids'), '4096');
-    typeInto(input('container_nofile'), '');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([]);
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'Container open-files limit must be a whole number.',
+  it('names one inheriting repo in the singular', async () => {
+    await mountOnContainer(1);
+    await pick('runner_default', 'host');
+    await save();
+    expect(openDialog()?.textContent).toContain(
+      '1 repo inherits it and its next session will run unsandboxed with full host access.',
     );
   });
 
-  it('a blank memory limit is a client-side error and sends nothing', async () => {
-    seed();
-    await mountRunner();
-
-    typeInto(input('container_memory'), '  ');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([]);
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'Container memory limit must not be blank.',
+  it('still asks, without a number, when the repo list could not be loaded', async () => {
+    h.reposError = true;
+    h.settingsOnServer = { ...h.settingsOnServer, runner_default: 'container' };
+    await mountPage();
+    await pick('runner_default', 'host');
+    await save();
+    expect(openDialog()?.textContent).toContain(
+      'Repos that inherit it will run their next sessions unsandboxed with full host access.',
     );
   });
 
-  it('leaves grammar and minimums to the server and shows its 400 in the banner', async () => {
-    seed();
-    h.patchError = 'container_memory: invalid memory "lots"';
-    await mountRunner();
+  it('Cancel sends nothing — not even the other pending changes — and keeps every edit', async () => {
+    await mountOnContainer();
+    await pick('runner_default', 'host');
+    await typeField('git_author_name', 'Dominik');
+    await save();
 
-    typeInto(input('container_memory'), 'lots');
-    typeInto(input('container_pids'), '0');
-    submitForm();
+    dialogButton('Cancel').click();
     await settle();
 
-    // The client sent the values as typed...
-    expect(h.patchBodies).toEqual([{ container_memory: 'lots', container_pids: 0 }]);
-    // ...and surfaced the server's refusal, keeping the drafts for a retry.
-    expect(container.querySelector('.banner')?.textContent).toContain(
-      'container_memory: invalid memory "lots"',
+    expect(openDialog()).toBeNull();
+    expect(h.patchBodies).toEqual([]);
+    expect(segmentValue('runner_default')).toBe('host');
+    expect(input('git_author_name').value).toBe('Dominik');
+    expect(saveBarTitle()).toBe('2 unsaved changes');
+    expect(toastText()).toBe('');
+  });
+
+  it('Switch to host saves the whole pending patch', async () => {
+    await mountOnContainer();
+    await pick('runner_default', 'host');
+    await typeField('git_author_name', 'Dominik');
+    await save();
+
+    dialogButton('Switch to host').click();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ runner_default: 'host', git_author_name: 'Dominik' }]);
+    expect(toastText()).toBe('Saved 2 changes');
+    expect(saveBar()).toBeNull();
+  });
+
+  it('switching to container never asks', async () => {
+    await mountPage();
+    await pick('runner_default', 'container');
+    await save();
+    expect(openDialog()).toBeNull();
+    expect(h.patchBodies).toEqual([{ runner_default: 'container' }]);
+  });
+
+  it('saving another field while the default already is host does not ask', async () => {
+    await mountPage();
+    await typeField('container_pids', '512');
+    await save();
+    expect(openDialog()).toBeNull();
+    expect(h.patchBodies).toEqual([{ container_pids: 512 }]);
+  });
+
+  it("the leave dialog's Save and leave asks too; Cancel stays with every edit", async () => {
+    await mountOnContainer();
+    await pick('runner_default', 'host');
+    await leaveToOther();
+
+    dialogButton('Save and leave').click();
+    await settle();
+    expect(openDialog()?.querySelector('.dialog-title')?.textContent).toBe(
+      'Switch the global runner default to Host?',
     );
-    expect(input('container_memory').value).toBe('lots');
+
+    dialogButton('Cancel').click();
+    await settle();
+    expect(h.patchBodies).toEqual([]);
+    expect(history.get()).not.toBe('/other');
+    expect(segmentValue('runner_default')).toBe('host');
+  });
+
+  it("the leave dialog's Save and leave goes once the switch is confirmed", async () => {
+    await mountOnContainer();
+    await pick('runner_default', 'host');
+    await leaveToOther();
+
+    dialogButton('Save and leave').click();
+    await settle();
+    dialogButton('Switch to host').click();
+    await settle();
+
+    expect(h.patchBodies).toEqual([{ runner_default: 'host' }]);
+    expect(history.get()).toBe('/other');
   });
 });

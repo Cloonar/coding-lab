@@ -1,440 +1,383 @@
-// Global settings › Agents form coverage (issue #198), ported from the old
-// Settings.test.tsx: the AFK inherit entry + option bag, remote control (base
-// checkbox + AFK 3-state override), the AFK seed prompt (issue #52), the agent
-// defaults chain (issue #66 / ADR-0030) and the dialog auto-dismiss timeout
-// (issue #124). Mounted at /settings/agents; the PATCH payload expectations
-// are byte-identical to the monolith — the acceptance contract says the
-// dirty-fields-only payload semantics are unchanged.
+// Global settings › Agents (issues #198, #85): four groups — Runs you start,
+// AFK runs, Lander, Capacity — with every field the section had, in the repo
+// page's words where the fields match. The agent of runs you start is the
+// root (no inherit entry; an unseeded store shows the first provider) and the
+// catalogs follow the DRAFTED agents. The AFK and lander overrides speak the
+// repo page's inheritance vocabulary, derived in the browser from the drafted
+// base field, live: "inherited" + "Inherited · <base>" while blank; "set
+// here" + "Default: <base>" + Reset once set — Reset is a change, saved as ""
+// (text) or null (the AFK remote control). The option bag and the seed
+// prompt's Customize action and placeholder behave as before.
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   CODEX,
-  baseProviders,
-  button,
-  cardByHeading,
   chooseFromSelect,
   container,
+  fieldDefault,
+  fieldError,
+  fieldHint,
+  fieldLabel,
+  fieldState,
   h,
   input,
   installSettingsHooks,
-  mountAt,
-  optionRows,
-  selectTrigger,
+  mountPage,
+  optionLabels,
+  pageSection,
+  pick,
+  resetButton,
+  save,
+  saveBar,
+  saveBarTitle,
+  segment,
+  segmentLabels,
+  segmentValue,
   selectedLabel,
   settle,
-  submitForm,
+  switchButton,
+  switchOn,
   textarea,
   toggleCheckbox,
+  typeField,
   typeInto,
-  waitFor,
 } from '../harness';
 
 installSettingsHooks();
 
-const mountAgents = () => mountAt('/settings/agents');
+/** The groups of the Agents card, each with the fields it holds, in order. */
+function groups(): { title: string; fields: string[] }[] {
+  return Array.from(pageSection('agents').querySelectorAll('.settings-group')).map((group) => ({
+    title: group.querySelector('h3.settings-sub')?.textContent ?? '',
+    fields: Array.from(group.querySelectorAll('[data-field]')).map(
+      (field) => field.getAttribute('data-field') ?? '',
+    ),
+  }));
+}
 
-describe('Settings AFK defaults', () => {
-  it('offers an inherit entry that seeds selected and the ultracode checkbox', async () => {
-    await mountAgents();
-    const model = await waitFor(
-      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
-      'AFK defaults section',
-    );
+describe('Agents: groups and fields', () => {
+  it('renders Runs you start, AFK runs, Lander and Capacity with every field', async () => {
+    await mountPage();
 
-    // Unset seeds to the inherit entry (value ''), which titles the trigger…
-    expect(selectedLabel('spawn_model_default_afk')).toBe('Same as default');
-    // …and sits first (and selected) in the open panel.
-    model.click();
-    await settle();
-    const rows = optionRows();
-    expect(rows[0]?.textContent).toBe('Same as default');
-    expect(rows[0]?.getAttribute('aria-selected')).toBe('true');
-    model.click(); // toggle shut again
-    await settle();
-
-    const ultracode = input('spawn_options_afk.ultracode');
-    expect(ultracode.type).toBe('checkbox');
-    expect(ultracode.checked).toBe(false);
+    expect(groups()).toEqual([
+      {
+        title: 'Runs you start',
+        fields: [
+          'provider_default',
+          'spawn_model_default',
+          'spawn_effort_default',
+          'spawn_remote_default',
+          'dialog_timeout_minutes',
+        ],
+      },
+      {
+        title: 'AFK runs',
+        fields: [
+          'spawn_provider_default_afk',
+          'spawn_model_default_afk',
+          'spawn_effort_default_afk',
+          'spawn_remote_default_afk',
+          'spawn_options_afk',
+          'afk_prompt',
+        ],
+      },
+      { title: 'Lander', fields: ['spawn_model_default_lander', 'spawn_effort_default_lander'] },
+      {
+        title: 'Capacity',
+        fields: [
+          'max_instances',
+          'afk_budget_minutes',
+          'afk_tick_seconds',
+          'afk_schedule_seconds',
+          'sweep_interval_minutes',
+        ],
+      },
+    ]);
   });
 
-  it('seeds the AFK selects and checkbox from the stored payload', async () => {
+  it("uses the repo page's words for the fields both pages have", async () => {
+    await mountPage();
+
+    for (const key of ['provider_default', 'spawn_provider_default_afk']) {
+      expect(fieldLabel(key)).toBe('Agent');
+    }
+    for (const key of [
+      'spawn_model_default',
+      'spawn_model_default_afk',
+      'spawn_model_default_lander',
+    ]) {
+      expect(fieldLabel(key)).toBe('Model');
+    }
+    for (const key of [
+      'spawn_effort_default',
+      'spawn_effort_default_afk',
+      'spawn_effort_default_lander',
+    ]) {
+      expect(fieldLabel(key)).toBe('Effort');
+    }
+    expect(fieldLabel('spawn_remote_default')).toBe('Remote control');
+    expect(fieldLabel('spawn_remote_default_afk')).toBe('Remote control');
+    expect(fieldLabel('spawn_options_afk')).toBe('Options');
+    expect(fieldLabel('afk_prompt')).toBe('Seed prompt');
+    expect(fieldLabel('max_instances')).toBe('Max instances');
+    expect(fieldLabel('dialog_timeout_minutes')).toBe('Dialog auto-dismiss, minutes');
+  });
+
+  it('seeds every field from the stored settings', async () => {
     h.settingsOnServer = {
+      ...h.settingsOnServer,
       spawn_model_default_afk: 'sonnet',
-      spawn_options_afk: '{"ultracode":"true"}', // server returns a JSON string
+      spawn_effort_default_lander: 'max',
+      spawn_remote_default: true,
+      dialog_timeout_minutes: 15,
+      spawn_options_afk: '{"ultracode":"true"}',
     };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
-      'AFK defaults section',
-    );
+    await mountPage();
 
-    expect(selectedLabel('spawn_model_default_afk')).toBe('Sonnet');
-    expect(input('spawn_options_afk.ultracode').checked).toBe(true);
-  });
-
-  it('PATCHes an AFK model and the full declared option bag', async () => {
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
-      'AFK defaults section',
-    );
-
-    await chooseFromSelect('spawn_model_default_afk', 'Sonnet');
-    toggleCheckbox(input('spawn_options_afk.ultracode'), true);
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([
-      { spawn_model_default_afk: 'sonnet', spawn_options_afk: { ultracode: 'true' } },
-    ]);
-  });
-
-  it('selecting inherit clears a stored AFK model back to an empty string', async () => {
-    h.settingsOnServer = { spawn_model_default_afk: 'opus[1m]' };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_afk"]'),
-      'AFK defaults section',
-    );
-    expect(selectedLabel('spawn_model_default_afk')).toBe('Opus (1M)');
-
-    await chooseFromSelect('spawn_model_default_afk', 'Same as default'); // the inherit entry
-    submitForm();
-    await settle();
-
-    // Empty is allowed for the AFK key — it clears back to the base default.
-    expect(h.patchBodies).toEqual([{ spawn_model_default_afk: '' }]);
-  });
-});
-
-// Lander defaults: the global model/effort override for the Autoland lander —
-// its own card and its own keys, independent of the AFK override so the two
-// can hold different models.
-describe('Settings lander defaults', () => {
-  const landerModel = () =>
-    waitFor(
-      () => container.querySelector<HTMLButtonElement>('button[name="spawn_model_default_lander"]'),
-      'lander defaults section',
-    );
-
-  it('renders in its own card, seeded to the inherit entry', async () => {
-    await mountAgents();
-    await landerModel();
-
-    expect(selectedLabel('spawn_model_default_lander')).toBe('Same as default');
-    expect(selectedLabel('spawn_effort_default_lander')).toBe('Same as default');
-    const card = cardByHeading('Lander defaults');
-    expect(card.querySelector('button[name="spawn_model_default_lander"]')).not.toBeNull();
-    expect(card.querySelector('button[name="spawn_effort_default_lander"]')).not.toBeNull();
-  });
-
-  it('seeds from the stored payload independently of the AFK model', async () => {
-    h.settingsOnServer = {
-      spawn_model_default_afk: 'opus[1m]',
-      spawn_model_default_lander: 'sonnet',
-      spawn_effort_default_lander: 'high',
-    };
-    await mountAgents();
-    await landerModel();
-
-    expect(selectedLabel('spawn_model_default_afk')).toBe('Opus (1M)');
-    expect(selectedLabel('spawn_model_default_lander')).toBe('Sonnet');
-    expect(selectedLabel('spawn_effort_default_lander')).toBe('high');
-  });
-
-  it('PATCHes only the lander keys, leaving the AFK model untouched', async () => {
-    h.settingsOnServer = { spawn_model_default_afk: 'opus[1m]' };
-    await mountAgents();
-    await landerModel();
-
-    await chooseFromSelect('spawn_model_default_lander', 'Sonnet');
-    await chooseFromSelect('spawn_effort_default_lander', 'high');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([
-      { spawn_model_default_lander: 'sonnet', spawn_effort_default_lander: 'high' },
-    ]);
-  });
-
-  it('selecting inherit clears a stored lander model back to an empty string', async () => {
-    h.settingsOnServer = { spawn_model_default_lander: 'sonnet' };
-    await mountAgents();
-    await landerModel();
-    expect(selectedLabel('spawn_model_default_lander')).toBe('Sonnet');
-
-    await chooseFromSelect('spawn_model_default_lander', 'Same as default');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ spawn_model_default_lander: '' }]);
-  });
-});
-
-// Remote control (issue #163): a plain on/off checkbox at the BASE scope (there
-// is nothing above it to inherit from) and a 3-state override in the AFK card,
-// both PATCHed as JSON bools — with null for "same as default".
-describe('Settings remote control', () => {
-  const remoteBox = () => input('spawn_remote_default');
-
-  it('seeds the base checkbox from the stored bool and the AFK override to inherit', async () => {
-    h.settingsOnServer = { spawn_remote_default: true };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
-      'spawn defaults section',
-    );
-
-    expect(remoteBox().type).toBe('checkbox');
-    expect(remoteBox().checked).toBe(true);
-    expect(selectedLabel('spawn_remote_default_afk')).toBe('Same as default');
-    // The base control lives in the base spawn-defaults card, the override in AFK.
-    expect(
-      cardByHeading('Spawn defaults').querySelector('input[name="spawn_remote_default"]'),
-    ).not.toBeNull();
-    expect(
-      cardByHeading('AFK defaults').querySelector('button[name="spawn_remote_default_afk"]'),
-    ).not.toBeNull();
-  });
-
-  it('PATCHes the base bool and an explicit AFK off', async () => {
-    h.settingsOnServer = { spawn_remote_default: false };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
-      'spawn defaults section',
-    );
-    expect(remoteBox().checked).toBe(false);
-
-    toggleCheckbox(remoteBox(), true);
-    await chooseFromSelect('spawn_remote_default_afk', 'Off');
-    submitForm();
-    await settle();
-
-    // Both go as JSON bools — `false` is a value here, never an omission.
-    expect(h.patchBodies).toEqual([
-      { spawn_remote_default: true, spawn_remote_default_afk: false },
-    ]);
-  });
-
-  it('clears an AFK override back to inherit as null, and never sends an untouched field', async () => {
-    h.settingsOnServer = { spawn_remote_default: true, spawn_remote_default_afk: false };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
-      'spawn defaults section',
-    );
-    // The stored explicit off shows as Off — NOT as the inherit row.
-    expect(selectedLabel('spawn_remote_default_afk')).toBe('Off');
-    expect(remoteBox().checked).toBe(true);
-
-    await chooseFromSelect('spawn_remote_default_afk', 'Same as default');
-    submitForm();
-    await settle();
-
-    // Only the AFK key: the untouched base checkbox stays out of the patch.
-    expect(h.patchBodies).toEqual([{ spawn_remote_default_afk: null }]);
-  });
-
-  it('disables both controls with a note when the resolved provider has no remote knob', async () => {
-    h.providersOnServer = [...baseProviders(), CODEX];
-    h.settingsOnServer = { provider_default: 'codex' };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLInputElement>('input[name="spawn_remote_default"]'),
-      'spawn defaults section',
-    );
-
-    expect(remoteBox().disabled).toBe(true);
-    expect(selectTrigger('spawn_remote_default_afk').disabled).toBe(true);
-    // Named by the provider's display_name, never a hardcoded brand.
-    expect(container.textContent).toContain('Codex ignores this.');
-  });
-});
-
-describe('Settings AFK seed prompt (issue #52)', () => {
-  const DEFAULT_PROMPT = 'Resolve issue #<N> on branch <BRANCH>, then open a PR.';
-
-  it('renders empty with the built-in default as the placeholder', async () => {
-    h.settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
-      'seed prompt textarea',
-    );
-
-    const field = textarea('afk_prompt');
-    expect(field.value).toBe('');
-    expect(field.placeholder).toBe(DEFAULT_PROMPT);
-  });
-
-  it('Customize copies the effective default into the textarea for editing', async () => {
-    h.settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
-      'seed prompt textarea',
-    );
-
-    button('Customize').click();
-
-    expect(textarea('afk_prompt').value).toBe(DEFAULT_PROMPT);
-  });
-
-  it('editing the prompt and saving PATCHes afk_prompt', async () => {
-    h.settingsOnServer = { afk_prompt_default: DEFAULT_PROMPT };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
-      'seed prompt textarea',
-    );
-
-    typeInto(textarea('afk_prompt'), 'Always branch from main and open a PR when finished.');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([
-      { afk_prompt: 'Always branch from main and open a PR when finished.' },
-    ]);
-  });
-
-  it('clearing a stored prompt back to empty PATCHes afk_prompt as ""', async () => {
-    h.settingsOnServer = { afk_prompt: 'A previously customized prompt.' };
-    await mountAgents();
-    const field = await waitFor(
-      () => container.querySelector<HTMLTextAreaElement>('textarea[name="afk_prompt"]'),
-      'seed prompt textarea',
-    );
-    expect(field.value).toBe('A previously customized prompt.');
-
-    typeInto(field, '');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ afk_prompt: '' }]);
-  });
-});
-
-// Global agent defaults (issue #66 / ADR-0030): provider_default is the ROOT
-// of the chain (no inherit entry); spawn_provider_default_afk inherits it
-// ("" = same as default); the model/effort catalogs re-resolve live against
-// the DRAFTED providers before anything is saved.
-describe('Settings agent defaults (issue #66)', () => {
-  beforeEach(() => {
-    h.providersOnServer = [...baseProviders(), CODEX];
-  });
-
-  it('choosing a base agent PATCHes provider_default', async () => {
-    h.settingsOnServer = { provider_default: 'claude-code' };
-    await mountAgents();
-    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
     expect(selectedLabel('provider_default')).toBe('Claude Code');
+    expect(selectedLabel('spawn_model_default')).toBe('Opus (1M)');
+    expect(selectedLabel('spawn_effort_default')).toBe('high');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Sonnet');
+    expect(selectedLabel('spawn_effort_default_lander')).toBe('max');
+    expect(switchOn('spawn_remote_default')).toBe(true);
+    expect(input('dialog_timeout_minutes').value).toBe('15');
+    expect(input('spawn_options_afk.ultracode').checked).toBe(true);
+    expect(input('max_instances').value).toBe('4');
+    expect(input('afk_tick_seconds').value).toBe('30');
+    expect(saveBar()).toBeNull();
+  });
+});
+
+describe('Agents: runs you start', () => {
+  it('the agent has no inherit entry, and an unseeded store shows the first provider', async () => {
+    delete h.settingsOnServer.provider_default;
+    await mountPage();
+
+    expect(selectedLabel('provider_default')).toBe('Claude Code');
+    expect(fieldState('provider_default')).toBeNull();
+    expect(await optionLabels('provider_default')).toEqual(['Claude Code']);
+  });
+
+  it('choosing an agent PATCHes provider_default and re-catalogs the model pick', async () => {
+    h.providersOnServer = [...h.providersOnServer, CODEX];
+    await mountPage();
 
     await chooseFromSelect('provider_default', 'Codex');
-    submitForm();
-    await settle();
 
+    expect(await optionLabels('spawn_model_default')).toContain('GPT-5 Codex');
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    await save();
     expect(h.patchBodies).toEqual([{ provider_default: 'codex' }]);
   });
 
-  it('shows the effective first provider when the store is unseeded — no inherit entry', async () => {
-    await mountAgents();
-    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
+  it('remote control is a switch, saved as a plain bool', async () => {
+    await mountPage();
+    expect(fieldHint('spawn_remote_default')).toContain("Registers the session with the agent's");
 
-    // The root of the chain has nothing to inherit from: the trigger resolves
-    // to the first registered provider and the panel offers no inherit row.
-    expect(selectedLabel('provider_default')).toBe('Claude Code');
-    selectTrigger('provider_default').click();
+    switchButton('spawn_remote_default').click();
     await settle();
-    expect(optionRows().map((r) => r.textContent)).toEqual(['Claude Code', 'Codex']);
+    await save();
+
+    expect(h.patchBodies).toEqual([{ spawn_remote_default: true }]);
   });
 
-  it('choosing an AFK agent PATCHes spawn_provider_default_afk, "" on inherit', async () => {
-    h.settingsOnServer = { spawn_provider_default_afk: 'codex' };
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector('button[name="spawn_provider_default_afk"]'),
-      'AFK agent select',
-    );
-    expect(selectedLabel('spawn_provider_default_afk')).toBe('Codex');
+  it('a provider without the remote knob disables both remote controls and says so', async () => {
+    h.providersOnServer = [CODEX];
+    h.settingsOnServer = { ...h.settingsOnServer, provider_default: 'codex' };
+    await mountPage();
 
-    await chooseFromSelect('spawn_provider_default_afk', 'Same as default');
-    submitForm();
-    await settle();
-
-    // Empty is the inherit value for the AFK key — it clears back to the base.
-    expect(h.patchBodies).toEqual([{ spawn_provider_default_afk: '' }]);
+    expect(switchButton('spawn_remote_default').disabled).toBe(true);
+    expect(fieldHint('spawn_remote_default')).toBe('Codex ignores this.');
+    expect(segment('spawn_remote_default_afk', 'true').disabled).toBe(true);
+    expect(fieldHint('spawn_remote_default_afk')).toBe('Codex ignores this.');
   });
 
-  it('re-catalogs the base model select against the drafted provider_default', async () => {
-    await mountAgents();
-    await waitFor(() => container.querySelector('button[name="provider_default"]'), 'agent select');
+  it('dialog auto-dismiss is blank while unset, and 0 ("never") saves as 0', async () => {
+    await mountPage();
+    expect(input('dialog_timeout_minutes').value).toBe('');
+    expect(fieldHint('dialog_timeout_minutes')).toContain('0 = never.');
 
-    // Before the flip: the claude-code catalog.
-    selectTrigger('spawn_model_default').click();
-    await settle();
-    let labels = optionRows().map((r) => r.textContent);
-    expect(labels).toContain('Sonnet');
-    expect(labels).not.toContain('GPT-5 Codex');
-    selectTrigger('spawn_model_default').click(); // toggle shut
-    await settle();
-
-    await chooseFromSelect('provider_default', 'Codex');
-
-    // After the flip (still unsaved): the codex catalog.
-    selectTrigger('spawn_model_default').click();
-    await settle();
-    labels = optionRows().map((r) => r.textContent);
-    expect(labels).toContain('GPT-5 Codex');
-    expect(labels).not.toContain('Sonnet');
-  });
-});
-
-// Dialog auto-dismiss timeout (issue #124): a typed-int setting that is NOT
-// seeded server-side (absent from GET = never set = blank input, not 0) and
-// renders in the Spawn defaults card rather than Capacity & AFK, where every
-// other int field lives. 0 ("never") must be an accepted, saveable value.
-describe('Settings dialog timeout (issue #124)', () => {
-  it('renders in the Spawn defaults card, blank when unset', async () => {
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
-      'dialog timeout field',
-    );
-
-    const field = input('dialog_timeout_minutes');
-    expect(field.value).toBe('');
-    expect(cardByHeading('Spawn defaults').contains(field)).toBe(true);
-    expect(cardByHeading('Capacity & AFK').contains(field)).toBe(false);
-    expect(container.textContent).toContain('Dialog auto-dismiss (minutes)');
-  });
-
-  it('typing 0 and saving PATCHes dialog_timeout_minutes as 0 — 0 is not rejected', async () => {
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
-      'dialog timeout field',
-    );
-
-    typeInto(input('dialog_timeout_minutes'), '0');
-    submitForm();
-    await settle();
+    await typeField('dialog_timeout_minutes', '0');
+    await save();
 
     expect(h.patchBodies).toEqual([{ dialog_timeout_minutes: 0 }]);
   });
 
-  it('a non-numeric value shows the validation error and blocks the save', async () => {
-    await mountAgents();
-    await waitFor(
-      () => container.querySelector('input[name="dialog_timeout_minutes"]'),
-      'dialog timeout field',
-    );
+  it('a non-number in dialog auto-dismiss is a problem, even while it was never set', async () => {
+    await mountPage();
+    await typeField('dialog_timeout_minutes', 'soon');
+    await save();
 
-    typeInto(input('dialog_timeout_minutes'), 'abc');
-    submitForm();
+    expect(fieldError('dialog_timeout_minutes')).toBe('Use a whole number, 0 or more.');
+    expect(h.patchBodies).toEqual([]);
+  });
+});
+
+describe('Agents: AFK and lander overrides', () => {
+  it('left to inherit, each says so and names the drafted base value as its first pick', async () => {
+    await mountPage();
+
+    expect(fieldState('spawn_provider_default_afk')).toBe('inherited');
+    expect(selectedLabel('spawn_provider_default_afk')).toBe('Inherited · Claude Code');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Inherited · Opus (1M)');
+    expect(selectedLabel('spawn_effort_default_afk')).toBe('Inherited · high');
+    expect(selectedLabel('spawn_model_default_lander')).toBe('Inherited · Opus (1M)');
+    expect(selectedLabel('spawn_effort_default_lander')).toBe('Inherited · high');
+    expect(segmentLabels('spawn_remote_default_afk')).toEqual(['Inherited · off', 'On', 'Off']);
+    expect(segmentValue('spawn_remote_default_afk')).toBe('');
+    expect(resetButton('spawn_model_default_afk')).toBeNull();
+  });
+
+  it('the inherited values follow the drafted base fields live, before anything is saved', async () => {
+    h.providersOnServer = [...h.providersOnServer, CODEX];
+    await mountPage();
+
+    await chooseFromSelect('spawn_model_default', 'Sonnet');
+    await chooseFromSelect('spawn_effort_default', 'max');
+    switchButton('spawn_remote_default').click();
     await settle();
 
-    expect(container.textContent).toContain('Enter a whole number.');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Inherited · Sonnet');
+    expect(selectedLabel('spawn_effort_default_afk')).toBe('Inherited · max');
+    expect(selectedLabel('spawn_model_default_lander')).toBe('Inherited · Sonnet');
+    expect(selectedLabel('spawn_effort_default_lander')).toBe('Inherited · max');
+    expect(segmentLabels('spawn_remote_default_afk')[0]).toBe('Inherited · on');
+
+    await chooseFromSelect('provider_default', 'Codex');
+    expect(selectedLabel('spawn_provider_default_afk')).toBe('Inherited · Codex');
+    // Codex's catalog carries no Sonnet: AFK runs get the agent's own default.
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Inherited · agent default');
     expect(h.patchBodies).toEqual([]);
+  });
+
+  it('set here: says so, shows Default: <base> following the draft, and saves the pick', async () => {
+    await mountPage();
+
+    await chooseFromSelect('spawn_model_default_afk', 'Sonnet');
+
+    expect(fieldState('spawn_model_default_afk')).toBe('set here');
+    expect(fieldDefault('spawn_model_default_afk')).toBe('Default: Opus (1M)');
+    expect(resetButton('spawn_model_default_afk')).not.toBeNull();
+
+    await chooseFromSelect('spawn_model_default', 'Sonnet');
+    expect(fieldDefault('spawn_model_default_afk')).toBe('Default: Sonnet');
+
+    await save();
+    expect(h.patchBodies).toEqual([
+      { spawn_model_default: 'sonnet', spawn_model_default_afk: 'sonnet' },
+    ]);
+  });
+
+  it('Reset returns a stored text override to inherited — a change, saved as ""', async () => {
+    h.settingsOnServer = {
+      ...h.settingsOnServer,
+      spawn_model_default_afk: 'sonnet',
+      spawn_effort_default_lander: 'max',
+    };
+    await mountPage();
+    expect(fieldState('spawn_model_default_afk')).toBe('set here');
+    expect(fieldState('spawn_effort_default_lander')).toBe('set here');
+    expect(fieldDefault('spawn_effort_default_lander')).toBe('Default: high');
+
+    resetButton('spawn_model_default_afk')?.click();
+    resetButton('spawn_effort_default_lander')?.click();
+    await settle();
+
+    expect(fieldState('spawn_model_default_afk')).toBe('inherited');
+    expect(selectedLabel('spawn_model_default_afk')).toBe('Inherited · Opus (1M)');
+    expect(saveBarTitle()).toBe('2 unsaved changes');
+    await save();
+    expect(h.patchBodies).toEqual([
+      { spawn_model_default_afk: '', spawn_effort_default_lander: '' },
+    ]);
+  });
+
+  it('picking the inherit entry of a stored AFK agent saves ""', async () => {
+    h.providersOnServer = [...h.providersOnServer, CODEX];
+    h.settingsOnServer = { ...h.settingsOnServer, spawn_provider_default_afk: 'codex' };
+    await mountPage();
+    expect(selectedLabel('spawn_provider_default_afk')).toBe('Codex');
+    // The AFK catalogs are the AFK agent's.
+    expect(await optionLabels('spawn_model_default_afk')).toContain('GPT-5 Codex');
+
+    await chooseFromSelect('spawn_provider_default_afk', 'Inherited · Claude Code');
+    await save();
+
+    expect(h.patchBodies).toEqual([{ spawn_provider_default_afk: '' }]);
+  });
+
+  it('the AFK remote control is three-way: an explicit off, and Reset saved as null', async () => {
+    await mountPage();
+
+    await pick('spawn_remote_default_afk', 'false');
+    expect(fieldState('spawn_remote_default_afk')).toBe('set here');
+    expect(fieldDefault('spawn_remote_default_afk')).toBe('Default: off');
+    await save();
+    expect(h.patchBodies).toEqual([{ spawn_remote_default_afk: false }]);
+
+    resetButton('spawn_remote_default_afk')?.click();
+    await settle();
+    expect(segmentValue('spawn_remote_default_afk')).toBe('');
+    await save();
+    expect(h.patchBodies.at(-1)).toEqual({ spawn_remote_default_afk: null });
+  });
+});
+
+describe('Agents: option bag and seed prompt', () => {
+  it('a toggle PATCHes the full declared bag; toggling back is no change', async () => {
+    await mountPage();
+    const box = input('spawn_options_afk.ultracode');
+    expect(box.checked).toBe(false);
+
+    toggleCheckbox(box, true);
+    await settle();
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    toggleCheckbox(input('spawn_options_afk.ultracode'), false);
+    await settle();
+    expect(saveBar()).toBeNull();
+
+    toggleCheckbox(input('spawn_options_afk.ultracode'), true);
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ spawn_options_afk: { ultracode: 'true' } }]);
+  });
+
+  it('the seed prompt is blank with the built-in prompt as its placeholder, inherited', async () => {
+    await mountPage();
+
+    expect(textarea('afk_prompt').value).toBe('');
+    expect(textarea('afk_prompt').placeholder).toBe('Work on issue <N> on branch <BRANCH>.');
+    expect(fieldState('afk_prompt')).toBe('inherited');
+    expect(fieldHint('afk_prompt')).toContain('detected as done only by an open PR');
+  });
+
+  it('Customize copies the built-in prompt in for editing, and Save sends the edit', async () => {
+    await mountPage();
+
+    container
+      .querySelector<HTMLButtonElement>('[data-field="afk_prompt"] .settings-inline-action')
+      ?.click();
+    await settle();
+
+    expect(textarea('afk_prompt').value).toBe('Work on issue <N> on branch <BRANCH>.');
+    expect(fieldState('afk_prompt')).toBe('set here');
+    expect(fieldDefault('afk_prompt')).toBe('Default: the built-in seed prompt');
+
+    typeInto(textarea('afk_prompt'), 'Fix issue <N>.');
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ afk_prompt: 'Fix issue <N>.' }]);
+  });
+
+  it('clearing a stored prompt saves ""', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, afk_prompt: 'Custom.' };
+    await mountPage();
+    expect(fieldState('afk_prompt')).toBe('set here');
+
+    typeInto(textarea('afk_prompt'), '');
+    await settle();
+    await save();
+
+    expect(h.patchBodies).toEqual([{ afk_prompt: '' }]);
   });
 });

@@ -1,10 +1,12 @@
-// The repo settings page's only contact with layout and the scroll position
-// (issue #61). The one-page settings scroll to a section or a field, and mark
-// the section in view while the operator scrolls; both need element
+// The one-page settings' only contact with layout and the scroll position
+// (issue #61, issue #85). A settings page scrolls to a section or a field,
+// and marks the section in view while the operator scrolls; both need element
 // positions, which jsdom does not have. Everything that measures or moves the
-// page goes through `viewport`, so a test swaps these four functions for
-// fakes (see harness.tsx) and the page's own logic — which section is the
-// target, which chip is current, which field takes focus — runs unchanged.
+// page goes through `viewport` (sectionScroll.ts is its one reader), so a
+// test swaps these four functions for fakes (see
+// routes/repo-settings/harness.tsx) and the page's own logic — which section
+// is the target, which chip is current, which field takes focus — runs
+// unchanged.
 //
 // The page scrolls on the document (the app shell has no inner scroller), so
 // positions are relative to the browser viewport.

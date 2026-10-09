@@ -1,8 +1,11 @@
-// Global settings › Notifications (issue #198): device-local surfaces that
-// live OUTSIDE the settings PATCH — the PWA install re-entry row (issue #142)
-// and Web Push registration (issue #98). Guard-free by construction: no
-// useSettingsForm, nothing to "save", so no unsaved-changes prompt. Moved
-// verbatim from the old Settings monolith.
+// Global settings › Notifications (issues #98, #142, #198, #85): the
+// device-local surfaces that live OUTSIDE the settings PATCH — the PWA install
+// re-entry card and Web Push registration for this browser, with the list of
+// every device the account has enabled. A section of the one settings page,
+// but none of its rows waits for the save bar: enable, send test, remove and
+// install each act at once with their own call, so the section's heading
+// carries the "applies immediately" tag (categories.ts) and no field of the
+// form lives here. Its content is unchanged from the section it was before.
 
 import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
 import {

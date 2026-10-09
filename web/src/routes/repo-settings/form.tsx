@@ -4,19 +4,14 @@
 // save bar and the leave guard, both rendered by the frame, keep working on
 // Overview and Issues while changes are pending.
 //
-// What it holds: the operator's EDITS, one per touched field (fields.ts is the
-// table of fields). A field's draft is its edit, else whatever the frame's
-// live repo holds — so the seed/resync rule of lib/seededDrafts.ts holds by
-// construction:
-//
-//   - an untouched field has no edit and simply shows the live repo, so it
-//     follows every refresh (repo.changed, the Overview's Auto switch);
-//   - a dirty field keeps the operator's edit across a refresh — unless the
-//     server caught up with it (our own save landing, the same value saved
-//     elsewhere), which drops the edit and makes the field clean again;
-//   - "changed" and the PATCH are always diffed against the live saved repo,
-//     so a field the operator never touched is never sent, and a server-side
-//     change to it is never silently reverted.
+// The form itself — the operator's edits over the frame's live repo, the
+// lib/seededDrafts.ts seed/resync rule, the one save rule (validate in the
+// browser, ONE PATCH of exactly the changed fields, the response applied to
+// the frame's repo at once, a refusal shown at its field) — is the shared
+// settings core's (components/settings/form.tsx), over the repo field table
+// (fields.ts). Moving to another repo drops every edit; a Save answer or an
+// Undo that arrives after such a move is ignored. This file adds what only
+// the repo page has: the latched saved repo, and the inheritance layer.
 //
 // Inheritance (issue #61 §6): what an overridable field resolves to while the
 // repo's own value is null is the SERVER's answer (getRepoInherited — the
@@ -29,18 +24,9 @@
 // select lists, the Runner the page folds by, and the options the AFK option
 // bag declares. What acts at once on the SAVED repo (Schedules) reads the
 // answer for the saved repo alone, never the one for the drafts.
-//
-// The one save rule lives here too: Save validates the changed fields in the
-// browser, sends ONE PATCH with exactly the changed fields, applies the
-// response to the frame's repo at once (the marks clear without waiting for
-// the SSE refetch) and confirms in the frame's toast. A refusal that names a
-// field is shown at that field; one that names none, and a network error, in
-// the save bar. Edits are kept on every failure.
 
-import { useLocation, useNavigate } from '@solidjs/router';
 import {
   batch,
-  createComputed,
   createContext,
   createEffect,
   createMemo,
@@ -52,10 +38,8 @@ import {
   useContext,
   type Accessor,
   type JSX,
-  type Signal,
 } from 'solid-js';
 import {
-  ApiError,
   errorMessage,
   getRepoInherited,
   listProviders,
@@ -66,26 +50,24 @@ import {
   type RepoInherited,
   type RepoInheritedDrafts,
 } from '../../api';
+import {
+  SettingsFormProvider,
+  createFieldDrafts,
+  createSettingsFormStore,
+  plural,
+  type FieldBinding as SettingsFieldBinding,
+  type SettingsForm,
+} from '../../components/settings/form';
 import { resourceValue } from '../../lib/resource';
 import { useRepoHome } from '../repo-home/context';
 import {
-  REPO_FIELD_KEYS,
-  buildRepoPatch,
-  draftDiffers,
-  draftInherits,
-  isOverridable,
-  isRepoFieldKey,
+  REPO_FIELD_TABLE,
   pairedFields,
   repoField,
-  sameDraft,
-  validateDraft,
   validateEdits,
   type FieldContext,
-  type FormSectionSlug,
-  type RepoDrafts,
-  type RepoEdits,
   type RepoFieldKey,
-  type RepoFieldSpec,
+  type RepoSettingsShape,
 } from './fields';
 import { CHAIN_FIELD_KEYS, inheritedText, type ChainFieldKey } from './inherited';
 import { normText } from './shared';
@@ -96,35 +78,8 @@ import { normText } from './shared';
  */
 export const INHERITED_DEBOUNCE_MS = 150;
 
-/** One field's draft and state — what a section binds a control to. */
-export interface FieldBinding<K extends RepoFieldKey> {
-  key: K;
-  /** The field's table entry (section, label, rules). */
-  spec: RepoFieldSpec<K>;
-  /** The draft: the operator's edit, else what the saved repo holds. */
-  value: Accessor<RepoDrafts[K]>;
-  /** Records an edit. Setting the saved value back removes the edit. */
-  set: (value: RepoDrafts[K]) => void;
-  /** True while the draft would change the saved repo. */
-  changed: Accessor<boolean>;
-  /** The problem shown under the field: a browser check or a server refusal. */
-  error: Accessor<string | null>;
-  /** True for a field whose own value may be null, meaning "inherit". */
-  overridable: boolean;
-  /**
-   * True while an overridable field's draft leaves it inherited ("inherited"
-   * at its label); false once it is set here. Always false otherwise.
-   */
-  inherits: Accessor<boolean>;
-  /**
-   * What the field inherits, worded for the page — the server's answer, or
-   * null while that is not known (loading, failed, unresolvable). Never a
-   * value the browser derived.
-   */
-  inheritedText: Accessor<string | null>;
-  /** Returns an overridable field to inherited (a change, saved as null). */
-  reset: () => void;
-}
+/** One repo field's draft and state — what a section binds a control to. */
+export type FieldBinding<K extends RepoFieldKey> = SettingsFieldBinding<RepoSettingsShape, K>;
 
 /** The provider catalog, and the providers the fields resolve against. */
 export interface RepoSettingsCatalog {
@@ -156,59 +111,13 @@ export interface RepoSettingsCatalog {
   afkBoolOptions: Accessor<ProviderOptionSpec[]>;
 }
 
-/** Where on the settings page to go: a section, and optionally one field in it. */
-export interface RevealTarget {
-  section: string;
-  field?: RepoFieldKey;
-}
-
-export interface RepoSettingsForm {
+export interface RepoSettingsForm extends SettingsForm<RepoSettingsShape> {
   /**
    * The repo the drafts are diffed against: the frame's live repo, kept
    * across a failed refresh so pending edits stay saveable and guarded.
    * Undefined until the first load, and while another repo's load is pending.
    */
   saved: Accessor<Repo | undefined>;
-  /** The binding of one field. */
-  field<K extends RepoFieldKey>(key: K): FieldBinding<K>;
-  /** The changed fields, in page order. Their count is the save bar's number. */
-  changed: Accessor<RepoFieldKey[]>;
-  /** The sections that hold a changed field, in page order. */
-  changedSections: Accessor<FormSectionSlug[]>;
-  /** True while at least one field differs from the saved repo. */
-  dirty: Accessor<boolean>;
-  /** The fields with a problem shown under them, in page order. */
-  problems: Accessor<RepoFieldKey[]>;
-  /** The sections that hold a field with a problem, in page order. */
-  problemSections: Accessor<FormSectionSlug[]>;
-  /** A failed save that names no field (or never reached the server). */
-  barError: Accessor<string | null>;
-  /** True while the PATCH is in flight. */
-  busy: Accessor<boolean>;
-  /**
-   * Validates, then sends ONE PATCH with the changed fields. Resolves true
-   * when everything is saved. On a problem it sends nothing (a browser check)
-   * or keeps the edits (a refusal), goes to the field, and resolves false.
-   */
-  save: () => Promise<boolean>;
-  /** Restores the saved values and offers Undo in the frame's toast. */
-  discard: () => void;
-  /** Drops every edit without a trace (the leave dialog's Discard). */
-  drop: () => void;
-  /**
-   * Goes to a section — or a field — of the settings page: opens the Settings
-   * tab if another tab shows, then scrolls there (and focuses the field).
-   */
-  reveal: (target: RevealTarget) => void;
-  /** Bumped by every reveal(), so the page repeats one for an unchanged URL. */
-  revealTick: Accessor<number>;
-  /**
-   * The field the page is being sent to (a reveal(), a `?field=` URL), so a
-   * section that folds fields away can unfold the one that is wanted.
-   */
-  pointedAt: Accessor<RepoFieldKey | undefined>;
-  /** Says which field the URL points at (the page calls it; undefined = none). */
-  pointAt: (field: RepoFieldKey | undefined) => void;
   /**
    * What every overridable field resolves to while the repo's own value is
    * null — the server's answer for the current drafts. Undefined until the
@@ -249,31 +158,11 @@ export function useRepoSettingsForm(): RepoSettingsForm {
   return form;
 }
 
-/** "1 change" / "3 changes". */
-export function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
-}
-
 /** For the fields whose wire form reads no context (every chain field). */
 const NO_CONTEXT: FieldContext = { afkOptionKeys: null };
 
-type EditSignals = { [K in RepoFieldKey]: Signal<RepoDrafts[K] | undefined> };
-type Bindings = { [K in RepoFieldKey]: FieldBinding<K> };
-type FieldErrors = Partial<Record<RepoFieldKey, string>>;
-
-function sectionsOf(keys: RepoFieldKey[]): FormSectionSlug[] {
-  const sections: FormSectionSlug[] = [];
-  for (const key of keys) {
-    const section = repoField(key).section;
-    if (!sections.includes(section)) sections.push(section);
-  }
-  return sections;
-}
-
 function createRepoSettingsForm(): RepoSettingsForm {
   const home = useRepoHome();
-  const location = useLocation();
-  const navigate = useNavigate();
 
   // The saved repo, latched: a refresh that fails (the frame then reports no
   // repo) must not make pending edits unsaveable or unguarded, so the last
@@ -286,65 +175,12 @@ function createRepoSettingsForm(): RepoSettingsForm {
   });
 
   // One signal per field: the operator's edit, or undefined while untouched.
-  const edits = {} as EditSignals;
-  for (const key of REPO_FIELD_KEYS) {
-    (edits as Record<string, Signal<unknown>>)[key] = createSignal<unknown>(undefined);
-  }
-  const editOf = <K extends RepoFieldKey>(key: K): RepoDrafts[K] | undefined => edits[key][0]();
-  const setEdit = <K extends RepoFieldKey>(key: K, value: RepoDrafts[K] | undefined): void => {
-    // Wrapped, so a draft can never be mistaken for a signal updater.
-    edits[key][1](() => value);
-  };
-  const readEdits = (): RepoEdits => {
-    const out: RepoEdits = {};
-    for (const key of REPO_FIELD_KEYS) copyEdit(out, key);
-    return out;
-  };
-  const copyEdit = <K extends RepoFieldKey>(out: RepoEdits, key: K): void => {
-    const value = editOf(key);
-    if (value !== undefined) out[key] = value;
-  };
+  // eslint-disable-next-line solid/reactivity -- the accessor itself is handed on, and read where tracked
+  const drafts = createFieldDrafts(REPO_FIELD_TABLE, saved);
+  const { editOf, draftOf } = drafts;
 
-  const [errors, setErrors] = createSignal<FieldErrors>({});
-  const [barError, setBarError] = createSignal<string | null>(null);
-  const [busy, setBusy] = createSignal(false);
-  const [revealTick, setRevealTick] = createSignal(0);
-  const [pointedAt, setPointedAt] = createSignal<RepoFieldKey | undefined>(undefined);
   const [inherited, setInherited] = createSignal<RepoInherited | undefined>(undefined);
   const [inheritedError, setInheritedError] = createSignal<string | null>(null);
-  // What the Save in flight submitted, while it is in flight: an edit made
-  // meanwhile is measured against THAT, not against the repo it replaces.
-  let inFlight: RepoEdits | undefined;
-
-  const dropError = (key: RepoFieldKey): void => {
-    if (errors()[key] === undefined) return;
-    const next = { ...errors() };
-    delete next[key];
-    setErrors(next);
-  };
-  const clearEdit = (key: RepoFieldKey): void => {
-    setEdit(key, undefined);
-    dropError(key);
-  };
-  const dropPairError = <K extends RepoFieldKey>(key: K): void => {
-    if (errors()[key] === undefined) return;
-    const draft = draftOf(key);
-    if (draft === undefined || validateDraft(key, draft) === null) dropError(key);
-  };
-  const drop = (): void =>
-    batch(() => {
-      for (const key of REPO_FIELD_KEYS) setEdit(key, undefined);
-      setErrors({});
-      setBarError(null);
-    });
-
-  // The draft of one field; undefined only before any repo has loaded.
-  const draftOf = <K extends RepoFieldKey>(key: K): RepoDrafts[K] | undefined => {
-    const edit = editOf(key);
-    if (edit !== undefined) return edit;
-    const repo = saved();
-    return repo !== undefined ? repoField(key).seed(repo) : undefined;
-  };
 
   // --- catalog ------------------------------------------------------------------
   // The provider catalog is fetched on demand (load()), and held here so the
@@ -395,135 +231,24 @@ function createRepoSettingsForm(): RepoSettingsForm {
     afkBoolOptions: afkBoolOptions(),
   });
 
-  // --- bindings -----------------------------------------------------------------
-  const bind = <K extends RepoFieldKey>(key: K): FieldBinding<K> => {
-    const spec = repoField(key);
-    const value = createMemo<RepoDrafts[K] | undefined>(() => draftOf(key), undefined, {
-      equals: (a, b) => a === b || (a !== undefined && b !== undefined && sameDraft(key, a, b)),
-    });
-    const changed = createMemo(() => {
-      const edit = editOf(key);
-      const repo = saved();
-      return edit !== undefined && repo !== undefined && draftDiffers(key, edit, repo, context());
-    });
-    const set = (next: RepoDrafts[K]): void => {
-      const repo = saved();
-      batch(() => {
-        // An edit back to the saved value is no edit: the field is untouched
-        // again and follows the server. Not while a Save that carries this
-        // field is in flight: the repo is about to hold what was submitted,
-        // so going back to the value it holds NOW is an edit, and stays one.
-        const untouched =
-          inFlight?.[key] === undefined &&
-          repo !== undefined &&
-          sameDraft(key, next, spec.seed(repo));
-        setEdit(key, untouched ? undefined : next);
-        if (untouched) {
-          // An untouched field is never sent: nothing about it is a problem.
-          dropError(key);
-        } else if (errors()[key] !== undefined) {
-          // A problem stays under its field until the field is valid again; a
-          // server refusal has no browser rule, so any edit clears it.
-          const message = validateDraft(key, next);
-          if (message === null) dropError(key);
-          else setErrors({ ...errors(), [key]: message });
-        }
-        // A problem with a PAIR (a refusal the server pinned to the other
-        // half, Autoland under the builtin binding) is answered from either
-        // half: it goes when its own field's rule does not hold it.
-        for (const other of pairedFields(key)) dropPairError(other);
-        setBarError(null);
-      });
-    };
-    const overridable = isOverridable(key);
-    const inherits = createMemo(() => {
-      const draft = value();
-      return draft !== undefined && draftInherits(key, draft, context());
-    });
-    const inheritedValue = createMemo(() =>
-      overridable ? inheritedText(key, inherited(), wording()) : null,
-    );
-    return {
-      key,
-      spec,
-      // Sections render only once a repo has loaded, so a draft exists there.
-      value: value as Accessor<RepoDrafts[K]>,
-      set,
-      changed,
-      error: () => errors()[key] ?? null,
-      overridable,
-      inherits,
-      inheritedText: inheritedValue,
-      reset: () => {
-        if (overridable) set(spec.inherit as RepoDrafts[K]);
-      },
-    };
-  };
-  const bindings = {} as Bindings;
-  for (const key of REPO_FIELD_KEYS) {
-    (bindings as Record<string, FieldBinding<RepoFieldKey>>)[key] = bind(key);
-  }
-
-  const changed = createMemo(() => REPO_FIELD_KEYS.filter((key) => bindings[key].changed()));
-  const changedSections = createMemo(() => sectionsOf(changed()));
-  const dirty = (): boolean => changed().length > 0;
-  const problems = createMemo(() => REPO_FIELD_KEYS.filter((key) => errors()[key] !== undefined));
-  const problemSections = createMemo(() => sectionsOf(problems()));
-  // A problem is about a pending change, and is counted in the save bar. Once
-  // nothing is pending the bar is gone — and so is every problem.
-  createComputed(() => {
-    if (dirty() || busy()) return;
-    if (Object.keys(untrack(errors)).length > 0) setErrors({});
-    if (untrack(barError) !== null) setBarError(null);
+  // --- the form -----------------------------------------------------------------
+  const form = createSettingsFormStore<RepoSettingsShape>({
+    drafts,
+    context,
+    base: () => `/repos/${home.id()}/settings`,
+    // Another repo: nothing drafted against the previous one applies, and
+    // nothing it inherited either.
+    scope: home.id,
+    onReset: () => forgetInherited(),
+    identity: (repo) => repo.id,
+    pairedFields,
+    validate: validateEdits,
+    inheritedText: (key) => inheritedText(key, inherited(), wording()),
+    send: (patch, repo) => updateRepo(repo.id, patch),
+    apply: (next) => home.mutate(next),
+    notify: (message, options) => home.notify(message, options),
+    savedMessage: (count, next) => `Saved ${plural(count, 'change')} to ${next.name}`,
   });
-
-  // --- seed / resync ------------------------------------------------------------
-  // Another repo: nothing drafted against the previous one applies, and
-  // nothing it inherited either.
-  createComputed(
-    on(
-      home.id,
-      () => {
-        drop();
-        forgetInherited();
-      },
-      { defer: true },
-    ),
-  );
-
-  // A refresh of the same repo (the lib/seededDrafts.ts rule): an edit the
-  // server caught up with is dropped, so the field is clean and follows the
-  // server from here on. So is an "edit" that never was a change (a stray
-  // space) once the server changes that field — it must not turn into one.
-  const resync = <K extends RepoFieldKey>(key: K, fresh: Repo, previous: Repo): void => {
-    const edit = editOf(key);
-    if (edit === undefined) return;
-    const spec = repoField(key);
-    const next = spec.seed(fresh);
-    if (sameDraft(key, edit, next)) {
-      clearEdit(key);
-    } else if (
-      // Not for a field the Save in flight carries: the server changing it
-      // is that Save landing, and an edit that differs from it is newer.
-      inFlight?.[key] === undefined &&
-      !sameDraft(key, spec.seed(previous), next) &&
-      !draftDiffers(key, edit, previous, context())
-    ) {
-      clearEdit(key);
-    }
-  };
-  createComputed(
-    on(
-      saved,
-      (fresh, previous) => {
-        if (fresh === undefined || previous === undefined || previous.id !== fresh.id) return;
-        batch(() => {
-          for (const key of REPO_FIELD_KEYS) resync(key, fresh, previous);
-        });
-      },
-      { defer: true },
-    ),
-  );
 
   // --- inherited values ---------------------------------------------------------
   // Asked when the Settings tab mounts, when a SAVED value other fields'
@@ -579,7 +304,7 @@ function createRepoSettingsForm(): RepoSettingsForm {
   };
   const addChainDraft = <K extends ChainFieldKey>(drafts: RepoInheritedDrafts, key: K): void => {
     const edit = editOf(key);
-    if (edit === undefined || !bindings[key].changed()) return;
+    if (edit === undefined || !form.field(key).changed()) return;
     // A chain field's wire form depends on nothing but its own draft.
     drafts[key] = repoField(key).wire(edit, NO_CONTEXT) as RepoInheritedDrafts[K];
   };
@@ -662,136 +387,8 @@ function createRepoSettingsForm(): RepoSettingsForm {
   );
   onCleanup(() => clearTimeout(debounce));
 
-  // --- navigation ---------------------------------------------------------------
-  const settingsBase = (): string => `/repos/${home.id()}/settings`;
-  const reveal = (target: RevealTarget): void => {
-    const base = settingsBase();
-    const path = `${base}/${target.section}${target.field !== undefined ? `?field=${target.field}` : ''}`;
-    const onSettings = location.pathname === base || location.pathname.startsWith(`${base}/`);
-    // First, so a section that folded the field away has it back on the page
-    // by the time the page looks for it.
-    setPointedAt(target.field);
-    // The page does the scrolling itself, so the router must not jump to the
-    // top. Inside the Settings tab the URL is replaced (no history spam).
-    navigate(path, onSettings ? { replace: true, scroll: false } : { scroll: false });
-    // After navigate(): the router is mid-navigation by now (when the URL
-    // changes at all), so the page acts once, on the new URL.
-    setRevealTick((tick) => tick + 1);
-  };
-
-  // --- save / discard -----------------------------------------------------------
-  const save = async (): Promise<boolean> => {
-    const repo = saved();
-    if (repo === undefined || busy()) return false;
-    const fieldContext = context();
-    const submitted = readEdits();
-    const found = validateEdits(submitted, repo, fieldContext);
-    batch(() => {
-      setBarError(null);
-      setErrors(found);
-    });
-    const firstProblem = REPO_FIELD_KEYS.find((key) => found[key] !== undefined);
-    if (firstProblem !== undefined) {
-      // Nothing is sent while a field is wrong.
-      reveal({ section: repoField(firstProblem).section, field: firstProblem });
-      return false;
-    }
-    const patch = buildRepoPatch(submitted, repo, fieldContext);
-    const count = Object.keys(patch).length;
-    if (count === 0) return true;
-
-    inFlight = submitted;
-    setBusy(true);
-    try {
-      const next = await updateRepo(repo.id, patch);
-      // Left for another repo while the request was in flight: the answer
-      // belongs to a repo the drafts no longer describe.
-      if (home.id() !== repo.id) return true;
-      batch(() => {
-        // The response IS the saved repo now — applied to the frame at once,
-        // so the bar and the marks clear without waiting for the SSE refetch.
-        home.mutate(next);
-        // Everything that was submitted is saved, whatever the server
-        // normalised it to (a sanitized name, a digest-pinned image). An
-        // edit typed while the request was in flight is newer, and stays.
-        for (const key of REPO_FIELD_KEYS) settle(key, submitted);
-        setErrors({});
-      });
-      home.notify(`Saved ${plural(count, 'change')} to ${next.name}`);
-      return true;
-    } catch (err) {
-      const field = err instanceof ApiError ? err.field : undefined;
-      if (isRepoFieldKey(field)) {
-        // The refusal names its field: show it there.
-        setErrors({ [field]: errorMessage(err) });
-        reveal({ section: repoField(field).section, field });
-      } else {
-        setBarError(errorMessage(err));
-      }
-      return false;
-    } finally {
-      inFlight = undefined;
-      setBusy(false);
-    }
-  };
-  const settle = <K extends RepoFieldKey>(key: K, submitted: RepoEdits): void => {
-    const sent = submitted[key];
-    const current = editOf(key);
-    if (sent === undefined || current === undefined) return;
-    if (sameDraft(key, current, sent as RepoDrafts[K])) setEdit(key, undefined);
-  };
-
-  const discard = (): void => {
-    const id = home.id();
-    const droppedEdits = readEdits();
-    const droppedErrors = errors();
-    drop();
-    home.notify('Changes discarded', {
-      action: {
-        label: 'Undo',
-        run: () => {
-          // The toast can outlive a move to another repo; the edits cannot.
-          if (home.id() !== id) return;
-          batch(() => {
-            for (const key of REPO_FIELD_KEYS) restoreEdit(key, droppedEdits);
-            setErrors(droppedErrors);
-          });
-        },
-      },
-    });
-  };
-  const restoreEdit = <K extends RepoFieldKey>(key: K, from: RepoEdits): void => {
-    const value = from[key];
-    if (value !== undefined) setEdit(key, value as RepoDrafts[K]);
-  };
-
-  // A tab close or reload keeps the browser's own prompt while changes are
-  // pending. Chrome's legacy contract: preventDefault AND set returnValue.
-  const onBeforeUnload = (event: BeforeUnloadEvent): void => {
-    if (!dirty()) return;
-    event.preventDefault();
-    event.returnValue = '';
-  };
-  window.addEventListener('beforeunload', onBeforeUnload);
-  onCleanup(() => window.removeEventListener('beforeunload', onBeforeUnload));
-
   return {
-    saved,
-    field: (key) => bindings[key],
-    changed,
-    changedSections,
-    dirty,
-    problems,
-    problemSections,
-    barError,
-    busy,
-    save,
-    discard,
-    drop,
-    reveal,
-    revealTick,
-    pointedAt,
-    pointAt: (field) => void setPointedAt(field),
+    ...form,
     inherited,
     inheritedError,
     retryInherited: () => askInherited(true),
@@ -819,9 +416,14 @@ function createRepoSettingsForm(): RepoSettingsForm {
  * Mounts the form store for the repo home frame. It reads the repo from
  * useRepoHome(), so it must sit inside the frame's context provider, and
  * around everything that shows or edits pending changes: the tabs, the routed
- * tab, the save bar and the leave guard.
+ * tab, the save bar and the leave guard. The shared settings components read
+ * the same form through SettingsFormContext.
  */
 export function RepoSettingsFormProvider(props: { children?: JSX.Element }) {
   const form = createRepoSettingsForm();
-  return <FormContext.Provider value={form}>{props.children}</FormContext.Provider>;
+  return (
+    <FormContext.Provider value={form}>
+      <SettingsFormProvider form={form}>{props.children}</SettingsFormProvider>
+    </FormContext.Provider>
+  );
 }

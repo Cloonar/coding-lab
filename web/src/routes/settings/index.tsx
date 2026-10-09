@@ -1,101 +1,170 @@
-// Global settings (/settings/:section?) — the area root (issue #198). It owns
-// the page chrome and the two area-level resources (settings + provider
-// catalog), fetched ONCE here and threaded into the sections by props; the
-// category subpages (General, Agents, Notifications, Runner) live under
-// ./sections and are switched on the active slug. GLOBAL_SETTINGS_CATEGORIES is
-// the single source driving the routes, the mobile index rows and the desktop
-// nav.
-// Global settings is deliberately breadcrumb-free (no Crumbs) — spec.
+// Global settings, on one page (issue #85, ADR-0080): /settings renders all
+// four sections together, in the order and groups of GLOBAL_SETTINGS_CATEGORIES
+// — Runs (Agents, Runner), Setup (General), This device (Notifications) —
+// under a sticky row of section chips (below 1024px) or beside a sticky
+// outline (from 1024px). Breadcrumb-free, like every top-level page.
+//
+// One save rule: the fields of Agents, Runner and General edit drafts in the
+// page's form store (form.tsx) and wait for the one save bar; Save sends ONE
+// PATCH of exactly the changed keys and confirms in the page's toast.
+// Notifications acts at once and says so in its heading. A Save that switches
+// the runner default to host asks first, in an in-page dialog
+// (HostSwitchDialog.tsx); leaving /settings with pending changes asks in the
+// shared leave dialog. No browser confirm anywhere.
+//
+// URLs: /settings is the top of the page; /settings/:section — every slug of
+// issue #198 — opens it scrolled to that section, and an unknown slug stays
+// at the top. `?field=<settings key>` scrolls that field into view and
+// focuses its control. A chip or outline entry scrolls to its section and
+// REPLACES the URL with the section's — no history entry per section. Both
+// URLs are one route (/settings/:section?), so the page stays mounted, and
+// scrolled where it was, as the URL moves between sections.
+//
+// The one-page machinery — the section chips and outline, the section frame,
+// the save bar, the leave dialog, the scroll, arrival and deep-link logic — is
+// the shared settings core's (components/settings/), the repo page's too; this
+// page renders the global sections into it. What could not be loaded is said
+// above the sections with a way to try again: the settings themselves (then
+// nothing else renders — every field seeds from them), the provider catalog
+// (the agent, model and effort picks are incomplete without it).
 
-import { Match, Show, Switch, createResource } from 'solid-js';
-import type { JSX } from 'solid-js';
 import { useParams } from '@solidjs/router';
-import { errorMessage, getSettings, listProviders, type Settings } from '../../api';
+import { For, Show, type JSX } from 'solid-js';
 import Banner from '../../components/Banner';
 import RequireAuth from '../../components/RequireAuth';
 import SectionHead from '../../components/SectionHead';
-import SettingsLayout from '../../components/settings/SettingsLayout';
+import LeaveGuard, { isInsidePath } from '../../components/settings/LeaveGuard';
+import SaveBar from '../../components/settings/SaveBar';
+import SectionNav from '../../components/settings/SectionNav';
+import SettingsSection from '../../components/settings/SettingsSection';
+import { DESKTOP_QUERY, createSectionScroll } from '../../components/settings/sectionScroll';
+import { createToast } from '../../components/Toast';
+import { createMediaQuery } from '../../lib/media';
 import { GLOBAL_SETTINGS_CATEGORIES } from './categories';
-import General from './sections/General';
-import Agents from './sections/Agents';
-import Notifications from './sections/Notifications';
-import Runner from './sections/Runner';
+import { isGlobalFieldKey } from './fields';
+import {
+  GlobalSettingsFormProvider,
+  SETTINGS_BASE,
+  createGlobalSettingsForm,
+  useGlobalSettingsForm,
+} from './form';
+import HostSwitchDialog from './HostSwitchDialog';
+import AgentsSection from './sections/Agents';
+import GeneralSection from './sections/General';
+import NotificationsSection from './sections/Notifications';
+import RunnerSection from './sections/Runner';
+
+/** Where focus goes after a Save takes the save bar away: the page heading. */
+const HEADING = '.global-settings > .section-head h2';
 
 export default function SettingsRoute() {
   return (
     <RequireAuth>
-      <SettingsView />
+      <SettingsPage />
     </RequireAuth>
   );
 }
 
-function SettingsView() {
-  const params = useParams<{ section?: string }>();
-  // Area-level resources: fetched once here, shared by the sections via props.
-  // Settings have no SSE event, so the only refetch is our own onSaved.
-  const [settings, { refetch }] = createResource(() => getSettings());
-  const [providers] = createResource(() => listProviders());
-
-  // The form sections (general, agents, runner) render inside a KEYED Show on the
-  // settings object: a successful save → refetch → NEW settings object →
-  // the section REMOUNTS with a fresh seed and reads clean. The monolith never
-  // remounted, so after a save its drafts stayed nominally "dirty" against the
-  // mount snapshot — harmless then, but now the leave guard would fire
-  // spuriously. The keyed remount is the fix. A remount can never clobber
-  // in-flight edits in OTHER fields because save() just sent every dirty field
-  // of the section, and (settings having no SSE event) our onSaved is the only
-  // thing that ever swaps the object.
-  const formGate = (render: (current: Settings) => JSX.Element): JSX.Element => (
-    <Switch>
-      <Match when={settings.error !== undefined}>
-        <Banner message={errorMessage(settings.error)} />
-      </Match>
-      <Match when={settings()}>
-        <Show when={settings()} keyed>
-          {(current) => render(current)}
-        </Show>
-      </Match>
-    </Switch>
-  );
+function SettingsPage() {
+  const toast = createToast();
+  const form = createGlobalSettingsForm({
+    notify: (message, options) => toast.show(message, options),
+  });
 
   return (
-    <main class="page">
-      <SettingsLayout
-        base="/settings"
-        categories={GLOBAL_SETTINGS_CATEGORIES}
-        section={params.section}
-        indexTitle={<SectionHead title="Settings" />}
-      >
-        <Switch>
-          {/* Device-local: no settings payload, so no keyed gate. */}
-          <Match when={params.section === 'notifications'}>
-            <Notifications />
-          </Match>
-          <Match when={params.section === 'general'}>
-            {formGate((current) => (
-              <General initial={current} onSaved={() => void refetch()} />
-            ))}
-          </Match>
-          <Match when={params.section === 'agents'}>
-            {formGate((current) => (
-              <Agents
-                initial={current}
-                // Global spawn defaults have no repo context; the catalogs
-                // resolve against the DRAFTED provider_default / AFK provider
-                // (skip-layer over this list), never a hardcoded provider id
-                // (issue #51).
-                providers={providers() ?? []}
-                onSaved={() => void refetch()}
-              />
-            ))}
-          </Match>
-          <Match when={params.section === 'runner'}>
-            {formGate((current) => (
-              <Runner initial={current} onSaved={() => void refetch()} />
-            ))}
-          </Match>
-        </Switch>
-      </SettingsLayout>
+    <main class="page page-wide global-settings">
+      <SectionHead title="Settings" />
+      <GlobalSettingsFormProvider form={form}>
+        <SettingsBody />
+        <SaveBar categories={GLOBAL_SETTINGS_CATEGORIES} base={SETTINGS_BASE} heading={HEADING} />
+        <LeaveGuard inside={(url) => isInsidePath(url, SETTINGS_BASE)} subject="settings" />
+        <HostSwitchDialog />
+      </GlobalSettingsFormProvider>
+      {/* After the save bar: the toast rides above it while both show. */}
+      {toast.Toast()}
     </main>
+  );
+}
+
+function SettingsBody() {
+  const params = useParams<{ section?: string }>();
+  const form = useGlobalSettingsForm();
+  const desktop = createMediaQuery(DESKTOP_QUERY);
+
+  // The page's scroll position, the section in view, and acting on the URL
+  // (the shared settings core). The catalog landing adds a field (the AFK
+  // option bag): a held deep link goes to its target again once it is there.
+  const scroll = createSectionScroll({
+    categories: GLOBAL_SETTINGS_CATEGORIES,
+    base: () => SETTINGS_BASE,
+    section: () => params.section,
+    isField: isGlobalFieldKey,
+    desktop,
+    lateContent: () => form.catalog.providers(),
+  });
+
+  const body = (slug: string): JSX.Element => {
+    switch (slug) {
+      case 'agents':
+        return <AgentsSection />;
+      case 'runner':
+        return <RunnerSection />;
+      case 'general':
+        return <GeneralSection />;
+      case 'notifications':
+        return <NotificationsSection />;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <>
+      <Show when={form.loadError()}>
+        {(message) => (
+          <Banner
+            message={`The settings could not be loaded. ${message()}`}
+            action={
+              <button type="button" onClick={() => form.retryLoad()}>
+                Try again
+              </button>
+            }
+          />
+        )}
+      </Show>
+      <div class="settings-page" ref={(element) => scroll.page(element)}>
+        {/* Nothing to navigate, and nothing to show, until the settings have
+            loaded: every field seeds from them. */}
+        <Show when={form.saved()}>
+          <SectionNav
+            categories={GLOBAL_SETTINGS_CATEGORIES}
+            base={SETTINGS_BASE}
+            desktop={desktop()}
+            current={scroll.current()}
+            onGo={scroll.go}
+            chipsRef={scroll.chips}
+          />
+          <div class="settings-sections">
+            <Show when={form.catalog.error()}>
+              {(message) => (
+                <Banner
+                  message={`The agent catalog could not be loaded, so the agent, model and effort picks are incomplete. ${message()}`}
+                  action={
+                    <button type="button" onClick={() => form.catalog.retry()}>
+                      Try again
+                    </button>
+                  }
+                />
+              )}
+            </Show>
+            <For each={GLOBAL_SETTINGS_CATEGORIES}>
+              {(category) => (
+                <SettingsSection category={category}>{body(category.slug)}</SettingsSection>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
+    </>
   );
 }
