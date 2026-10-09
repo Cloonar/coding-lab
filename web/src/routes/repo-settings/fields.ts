@@ -1,18 +1,14 @@
 // The repo settings field table (issue #61): ONE entry per PATCHable repo
 // field, and the page's single source for everything the one save rule needs
-// to know about a field —
-//
-//   - which section it lives in (the save bar's section links, the chips' and
-//     outline's "unsaved changes" marks, the `?field=` lookup),
-//   - its label,
-//   - how its draft seeds from a saved repo,
-//   - how the draft normalises to the wire (the '' <-> null conventions of
-//     shared.ts, trimmed branch fields, the AFK option bag rule),
-//   - the rule the browser checks before Save sends anything,
-//   - and whether the field is OVERRIDABLE: an entry with an `inherit` draft
-//     is a field whose own value may be null, meaning "inherit" — the page
-//     then shows "inherited" or "set here" at its label, and Reset puts the
-//     `inherit` draft back (saved as a null override).
+// to know about a field — its section, its label, how its draft seeds from a
+// saved repo, how the draft normalises to the wire (the '' <-> null
+// conventions of shared.ts, trimmed branch fields, the AFK option bag rule),
+// the rule the browser checks before Save sends anything, and whether it is
+// OVERRIDABLE (an `inherit` draft, saved as a null override). The shape of an
+// entry and every rule derived from the table are the shared settings core's
+// (components/settings/fields.ts); what is the repo's own lives here: the
+// entries, the server's field PAIRS, and the one pair check the browser can
+// judge by itself (Autoland needs the forge binding).
 //
 // The entries are in PAGE ORDER, so "the first problem" and the order of the
 // changed sections fall out of the table. Sections are thin renderers over it
@@ -25,6 +21,13 @@
 // PATCH /repos/{id} takes for that key.
 
 import type { Repo, RepoPatch, Runner, TrackerBinding } from '../../api';
+import {
+  createFieldTable,
+  type FieldEdits,
+  type FieldKey,
+  type FieldProblems,
+  type FieldSpec,
+} from '../../components/settings/fields';
 import { boolDraft, normBool, normInt, normText, optionsKey, toBoolMap } from './shared';
 
 /** The sections whose fields wait for Save (the other four act at once). */
@@ -82,7 +85,16 @@ export interface RepoDrafts {
   manual_branch_prefix: string;
 }
 
-export type RepoFieldKey = keyof RepoDrafts;
+/** The repo page's form, as the shared settings core sees it. */
+export interface RepoSettingsShape {
+  drafts: RepoDrafts;
+  patch: RepoPatch;
+  saved: Repo;
+  context: FieldContext;
+  section: FormSectionSlug;
+}
+
+export type RepoFieldKey = FieldKey<RepoSettingsShape>;
 
 /** What a field's wire value may depend on besides its own draft. */
 export interface FieldContext {
@@ -97,27 +109,7 @@ export interface FieldContext {
   afkOptionKeys: readonly string[] | null;
 }
 
-export interface RepoFieldSpec<K extends RepoFieldKey> {
-  key: K;
-  section: FormSectionSlug;
-  /** The label the page prints at the field. */
-  label: string;
-  /** The draft a saved repo shows. */
-  seed: (repo: Repo) => RepoDrafts[K];
-  /** Draft equality, for object-valued drafts; default `===`. */
-  same?: (a: RepoDrafts[K], b: RepoDrafts[K]) => boolean;
-  /** The draft as PATCH /repos/{id} takes it. */
-  wire: (draft: RepoDrafts[K], context: FieldContext) => RepoPatch[K];
-  /** Whether a draft differs from the saved one; default: their wire values differ. */
-  differs?: (draft: RepoDrafts[K], saved: RepoDrafts[K], context: FieldContext) => boolean;
-  /** What is wrong with a draft, in the operator's words; null = nothing. */
-  validate?: (draft: RepoDrafts[K]) => string | null;
-  /**
-   * Present exactly on the OVERRIDABLE fields: the draft that means "inherit"
-   * (null on the wire). Reset sets it.
-   */
-  inherit?: RepoDrafts[K];
-}
+export type RepoFieldSpec<K extends RepoFieldKey> = FieldSpec<RepoSettingsShape, K>;
 
 // --- validators ---------------------------------------------------------------
 
@@ -444,13 +436,14 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
   }),
 };
 
+/** The rules derived from the table (components/settings/fields.ts). */
+export const REPO_FIELD_TABLE = createFieldTable<RepoSettingsShape>(REPO_FIELDS);
+
 /** Every field key, in page order. */
-export const REPO_FIELD_KEYS = Object.keys(REPO_FIELDS) as RepoFieldKey[];
+export const REPO_FIELD_KEYS = REPO_FIELD_TABLE.keys;
 
 /** Narrows an arbitrary string (a `?field=` value, a refusal's field) to a field key. */
-export function isRepoFieldKey(value: string | undefined | null): value is RepoFieldKey {
-  return typeof value === 'string' && Object.hasOwn(REPO_FIELDS, value);
-}
+export const isRepoFieldKey = REPO_FIELD_TABLE.isKey;
 
 /** The table entry of one field. */
 export function repoField<K extends RepoFieldKey>(key: K): RepoFieldSpec<K> {
@@ -458,94 +451,30 @@ export function repoField<K extends RepoFieldKey>(key: K): RepoFieldSpec<K> {
 }
 
 /** Whether a field's own value may be null, meaning "inherit". */
-export function isOverridable(key: RepoFieldKey): boolean {
-  return Object.hasOwn(REPO_FIELDS[key], 'inherit');
-}
+export const isOverridable = REPO_FIELD_TABLE.isOverridable;
 
 /** The overridable fields, in page order. */
-export const OVERRIDABLE_FIELD_KEYS = REPO_FIELD_KEYS.filter(isOverridable);
+export const OVERRIDABLE_FIELD_KEYS = REPO_FIELD_TABLE.overridableKeys;
 
 /**
  * Whether a draft of an overridable field leaves it inherited: it would be
  * saved as null (a blank text field, the inherit pick, no bag of its own).
  * Always false for a field that cannot inherit.
  */
-export function draftInherits<K extends RepoFieldKey>(
-  key: K,
-  draft: RepoDrafts[K],
-  context: FieldContext,
-): boolean {
-  return isOverridable(key) && repoField(key).wire(draft, context) === null;
-}
-
-/** Draft equality under the field's own rule. */
-export function sameDraft<K extends RepoFieldKey>(
-  key: K,
-  a: RepoDrafts[K],
-  b: RepoDrafts[K],
-): boolean {
-  const spec = repoField(key);
-  return spec.same !== undefined ? spec.same(a, b) : a === b;
-}
-
-/** Whether `draft` would change the saved repo if it were sent. */
-export function draftDiffers<K extends RepoFieldKey>(
-  key: K,
-  draft: RepoDrafts[K],
-  saved: Repo,
-  context: FieldContext,
-): boolean {
-  const spec = repoField(key);
-  const base = spec.seed(saved);
-  return spec.differs !== undefined
-    ? spec.differs(draft, base, context)
-    : spec.wire(draft, context) !== spec.wire(base, context);
-}
+export const draftInherits = REPO_FIELD_TABLE.draftInherits;
 
 /** The operator's edits: a draft per touched field, absent for an untouched one. */
-export type RepoEdits = { [K in RepoFieldKey]?: RepoDrafts[K] };
+export type RepoEdits = FieldEdits<RepoSettingsShape>;
 
 /** The edited fields that differ from the saved repo, in page order. */
-export function changedFields(
-  edits: RepoEdits,
-  saved: Repo,
-  context: FieldContext,
-): RepoFieldKey[] {
-  return REPO_FIELD_KEYS.filter((key) => isChanged(key, edits, saved, context));
-}
-
-function isChanged<K extends RepoFieldKey>(
-  key: K,
-  edits: RepoEdits,
-  saved: Repo,
-  context: FieldContext,
-): boolean {
-  const draft = edits[key];
-  return draft !== undefined && draftDiffers(key, draft as RepoDrafts[K], saved, context);
-}
+export const changedFields = REPO_FIELD_TABLE.changedFields;
 
 /**
  * The one PATCH of a Save: exactly the changed fields, each in its wire form.
  * Diffed against the SAVED repo, so a field the operator never touched can
  * never be sent — and a server-side change to it never reverted.
  */
-export function buildRepoPatch(edits: RepoEdits, saved: Repo, context: FieldContext): RepoPatch {
-  const patch: RepoPatch = {};
-  for (const key of REPO_FIELD_KEYS) assignChanged(patch, key, edits, saved, context);
-  return patch;
-}
-
-function assignChanged<K extends RepoFieldKey>(
-  patch: RepoPatch,
-  key: K,
-  edits: RepoEdits,
-  saved: Repo,
-  context: FieldContext,
-): void {
-  const draft = edits[key];
-  if (draft === undefined || !draftDiffers(key, draft as RepoDrafts[K], saved, context)) return;
-  patch[key] = repoField(key).wire(draft as RepoDrafts[K], context);
-}
+export const buildRepoPatch = REPO_FIELD_TABLE.buildPatch;
 
 /**
  * Fields the server checks as a PAIR (reposvc.UpdateSettings): the value that
@@ -579,13 +508,9 @@ export function validateEdits(
   edits: RepoEdits,
   saved: Repo,
   context: FieldContext,
-): Partial<Record<RepoFieldKey, string>> {
-  const problems: Partial<Record<RepoFieldKey, string>> = {};
+): FieldProblems<RepoSettingsShape> {
+  const problems = REPO_FIELD_TABLE.validateEdits(edits, saved, context);
   const changed = changedFields(edits, saved, context);
-  for (const key of changed) {
-    const message = validateDraft(key, edits[key] as RepoDrafts[typeof key]);
-    if (message !== null) problems[key] = message;
-  }
   if (changed.includes('tracker_binding') || changed.includes('autoland_enabled')) {
     const binding = edits.tracker_binding ?? saved.tracker_binding;
     const autoland = edits.autoland_enabled ?? saved.autoland_enabled;
@@ -595,6 +520,4 @@ export function validateEdits(
 }
 
 /** One draft's problem under its field's rule, or null. */
-export function validateDraft<K extends RepoFieldKey>(key: K, draft: RepoDrafts[K]): string | null {
-  return repoField(key).validate?.(draft) ?? null;
-}
+export const validateDraft = REPO_FIELD_TABLE.validateDraft;

@@ -20,9 +20,9 @@
 // at the field the server pins it to. So a fixture that sends a pair the real
 // server would refuse is refused here too.
 //
-// The page's layout seam (scrolling.ts `viewport`) is replaced by a fake for
-// every test: jsdom has no layout, so `h.tops` says where each section sits
-// and `h.scrolls` records where the page scrolled to.
+// The page's layout seam (components/settings/scrolling.ts `viewport`) is
+// replaced by a fake for every test: jsdom has no layout, so `h.tops` says
+// where each section sits and `h.scrolls` records where the page scrolled to.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
@@ -47,7 +47,7 @@ import App from '../../App';
 import { providerFor, resolveRemote, resolveSpawnOption } from '../../lib/spawn';
 import RepoRoutes from '../repo-home/routes';
 import { INHERITED_DEBOUNCE_MS } from './form';
-import { viewport, type Viewport } from './scrolling';
+import { viewport, type Viewport } from '../../components/settings/scrolling';
 
 export const REPO_ID = 'repo_1';
 

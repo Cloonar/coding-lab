@@ -1,7 +1,8 @@
-// The settings page's section navigation (issue #61): below 1024px a sticky
-// row of chips under the repo tabs — it scrolls sideways inside itself, never
-// the page — and from 1024px a sticky outline with the group labels. Exactly
-// one of the two is in the document at a time.
+// A settings page's section navigation (issue #61, issue #85): below 1024px a
+// sticky row of chips under whatever heads the page (the repo tabs, the
+// Settings heading) — it scrolls sideways inside itself, never the page — and
+// from 1024px a sticky outline with the categories' group labels. Exactly one
+// of the two is in the document at a time.
 //
 // Both mark the section in view with aria-current="location" (plus a filled
 // chip / a heavier outline entry — never colour alone), and a section with
@@ -11,32 +12,31 @@
 // URL the usual way.
 
 import { For, Show, createEffect, on } from 'solid-js';
-import { REPO_SETTINGS_CATEGORIES, type RepoSettingsCategory } from './categories';
-import { useRepoSettingsForm } from './form';
+import type { SettingsCategory } from './categories';
+import { useSettingsFormContext } from './form';
+import { isModifiedClick } from './links';
 
 interface OutlineGroup {
   label: string | null;
-  sections: RepoSettingsCategory[];
+  sections: SettingsCategory[];
 }
 
 /** The sections bundled under their group labels, in page order. */
-function outlineGroups(): OutlineGroup[] {
+function outlineGroups(categories: readonly SettingsCategory[]): OutlineGroup[] {
   const groups: OutlineGroup[] = [];
-  for (const category of REPO_SETTINGS_CATEGORIES) {
+  for (const category of categories) {
+    const label = category.group ?? null;
     const last = groups[groups.length - 1];
-    if (last !== undefined && last.label === category.group) last.sections.push(category);
-    else groups.push({ label: category.group, sections: [category] });
+    if (last !== undefined && last.label === label) last.sections.push(category);
+    else groups.push({ label, sections: [category] });
   }
   return groups;
 }
 
-/** A click the browser should handle itself (new tab, new window, download). */
-function isModifiedClick(event: MouseEvent): boolean {
-  return event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
-}
-
 export default function SectionNav(props: {
-  /** The settings index path, `/repos/:id/settings`. */
+  /** The page's sections, in page order. */
+  categories: readonly SettingsCategory[];
+  /** The settings index path (`/repos/:id/settings`, `/settings`). */
   base: string;
   /** True from 1024px: the outline replaces the chips. */
   desktop: boolean;
@@ -47,8 +47,8 @@ export default function SectionNav(props: {
   /** Receives the chips row, whose height the page's scroll offsets include. */
   chipsRef?: (element: HTMLElement | undefined) => void;
 }) {
-  const form = useRepoSettingsForm();
-  const hasChanges = (slug: string): boolean => (form.changedSections() as string[]).includes(slug);
+  const form = useSettingsFormContext();
+  const hasChanges = (slug: string): boolean => form.changedSections().includes(slug);
 
   const go = (event: MouseEvent, slug: string): void => {
     if (isModifiedClick(event)) return;
@@ -91,7 +91,7 @@ export default function SectionNav(props: {
             props.chipsRef?.(element);
           }}
         >
-          <For each={REPO_SETTINGS_CATEGORIES}>
+          <For each={props.categories}>
             {(category) => (
               <a
                 href={`${props.base}/${category.slug}`}
@@ -111,7 +111,7 @@ export default function SectionNav(props: {
       }
     >
       <nav class="settings-outline" aria-label="Settings sections">
-        <For each={outlineGroups()}>
+        <For each={outlineGroups(props.categories)}>
           {(group, index) => (
             <div
               class="settings-outline-group"

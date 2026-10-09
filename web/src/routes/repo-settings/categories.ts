@@ -7,24 +7,20 @@
 //
 // This list is the page's one source for a section's title, its one-line
 // description, its group label (the desktop outline prints it) and whether
-// its rows act at once. The page (index.tsx), the section chips and outline
-// (SectionNav.tsx) and the save bar's section links all read it. Icon values
-// are vendored Icon names (ADR-0019, issue #199).
+// its rows act at once. The page (index.tsx) hands it to the shared settings
+// core — the section chips and outline (components/settings/SectionNav.tsx),
+// the page's scroll logic — and the repo home frame to the save bar, whose
+// section links it names. Icon values are vendored Icon names (ADR-0019,
+// issue #199).
 
 import type { SettingsCategory } from '../../components/settings/categories';
 
 /** The outline's group labels, in page order. */
 export type RepoSettingsGroup = 'Runs' | 'Automation' | 'Access' | 'Setup';
 
-export interface RepoSettingsCategory extends SettingsCategory {
-  /** The group the outline lists the section under; null = ungrouped (Danger zone). */
+/** A repo settings section: every one names its group (null = Danger zone). */
+export interface RepoSettingsCategory extends SettingsCategory<RepoSettingsGroup> {
   group: RepoSettingsGroup | null;
-  /**
-   * True for a section whose rows are independent objects with their own
-   * server calls (Schedules, Secrets, Imports): they apply at once and never
-   * wait for the page's save bar, so the heading carries a tag saying so.
-   */
-  immediate?: boolean;
 }
 
 export const REPO_SETTINGS_CATEGORIES: RepoSettingsCategory[] = [
@@ -103,13 +99,3 @@ export const REPO_SETTINGS_CATEGORIES: RepoSettingsCategory[] = [
     danger: true,
   },
 ];
-
-/** The section a slug names, or undefined for an unknown one. */
-export function repoSettingsCategory(slug: string | undefined): RepoSettingsCategory | undefined {
-  return REPO_SETTINGS_CATEGORIES.find((category) => category.slug === slug);
-}
-
-/** A section's DOM id — the page's scroll targets and the chips' anchors. */
-export function sectionElementId(slug: string): string {
-  return `settings-${slug}`;
-}

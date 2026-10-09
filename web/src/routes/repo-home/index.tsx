@@ -8,11 +8,11 @@
 // The frame owns RequireAuth, the page container, the ONE live repo resource
 // (getRepo + repo.changed for this repo) and the one toast; tabs read both
 // through useRepoHome() (./context.ts). It also mounts the repo settings form
-// store with its save bar and leave guard (routes/repo-settings/form.tsx), so
-// pending settings changes outlive the Settings tab. A failed repo load shows
-// its banner in the header slot while the back link and the tabs stay usable,
-// and the routed tab still renders — a loaded issue stays readable without
-// its repo.
+// store (routes/repo-settings/form.tsx) with the shared settings save bar and
+// the repo's leave guard, so pending settings changes outlive the Settings
+// tab. A failed repo load shows its banner in the header slot while the back
+// link and the tabs stay usable, and the routed tab still renders — a loaded
+// issue stays readable without its repo.
 //
 // The tabs are navigation links (a <nav> of <a href>, aria-current="page" on
 // the active one), not ARIA tabs: each one is a real URL, and the router's
@@ -27,15 +27,16 @@ import { errorMessage, getRepo, type Repo } from '../../api';
 import Banner from '../../components/Banner';
 import Icon from '../../components/Icon';
 import RequireAuth from '../../components/RequireAuth';
+import SaveBar from '../../components/settings/SaveBar';
 import { createToast } from '../../components/Toast';
 import { createLiveResource } from '../../lib/liveResource';
 import { summaryRefreshSpecs } from '../../lib/repoList';
 import { remoteLabel } from '../../lib/repoName';
 import { resourceValue } from '../../lib/resource';
 import { useRouteNotice } from '../../lib/routeNotice';
+import { REPO_SETTINGS_CATEGORIES } from '../repo-settings/categories';
 import { RepoSettingsFormProvider } from '../repo-settings/form';
 import LeaveGuard from '../repo-settings/LeaveGuard';
-import SaveBar from '../repo-settings/SaveBar';
 import { RepoHomeContext, type RepoHomeState } from './context';
 
 export { useRepoHome } from './context';
@@ -188,7 +189,11 @@ function RepoHomeFrame(props: { children?: JSX.Element }) {
           </nav>
 
           <div class="repo-home-body">{props.children}</div>
-          <SaveBar />
+          <SaveBar
+            categories={REPO_SETTINGS_CATEGORIES}
+            base={`${base()}/settings`}
+            heading=".repo-head h1"
+          />
           <LeaveGuard />
         </RepoSettingsFormProvider>
         {toast.Toast()}
