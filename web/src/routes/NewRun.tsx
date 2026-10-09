@@ -1,20 +1,24 @@
-// New run (Home, `/`) — issue #66, design direction A ("Sheet", revision 2;
-// reference docs/reference/new-run-mockup.html). The page is three things and
-// nothing else: the repository pills (RepoPills — recent repos plus "All N",
-// which opens the repository picker, never the Repositories page), the
-// composer, and the Issues card of the selected repo (IssuesCard — its AFK
-// line replaces the old AFK strip; tapping an issue attaches an action to the
-// composer). Status shows only where it blocks a run: ComposerBlockers, right
-// above the field. Never auto-navigates on load; the only navigations are a
-// sent run (→ its chat), a blocker's remedy and the Runner settings link.
+// New run (`/new`; it was Home at `/` until issue #76 made Runs the home and
+// gave the composer its own URL) — issue #66, design direction A ("Sheet",
+// revision 2; reference docs/reference/new-run-mockup.html). Below 1024px the
+// page opens with a "New run" header (the New tab's root, issue #76; the
+// desktop centered column has none — the rail's `+ New run` names it). Under
+// it the page is three things and nothing else: the repository pills
+// (RepoPills — recent repos plus "All N", which opens the repository picker,
+// never the Repositories page), the composer, and the Issues card of the
+// selected repo (IssuesCard — its AFK line replaces the old AFK strip; tapping
+// an issue attaches an action to the composer). Status shows only where it
+// blocks a run: ComposerBlockers, right above the field. Never auto-navigates
+// on load; the only navigations are a sent run (→ its chat), a blocker's
+// remedy and the Runner settings link.
 //
 // The composer keeps the Chat's dock shape: below 1024px it is docked at the
-// bottom edge (sticky, safe-area inset), so the field is where the Chat's
-// composer will be a second later; from 1024px it sits under the pills in a
-// centered 720px column. One DOM order serves both (pills, composer, Issues):
-// it is the desktop visual order, so keyboard focus follows what is seen
-// where Tab is used most, and on the phone CSS `order` moves the dock last
-// (styles/newrun.css).
+// bottom edge (sticky, safe-area inset; above the tab bar since issue #76), so
+// the field is where the Chat's composer will be a second later; from 1024px
+// it sits under the pills in a centered 720px column. One DOM order serves
+// both (pills, composer, Issues): it is the desktop visual order, so keyboard
+// focus follows what is seen where Tab is used most, and on the phone CSS
+// `order` moves the dock last (styles/newrun.css).
 //
 // The field: an optional attached issue action (AttachmentChip), the
 // autogrowing textarea, and a bar with the run-option chips — Model, Effort
@@ -68,10 +72,12 @@ import {
   type ChoiceOption,
 } from '../components/newrun/RunOptions';
 import RequireAuth from '../components/RequireAuth';
+import SectionHead from '../components/SectionHead';
 import { createToast } from '../components/Toast';
 import { useEvents } from '../events';
 import { isComposerSend } from '../lib/composerKeys';
 import { createLiveResource } from '../lib/liveResource';
+import { createMediaQuery } from '../lib/media';
 import {
   RECENT_REPOS_PILLS,
   attachmentText,
@@ -108,9 +114,13 @@ export default function NewRun() {
   );
 }
 
+/** The shell breakpoint (AppShell's DESKTOP_MIN_PX): from here the rail names the page. */
+const DESKTOP_QUERY = '(min-width: 1024px)';
+
 function NewRunView() {
   const events = useEvents();
   const navigate = useNavigate();
+  const desktop = createMediaQuery(DESKTOP_QUERY);
 
   // repo.changed keeps clone_status and the readiness summary fresh, so a
   // cloning repo becomes startable (and its banner goes) the moment it lands.
@@ -467,13 +477,20 @@ function NewRunView() {
 
   return (
     <main class="page newrun" classList={{ 'newrun-docked': hasRepos() }}>
+      {/* The phone page header (issue #76): the New tab's root names itself,
+          like Runs, Repos and More. Desktop keeps the bare centered column. */}
+      <Show when={!desktop()}>
+        <div class="newrun-head">
+          <SectionHead title="New run" />
+        </div>
+      </Show>
       <Switch>
         <Match when={repos.error !== undefined}>
           <Banner message={errorMessage(repos.error)} />
         </Match>
         {/* Zero repos: the composer is hidden and the empty state carries the
             "No repositories yet" text the login/setup round-trip and the
-            Playwright smoke assert on `/`. */}
+            Playwright smoke assert on. */}
         <Match when={noRepos()}>
           <EmptyState>
             No repositories yet — <A href="/repos/new">add one</A> to get started.

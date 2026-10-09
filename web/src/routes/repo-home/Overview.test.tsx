@@ -92,6 +92,11 @@ describe('Overview on load', () => {
         `GET ${API}`,
         `GET ${API}/readiness`,
         `GET ${API}/parked`,
+        // Not the Overview's: the app shell reads the provider catalog and the
+        // global default for its More-tab logged-out dot (issue #76). The set
+        // still fails on any request the Overview adds beyond these.
+        'GET /api/v1/providers',
+        'GET /api/v1/settings',
       ]),
     );
     // Above all, no ready-queue read: that one reaches the forge.

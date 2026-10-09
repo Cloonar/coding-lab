@@ -8,6 +8,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   REPO_ID,
+  SHELL_PROVIDERS_GETS,
+  SHELL_SETTINGS_GETS,
   container,
   discard,
   emitRepoChanged,
@@ -86,16 +88,19 @@ describe('the save bar outside the Settings tab', () => {
     await settle();
     await followLink(repoTab('Issues'));
 
-    expect(requested()).not.toContain('/api/v1/providers');
+    // Only the app shell's own catalog read (its More-tab dot) so far, none
+    // from the Settings tab.
+    expect(count('/api/v1/providers')).toBe(SHELL_PROVIDERS_GETS);
     expect(requested()).not.toContain('/api/v1/credentials');
     expect(requested()).not.toContain(INHERITED);
 
     await followLink(repoTab('Settings'));
     await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
-    expect(count('/api/v1/providers')).toBe(1);
+    expect(count('/api/v1/providers')).toBe(SHELL_PROVIDERS_GETS + 1);
     expect(count(INHERITED)).toBe(1);
-    // The page resolves nothing itself, so it never reads the global settings.
-    expect(requested()).not.toContain('/api/v1/settings');
+    // The page resolves nothing itself, so it never reads the global settings
+    // (the one read is the app shell's).
+    expect(count('/api/v1/settings')).toBe(SHELL_SETTINGS_GETS);
 
     // Away from the tab nothing follows the repo…
     await followLink(repoTab('Overview'));
@@ -108,7 +113,7 @@ describe('the save bar outside the Settings tab', () => {
     await followLink(repoTab('Settings'));
     await waitFor(() => container.querySelector('input[name="afk_branch_pattern"]'), 'the page');
     await settle();
-    expect(count('/api/v1/providers')).toBe(1);
+    expect(count('/api/v1/providers')).toBe(SHELL_PROVIDERS_GETS + 1);
     expect(count(INHERITED)).toBe(2);
   });
 

@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   REPO_ID,
+  SHELL_PROVIDERS_GETS,
   baseSchedule,
   container,
   fieldWrapper,
@@ -329,7 +330,8 @@ describe('repo settings: what could not be loaded, and what a scroll costs', () 
       ?.click();
     await waitFor(() => (catalogError() === null ? true : null), 'the retry');
 
-    expect(h.providersGets).toBe(2);
+    // The shell's own failed read, the page's, and the retry.
+    expect(h.providersGets).toBe(SHELL_PROVIDERS_GETS + 2);
     await waitFor(
       () => container.querySelector('input[name="afk_options.ultracode"]'),
       'the catalog-driven option bag',

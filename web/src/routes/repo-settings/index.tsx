@@ -159,17 +159,10 @@ export default function RepoSettings() {
     document.getElementById(sectionElementId(slug));
 
   // --- what sticks to the top ---------------------------------------------------
-  // Below 1024px the app shell's top strip is stuck to the viewport and the
-  // chips stick right under it; a scroll target has to clear both.
-  const [stripHeight, setStripHeight] = createSignal(0);
-  const measureStrip = (): void => {
-    const strip = document.querySelector('.shell-topstrip');
-    setStripHeight(strip !== null ? viewport.heightOf(strip) : 0);
-  };
+  // Below 1024px the chips stick to the viewport top; a scroll target has to
+  // clear them.
   const stuckOffset = (): number =>
-    desktop()
-      ? DESKTOP_OFFSET
-      : stripHeight() + (chips !== undefined ? viewport.heightOf(chips) : 0) + TARGET_GAP;
+    desktop() ? DESKTOP_OFFSET : (chips !== undefined ? viewport.heightOf(chips) : 0) + TARGET_GAP;
 
   // --- the section in view ------------------------------------------------------
   const [current, setCurrent] = createSignal(FIRST_SECTION);
@@ -304,10 +297,8 @@ export default function RepoSettings() {
   });
 
   onMount(() => {
-    measureStrip();
     updateCurrent();
     const onResize = (): void => {
-      measureStrip();
       updateCurrent();
     };
     // The operator takes over the scroll position: from here on the section
@@ -505,7 +496,6 @@ export default function RepoSettings() {
               desktop={desktop()}
               current={current()}
               onGo={onNavGo}
-              stickyTop={stripHeight()}
               chipsRef={(element) => (chips = element)}
             />
             <div class="settings-sections">

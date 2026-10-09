@@ -1,1 +1,147 @@
-/* Bottom tab bar (issue #76). */
+/* Bottom tab bar (issue #76) ---------------------------------------------- */
+/* The phone's navigation below 1024px: Runs · New · Repos · More, fixed to the
+   bottom edge (components/TabBar.tsx). It replaces the old mobile top strip,
+   hamburger drawer and drag gesture; from 1024px the side rail takes over and
+   the bar is not displayed. AppShell does not render it at all on the Chat and
+   the Schedule editor, which are immersive.
+
+   Anatomy (docs/reference/tab-bar-mockup.html): 49px of tabs plus the bottom
+   safe-area inset, four equal columns, a 24px icon over an 11px label, the lit
+   tab in --link; translucent card with a blur and a 1px top border.
+
+   Layering: above page content and its sticky bits (the repo settings chips
+   are 12, the settings save bar 10), below the toast (20), the schedule editor
+   (31/32), sheets (40/41) and dialogs / pickers (50/51) — those cover it.
+
+   --tabbar-space is the room the bar takes at the bottom of the viewport: 0px
+   unless the shell carries .has-tabbar (AppShell sets it whenever the bar
+   renders) below 1024px. The content column pads by it so pages scroll clear
+   of the bar, and anything fixed to the bottom of a tab-bar page (the toast,
+   the repo settings save bar, the New-run page's docked composer) sits at
+   `bottom: var(--tabbar-space, 0px)` instead of 0. Tokens only. */
+
+:root {
+  --tabbar-space: 0px;
+}
+
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  height: calc(49px + env(safe-area-inset-bottom, 0px));
+  padding: 0 6px env(safe-area-inset-bottom, 0px);
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--border);
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 44px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--muted);
+  text-decoration: none;
+  border-radius: var(--radius-control);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tab:hover {
+  text-decoration: none;
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: -2px;
+}
+
+.tab.on {
+  color: var(--link);
+}
+
+.tab.on .tab-icon {
+  stroke-width: 2.3;
+}
+
+/* New is drawn as the accent circle, whichever tab is lit. */
+.tab-plus {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-top: -2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.tab-plus .tab-icon {
+  stroke-width: 2.6;
+}
+
+.tab.on .tab-plus {
+  box-shadow:
+    0 0 0 2px var(--card),
+    0 0 0 4px var(--accent);
+}
+
+/* Runs: live runs that need you. Ringed in the card colour so it reads
+   against the icon it overlaps. */
+.tab-badge {
+  position: absolute;
+  top: 3px;
+  left: calc(50% + 6px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px var(--card);
+}
+
+/* More: the agent provider is logged out (the warning amber). */
+.tab-dot {
+  position: absolute;
+  top: 6px;
+  left: calc(50% + 8px);
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  background: var(--banner-text);
+  box-shadow: 0 0 0 2px var(--card);
+}
+
+@media (max-width: 1023.98px) {
+  .shell.has-tabbar {
+    --tabbar-space: calc(49px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .shell.has-tabbar .shell-content {
+    padding-bottom: var(--tabbar-space);
+  }
+}
+
+@media (min-width: 1024px) {
+  .tabbar {
+    display: none;
+  }
+}

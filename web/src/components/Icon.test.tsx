@@ -46,7 +46,6 @@ describe('Icon', () => {
 
   it('carries every glyph the repositories redesign uses', () => {
     const needed: IconName[] = [
-      'menu',
       'chevron-right',
       'chevron-left',
       'chevron-down',
@@ -55,7 +54,6 @@ describe('Icon', () => {
       'search',
       'x',
       'folder',
-      'history',
       'key',
       'ticket',
       'settings',
@@ -83,6 +81,7 @@ describe('Icon', () => {
       'trash-2',
       'rotate-ccw',
       'undo-2',
+      'inbox',
     ];
     expect(needed.filter((name) => !ICON_NAMES.includes(name))).toEqual([]);
   });

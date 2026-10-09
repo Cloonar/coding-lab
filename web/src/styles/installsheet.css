@@ -1,9 +1,10 @@
 /* Install sheet (issue #142) ------------------------------------------------- */
 /* The app's first modal primitive: a bottom sheet offering PWA install on
-   phones. Layering: above the drawer scrim (.shell-scrim z-index 25) and
-   rail (.shell-rail z-index 30), and above the toast (.toast z-index 20) —
-   an install prompt should never be hidden behind navigation chrome or a
-   passing status message. */
+   phones. Layering: above the bottom tab bar (.tabbar z-index 15), the rail
+   (.shell-rail z-index 30) and the toast (.toast z-index 20) — an install
+   prompt should never be hidden behind navigation chrome or a passing status
+   message. It covers the tab bar rather than sitting on it: a modal sheet
+   owns the bottom edge while it is up. */
 
 .install-scrim {
   position: fixed;

@@ -1,49 +1,42 @@
-// Run history (/history, per-repo filter via ?repo=, outcome filter via
-// ?outcome=): phone-first cards with kind, label/branch, model/effort,
-// started time, duration and the outcome badge (active/success/death/
-// timeout/stopped/escalated) plus failure_reason. AFK kinds title as 'AFK #N' from the
-// run's issue number. Newest first, straight from GET /runs; the outcome
-// filter narrows client-side; run.changed refetches. (Formerly /runs; /runs
-// now redirects here, and /runs/:id stays the chat.)
+// The Ended side of the Runs page (/history; issue #76 — formerly the History
+// page of cards). It keeps its own URL and filters — per repo via ?repo=, per
+// outcome via ?outcome= — under the same head as the Live side (RunsHead, with
+// Ended selected). Rows take RunList's row shape: title plus the outcome chip
+// the run earned, a second line `repo · PR #n or branch · duration`, and the
+// age on the right (since ended_at — no last-activity field, see
+// lib/runGroups), grouped by the local day the run ended, newest first. Each
+// row opens the chat at /runs/:id. Live runs (outcome 'active') are the Live
+// side's, so they are excluded here and 'active' is no outcome filter option.
+// The outcome chip keeps its `outcome-<outcome>` colour classes; its word
+// comes from lib/runGroups (a Run carries no PR state, so no "merged").
+//
+// Rows come straight from GET /runs (newest first, RUNS_LIMIT per page); the
+// outcome filter narrows client-side; run.changed refetches. Runs carry
+// repo_id, not a repo name: the name comes from the listRepos() the repo
+// filter already loads, falling back to the session name's repo part.
 //
 // An escalated autoland run (kind lander/fix/escalate) carrying a
 // pull_number also states the consequence — which PR autoland is ignoring —
 // and a Re-arm action (issue #188) that POSTs
-// .../autoland/pulls/{pull}/rearm and refetches the page on success. Before
-// this, the suppression was invisible: a bare 'escalated' chip with no way
-// back in.
+// .../autoland/pulls/{pull}/rearm and refetches the page on success. Both
+// render under the row, outside its link, so the button is never inside an
+// <a>. A failure_reason renders there too.
 
 import { A, useSearchParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createResource, createSignal } from 'solid-js';
-import {
-  errorMessage,
-  listRuns,
-  listRepos,
-  rearmPull,
-  type Run,
-  type RunKind,
-  type RunOutcome,
-} from '../api';
-import EmptyState from '../components/EmptyState';
+import { For, Match, Show, Switch, createResource, createSignal, onCleanup } from 'solid-js';
+import { errorMessage, listRuns, listRepos, rearmPull, type Run, type RunOutcome } from '../api';
 import Banner from '../components/Banner';
+import EmptyState from '../components/EmptyState';
 import RequireAuth from '../components/RequireAuth';
-import SectionHead from '../components/SectionHead';
-import { instanceTitle, sessionLabel } from '../lib/instanceLabel';
+import RunsHead from '../components/RunsHead';
+import { sessionRepo } from '../lib/instanceLabel';
 import { createLiveResource } from '../lib/liveResource';
+import { endedAge, endedRunTitle, groupByDay, outcomeWord } from '../lib/runGroups';
 
 const RUNS_LIMIT = 50;
 
-const KIND_LABELS: Record<RunKind, string> = {
-  manual: 'manual',
-  afk_manual: 'AFK',
-  afk_auto: 'AFK auto',
-  lander: 'Lander',
-  fix: 'Fix',
-  escalate: 'Escalate',
-  scheduled: 'Scheduled',
-};
-
-const OUTCOMES: RunOutcome[] = ['active', 'success', 'death', 'timeout', 'stopped', 'escalated'];
+/** The ended outcomes — 'active' runs are the Live side's. */
+const OUTCOMES: RunOutcome[] = ['success', 'death', 'timeout', 'stopped', 'escalated'];
 
 export default function History() {
   return (
@@ -70,66 +63,87 @@ function HistoryView() {
     [{ type: 'run.changed' }],
   );
 
+  // Ages and day labels move on without a refetch.
+  const [now, setNow] = createSignal(Date.now());
+  const ticker = setInterval(() => setNow(Date.now()), 60_000);
+  onCleanup(() => clearInterval(ticker));
+
+  const repoName = (run: Run): string =>
+    repos()?.find((repo) => repo.id === run.repo_id)?.name ?? sessionRepo(run.session_name);
+
+  const filterWord = () => {
+    const outcome = outcomeFilter();
+    return outcome === '' ? '' : outcomeWord(outcome);
+  };
+
+  const ended = () => (runs() ?? []).filter((run) => run.outcome !== 'active');
   // The outcome filter narrows the already-fetched page client-side.
   const visible = () => {
-    const all = runs() ?? [];
     const outcome = outcomeFilter();
-    return outcome === '' ? all : all.filter((run) => run.outcome === outcome);
+    return outcome === '' ? ended() : ended().filter((run) => run.outcome === outcome);
   };
 
   return (
-    <main class="page">
-      <SectionHead
-        title="History"
-        // The two filters go in as a bare fragment, NOT wrapped in
-        // `.head-actions`: the head row's own 0.65rem gap is what separates
-        // them, where `.head-actions` would impose its 0.75rem. They cluster at
-        // the right edge now (the row lost `justify-content: space-between`,
-        // which used to spread them across it) — matching every other
-        // multi-control head in the app.
-        action={
-          <>
-            <label class="field runs-filter">
-              <select
-                name="outcome-filter"
-                value={outcomeFilter()}
-                onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
-                aria-label="Filter by outcome"
-              >
-                <option value="">All outcomes</option>
-                <For each={OUTCOMES}>{(outcome) => <option value={outcome}>{outcome}</option>}</For>
-              </select>
-            </label>
-            <label class="field runs-filter">
-              <select
-                name="repo-filter"
-                value={repoFilter()}
-                onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
-                aria-label="Filter by repository"
-              >
-                <option value="">All repositories</option>
-                <For each={repos() ?? []}>
-                  {(repo) => <option value={repo.id}>{repo.name}</option>}
-                </For>
-              </select>
-            </label>
-          </>
-        }
-      />
+    <main class="page page-wide runs-page">
+      <RunsHead />
+      <div class="runs-filters">
+        <label class="field runs-filter">
+          <select
+            name="outcome-filter"
+            value={outcomeFilter()}
+            onInput={(e) => setParams({ outcome: e.currentTarget.value || undefined })}
+            aria-label="Filter by outcome"
+          >
+            <option value="">All outcomes</option>
+            <For each={OUTCOMES}>
+              {(outcome) => <option value={outcome}>{outcomeWord(outcome)}</option>}
+            </For>
+          </select>
+        </label>
+        <label class="field runs-filter">
+          <select
+            name="repo-filter"
+            value={repoFilter()}
+            onInput={(e) => setParams({ repo: e.currentTarget.value || undefined })}
+            aria-label="Filter by repository"
+          >
+            <option value="">All repositories</option>
+            <For each={repos() ?? []}>{(repo) => <option value={repo.id}>{repo.name}</option>}</For>
+          </select>
+        </label>
+      </div>
       <Switch>
         <Match when={runs.error !== undefined}>
           <Banner message={errorMessage(runs.error)} />
         </Match>
-        <Match when={runs()?.length === 0}>
-          <EmptyState>No runs yet.</EmptyState>
+        <Match when={runs() !== undefined && ended().length === 0}>
+          <EmptyState>No ended runs yet.</EmptyState>
         </Match>
+        {/* Only reachable with an outcome filter set: unfiltered, visible()
+            is ended(), which the Match above already caught empty. */}
         <Match when={runs() !== undefined && visible().length === 0}>
-          <EmptyState>No {outcomeFilter()} runs.</EmptyState>
+          <EmptyState>No {filterWord()} runs.</EmptyState>
         </Match>
         <Match when={runs()}>
-          <div class="card-list">
-            <For each={visible()}>
-              {(run) => <RunCard run={run} onRearmed={() => void refetch()} />}
+          <div class="runlist runlist-page ended-list">
+            <For each={groupByDay(visible(), now())}>
+              {(day) => (
+                <section class="runlist-group">
+                  <p class="runlist-label">{day.label}</p>
+                  <ul class="runlist-rows">
+                    <For each={day.runs}>
+                      {(run) => (
+                        <EndedRow
+                          run={run}
+                          repoName={repoName(run)}
+                          now={now()}
+                          onRearmed={() => void refetch()}
+                        />
+                      )}
+                    </For>
+                  </ul>
+                </section>
+              )}
             </For>
           </div>
         </Match>
@@ -138,26 +152,10 @@ function HistoryView() {
   );
 }
 
-function RunCard(props: { run: Run; onRearmed: () => void }) {
-  const title = () => {
-    // A user-set title wins over everything (issue #111 rename overlay).
-    const custom = props.run.title?.trim() ?? '';
-    if (custom !== '') return custom;
-    // AFK runs title from the persisted issue number (restart-proof); the
-    // session label is the fallback for both AFK and manual runs. A scheduled
-    // run (issue #247) is anchored to no issue, so issue_number is null and it
-    // falls through to the label path below, which renders its
-    // 'sched-<id>-<stamp>' label as '<schedule> · <firing time>'.
-    if (props.run.kind !== 'manual' && props.run.issue_number !== null) {
-      return `AFK #${props.run.issue_number}`;
-    }
-    const label = instanceTitle(sessionLabel(props.run.session_name));
-    return label === '' ? props.run.branch : label;
-  };
-
+function EndedRow(props: { run: Run; repoName: string; now: number; onRearmed: () => void }) {
   // Escalation is terminal history on the run row itself (never rewritten —
   // see internal/httpapi/autoland.go), so a re-arm never changes this run's
-  // own fields; `busy`/`rearmError` are local to the card, same shape as
+  // own fields; `busy`/`rearmError` are local to the row, same shape as
   // AFKStrip's reset. onRearmed() still refetches the page: the human's
   // gesture kicks an immediate autoland pass server-side, and the operator
   // should not have to wait for the next run.changed event to see it land.
@@ -181,30 +179,37 @@ function RunCard(props: { run: Run; onRearmed: () => void }) {
     }
   };
 
+  const title = () => endedRunTitle(props.run);
+  const where = () =>
+    props.run.pull_number === null ? props.run.branch : `PR #${props.run.pull_number}`;
+  const word = () => outcomeWord(props.run.outcome);
+
   return (
-    <article class="card run-card">
-      <div class="card-head">
-        <span class="card-title">{title()}</span>
-        <span class="spacer" />
-        <span class={`chip outcome-${props.run.outcome}`}>{props.run.outcome}</span>
-      </div>
-      <p class="muted card-sub mono">{props.run.branch}</p>
-      <div class="chip-row">
-        <span class="chip">{KIND_LABELS[props.run.kind] ?? props.run.kind}</span>
-        <span class="chip mono">
-          {props.run.model} · {props.run.effort}
+    <li class="ended-run">
+      <A
+        href={`/runs/${props.run.id}`}
+        class="runlist-row"
+        aria-label={`${title()} — ${props.repoName} — ${word()}`}
+      >
+        <span class="runlist-dot" />
+        <span class="runlist-body">
+          <span class="runlist-top">
+            <span class="runlist-title">{title()}</span>
+            <span class={`chip outcome-chip outcome-${props.run.outcome}`}>{word()}</span>
+          </span>
+          <span class="runlist-sub">
+            {props.repoName} · {where()} · {formatDuration(props.run)}
+          </span>
         </span>
-        <span class="muted run-times">
-          {formatStarted(props.run.started_at)} · {formatDuration(props.run)}
-        </span>
-      </div>
+        <span class="runlist-age">{endedAge(props.run, props.now)}</span>
+      </A>
       <Show when={props.run.failure_reason}>
-        <p class="run-failure">{props.run.failure_reason}</p>
+        <p class="run-failure ended-run-extra">{props.run.failure_reason}</p>
       </Show>
       {/* The chip alone only names the outcome; this states the consequence
           (which PR is suppressed) and the way back in (issue #188). */}
       <Show when={props.run.outcome === 'escalated' && props.run.pull_number !== null}>
-        <div class="run-escalated">
+        <div class="run-escalated ended-run-extra">
           <p class="run-escalated-note">
             Autoland is ignoring PR #{props.run.pull_number} until it is re-armed.
           </p>
@@ -216,18 +221,8 @@ function RunCard(props: { run: Run; onRearmed: () => void }) {
           </div>
         </div>
       </Show>
-      <A href={`/runs/${props.run.id}`} class="card-link run-open" title="Open the chat">
-        Open chat →
-      </A>
-    </article>
+    </li>
   );
-}
-
-function formatStarted(startedAt: string): string {
-  const t = new Date(startedAt);
-  if (Number.isNaN(t.getTime())) return startedAt;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
 }
 
 function formatDuration(run: Run): string {

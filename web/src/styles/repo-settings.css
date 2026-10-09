@@ -4,8 +4,9 @@
    1024px), plus the save bar the frame renders on every tab while changes
    are pending. Tokens only, so both colour schemes follow.
 
-   Layers, all below the mobile top strip and the toast (20): the save bar
-   (10), an open Select panel (11) over it, the chips (12) over both. */
+   Layers, all below the bottom tab bar (15) and the toast (20): the save bar
+   (10), an open Select panel (11) over it, the chips (12) over both. Below
+   1024px the save bar sits ON the tab bar (--tabbar-space, issue #76). */
 
 /* Page ------------------------------------------------------------------------ */
 
@@ -39,8 +40,9 @@
 
 /* Section chips (below 1024px) --------------------------------------------------- */
 /* Flush under the tab row and full-bleed across the 16px page gutters. The row
-   scrolls sideways inside itself; `top` is set inline to the height of the
-   app shell's top strip, which is stuck above it. */
+   scrolls sideways inside itself; it sticks to the viewport top (the app
+   shell has no top strip any more — issue #76 moved navigation to the bottom
+   tab bar). */
 
 .settings-chips {
   position: sticky;
@@ -551,8 +553,10 @@
 
 /* Save bar -------------------------------------------------------------------------- */
 /* Fixed to the bottom of the content column: beside the 260px side rail from
-   1024px (shell.css), edge to edge below. The spacer before it reserves its
-   height in the page flow, so nothing ends up behind it. */
+   1024px (shell.css), edge to edge below — there it rides on top of the
+   bottom tab bar (bottom: --tabbar-space, tabbar.css; issue #76), which then
+   owns the safe-area inset. The spacer before it reserves its height in the
+   page flow, so nothing ends up behind it. */
 
 .settings-savebar-space {
   height: calc(4rem + env(safe-area-inset-bottom));
@@ -562,12 +566,24 @@
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: var(--tabbar-space, 0px);
   z-index: 10;
   padding: var(--space-2) 0 calc(var(--space-2) + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   background: var(--card);
   box-shadow: 0 -8px 22px color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+/* On the tab bar the bar's own safe-area padding (and the spacer's) would be
+   counted twice: the tab bar below it already clears the inset. */
+@media (max-width: 1023.98px) {
+  .shell.has-tabbar .settings-savebar {
+    padding-bottom: var(--space-2);
+  }
+
+  .shell.has-tabbar .settings-savebar-space {
+    height: 4rem;
+  }
 }
 
 /* The lift is a darker edge above the bar; on the dark scheme the border
@@ -776,11 +792,12 @@
 }
 
 /* Schedule editor (issue #61 §8) ------------------------------------------------ */
-/* Full screen below 1024px — over the top strip, with its own back control —
-   and a side panel over a scrim from 1024px. Above the save bar (10), the
-   strip and the toast (20) and the side rail (30), which the scrim dims
-   too; below the dialog (50/51). The body scrolls inside the panel; the
-   header and footer stay put. */
+/* Full screen below 1024px — with its own back control; the shell does not
+   render the tab bar on the editor's URLs (issue #76) — and a side panel over
+   a scrim from 1024px. Above the save bar (10), the tab bar (15), the toast
+   (20) and the side rail (30), which the scrim dims too; below the dialog
+   (50/51). The body scrolls inside the panel; the header and footer stay
+   put. */
 
 .schedule-editor-scrim {
   position: fixed;

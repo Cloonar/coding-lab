@@ -1,8 +1,11 @@
 // The one Playwright smoke (brief §13): against a fresh state dir, walk
 // first-run setup, round-trip the credentials through logout/login, and land on
-// the authenticated Home (new-run) page's empty state. Post issue #41 the app
-// shell wraps every authenticated page: at a desktop viewport the side rail is
-// persistent, so its "Log out" button is on-screen without opening a drawer.
+// the authenticated Home page, which is Runs (issue #76) — its empty state
+// links to the composer at /new. The app shell wraps every authenticated page:
+// at a desktop viewport the side rail is persistent, so its "Log out" button is
+// on-screen; at a phone viewport the bottom tab bar replaces the rail and Log
+// out lives on the More page. The first-run walk runs at desktop width, and
+// one phone-viewport test covers the tab bar.
 
 import { expect, test, type Page, type Request } from '@playwright/test';
 import { createGitRemote } from './gitRemote';
@@ -10,8 +13,8 @@ import { createGitRemote } from './gitRemote';
 const username = 'admin';
 const password = 'smoke-test-password';
 
-// Desktop viewport → the side rail is persistent (>=1024px), not an overlay
-// drawer, so "Log out" (which lives in the rail now) is visible throughout.
+// Desktop viewport → the side rail is persistent (>=1024px) and the tab bar is
+// not shown, so "Log out" (which lives in the rail) is visible throughout.
 test.use({ viewport: { width: 1280, height: 800 } });
 
 // The first test provisions the admin account against the shared throwaway
@@ -20,7 +23,7 @@ test.use({ viewport: { width: 1280, height: 800 } });
 // order and stop on a failure rather than each test racing setup separately.
 test.describe.configure({ mode: 'serial' });
 
-/** Log in with the already-provisioned admin account and land on Home. Each
+/** Log in with the already-provisioned admin account and land on Home (Runs). Each
  *  test gets a fresh, unauthenticated browser context, so this is how tests
  *  after the first one reach an authenticated page. */
 async function login(page: Page): Promise<void> {
@@ -31,6 +34,15 @@ async function login(page: Page): Promise<void> {
   await expect(page).toHaveURL('/');
 }
 
+/** Home is Runs; a fresh instance has no live run, and the empty state links
+ *  to the composer. */
+async function expectEmptyRuns(page: Page): Promise<void> {
+  // Inside the page itself: the desktop rail's run list says "No live runs." too.
+  const runs = page.getByRole('main');
+  await expect(runs.getByText('No live runs', { exact: true })).toBeVisible();
+  await expect(runs.getByRole('link', { name: 'New run' })).toHaveAttribute('href', '/new');
+}
+
 /** Wait for the SW registration to become active. Never rejects on its own —
  *  if registration never happens (e.g. a non-PROD build) this hangs, which is
  *  the point: it should fail the test via timeout, not resolve falsely. */
@@ -38,7 +50,7 @@ async function swReady(page: Page): Promise<void> {
   await page.evaluate(() => navigator.serviceWorker.ready);
 }
 
-test('first-run setup, login, empty home', async ({ page }) => {
+test('first-run setup, login, empty Runs home', async ({ page }) => {
   // Fresh state dir → /auth/state reports setup_required → guard lands on /setup.
   await page.goto('/');
   await expect(page).toHaveURL(/\/setup$/);
@@ -49,9 +61,13 @@ test('first-run setup, login, empty home', async ({ page }) => {
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
 
-  // Setup starts a session; the guard drops us on the authenticated Home page
-  // with the add-repo empty state.
+  // Setup starts a session; the guard drops us on the authenticated Home page,
+  // Runs, with its empty state.
   await expect(page).toHaveURL('/');
+  await expectEmptyRuns(page);
+
+  // The composer lives at /new now; with no repository it says so.
+  await page.goto('/new');
   await expect(page.getByText('No repositories yet')).toBeVisible();
 
   // Round-trip the admin credentials: log out from the rail (guard bounces to
@@ -64,7 +80,40 @@ test('first-run setup, login, empty home', async ({ page }) => {
   await page.getByRole('button', { name: 'Log in' }).click();
 
   await expect(page).toHaveURL('/');
-  await expect(page.getByText('No repositories yet')).toBeVisible();
+  await expectEmptyRuns(page);
+});
+
+// --- Phone viewport: the bottom tab bar (issue #76) ---
+//
+// Below 1024px the rail is not shown; the tab bar is the navigation and the
+// More page holds Log out.
+
+test.describe('phone viewport', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('the tab bar navigates and More logs out', async ({ page }) => {
+    await login(page);
+    const tabs = page.getByRole('navigation', { name: 'Tabs' });
+    await expect(tabs).toBeVisible();
+    // No rail on the phone, and Runs is lit on the home page.
+    await expect(page.getByRole('button', { name: 'Log out' })).toBeHidden();
+    await expect(tabs.getByRole('link', { name: 'Runs' })).toHaveAttribute('aria-current', 'page');
+    await expectEmptyRuns(page);
+
+    await tabs.getByRole('link', { name: 'New' }).click();
+    await expect(page).toHaveURL('/new');
+    await expect(tabs.getByRole('link', { name: 'New' })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: 'New run' })).toBeVisible();
+    await expect(page.getByText('No repositories yet')).toBeVisible();
+
+    await tabs.getByRole('link', { name: 'More' }).click();
+    await expect(page).toHaveURL('/more');
+    await expect(tabs.getByRole('link', { name: 'More' })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: 'More' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Log out' }).click();
+    await expect(page).toHaveURL(/\/login$/);
+  });
 });
 
 // --- Service worker smoke (issue #98) ---

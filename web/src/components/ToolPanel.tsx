@@ -183,8 +183,8 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
   // touches the DOM. This is the binding seam: it wires the touch listeners to
   // the sheet <aside>, answers the machine's environment queries at touch start,
   // and turns its decisions into a live transform on the sheet plus opacity on
-  // the scrim while dragging, or a settle on release. Mirrors AppShell's drawer
-  // wiring rotated onto the Y axis. Listeners live on the <aside> (never window)
+  // the scrim while dragging, or a settle on release. Listeners live on the
+  // <aside> (never window)
   // and follow its mount/unmount via the ref callback + onCleanup; touchmove is
   // bound passive:false so a claimed drag can preventDefault the page scroll.
   let sheetEl: HTMLElement | undefined;
@@ -192,8 +192,7 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
   const gesture = createSheetGesture();
   let activeTouchId: number | null = null;
 
-  // Vertical drags inside an editable are cursor/selection, never a dismiss —
-  // mirrors AppShell's editable helper.
+  // Vertical drags inside an editable are cursor/selection, never a dismiss.
   const inEditable = (target: EventTarget | null): boolean => {
     if (!(target instanceof Element)) return false;
     if (target.closest('input, textarea, select')) return true;
@@ -236,15 +235,14 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
   };
 
   const onTouchStart = (e: TouchEvent): void => {
-    // Stop first, before anything else: AppShell's drawer gesture listens
-    // window-wide, and its arbitration would otherwise claim a horizontal drag
-    // that starts on the sheet — a rightward pull at scrollLeft 0 would haul the
-    // nav drawer out from under this modal scrim. Stopping here keeps the touch
-    // off that window listener. (The scrim blocks it the same way via its own
-    // JSX onTouchStart; click-dismiss is a separate event and still fires.)
+    // Stop first, before anything else: a touch on this modal sheet must not
+    // reach the window-level touch listeners of the page behind it (the repo
+    // settings page's scroll takeover, for one). (The scrim blocks it the same
+    // way via its own JSX onTouchStart; click-dismiss is a separate event and
+    // still fires.)
     e.stopPropagation();
     if (props.desktop) return; // desktop is a non-modal sidebar, not a sheet
-    // Self-heal a leaked sequence (mirrors AppShell): touch events fire at the
+    // Self-heal a leaked sequence: touch events fire at the
     // element the finger went DOWN on, so if a re-render detaches that node
     // mid-touch (streaming tool output), its touchend/touchcancel never bubble
     // to the sheet and the tracked id — plus a claimed drag's inline styles —
@@ -388,8 +386,9 @@ export default function ToolPanel(props: ToolPanelProps): JSX.Element {
           on the scrim, so a click in the card never bubbles to a dismiss (issue
           #142 idiom). Phone only — the desktop sidebar is non-modal. */}
       <Show when={!props.desktop}>
-        {/* onTouchStart stops the drawer gesture the same way the sheet does —
-            see onTouchStart below. Click-dismiss is a separate event, unaffected. */}
+        {/* onTouchStart keeps window-level touch listeners off the scrim the same
+            way the sheet does — see onTouchStart below. Click-dismiss is a
+            separate event, unaffected. */}
         <div
           ref={scrimEl}
           class="tool-scrim"

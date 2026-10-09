@@ -77,11 +77,12 @@ a.chip.cr-count:hover {
   margin-bottom: 0;
 }
 
-/* Visually distinct file header; sticky-ish: it pins just below the sticky
-   topbar (~3.35rem tall at the root font size) while its rows scroll by. */
+/* Visually distinct file header; sticky-ish: it pins to the viewport top
+   while its rows scroll by. (It used to clear a ~3.35rem sticky top bar; the
+   last one, the phone's top strip, gave way to the bottom tab bar in #76.) */
 .diff-file-head {
   position: sticky;
-  top: 3.35rem;
+  top: 0;
   z-index: 1;
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--border);

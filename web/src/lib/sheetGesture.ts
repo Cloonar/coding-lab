@@ -2,7 +2,7 @@
 // tool-call detail panel is a modal bottom sheet on phones, and a downward drag
 // starting ANYWHERE on the sheet drags it out with the finger toward off-screen;
 // releasing past halfway (or on a downward flick) dismisses it. This is the
-// vertical transposition of the horizontal drawer gesture (issue #140) — same
+// vertical transposition of the retired horizontal drawer gesture (#140) — same
 // house pattern, same feel constants, rotated 90 degrees onto the Y axis.
 //
 // Dismiss-only: the sheet is opened solely by tapping the triggering row (never
@@ -43,17 +43,23 @@
 // throw settles the sheet back open even from past halfway, and a small downward
 // flick dismisses even from a shallow drag.
 
-import {
-  COMMIT_FRACTION,
-  FLICK_VELOCITY_PX_MS,
-  INTENT_PX,
-  VELOCITY_WINDOW_MS,
-} from './drawerGesture';
-import type { GesturePoint } from './drawerGesture';
+// The feel constants and the point type used to live in the drawer gesture's
+// module and were shared from there. The drawer and its gesture were retired
+// for the bottom tab bar (issue #76), so they live here now, values unchanged.
 
-// Re-export so a consumer that imports the sheet gesture gets its point type
-// from one place, even though it is physically shared with the drawer.
-export type { GesturePoint } from './drawerGesture';
+/** Travel (px) before horizontal vs vertical intent is decided. */
+export const INTENT_PX = 8;
+/** Fraction of the sheet height dragged past which a release commits. */
+export const COMMIT_FRACTION = 0.5;
+/** Release speed (px/ms) that commits regardless of travel. Tuning knob, not
+ * spec — validated by a real-device feel pass, not by the unit tests. */
+export const FLICK_VELOCITY_PX_MS = 0.3;
+/** Only finger samples this recent (ms) count toward the release velocity, so
+ * a fast drag followed by a hold-still release is not a flick. */
+export const VELOCITY_WINDOW_MS = 100;
+
+/** A finger position: viewport client px plus the event timestamp in ms. */
+export type GesturePoint = { x: number; y: number; t: number };
 
 /** Environment answers resolved by the caller when the touch starts. */
 export type SheetGestureEnv = {

@@ -1,9 +1,11 @@
 /* Toast -------------------------------------------------------------------------- */
 
+/* Lifted by --tabbar-space (tabbar.css) on pages below 1024px that show the
+   bottom tab bar, so the toast never lands on it (issue #76). */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 1.25rem;
+  bottom: calc(1.25rem + var(--tabbar-space, 0px));
   transform: translateX(-50%);
   z-index: 20;
   background: var(--text);

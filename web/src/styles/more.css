@@ -1,1 +1,105 @@
-/* More page (issue #76). */
+/* More page (issue #76, routes/More.tsx; reference
+   docs/reference/tab-bar-mockup.html "More"). Phone only — from 1024px the
+   route redirects to /settings. The rows reuse the settings category index
+   (settings-ia.css: .settings-index card, .settings-index-row rows) and the
+   logged-out alert reuses the Repos page's "Needs you" problem item
+   (repos.css: .needs-you-item.problem and its icon, text, message, action);
+   this file adds what More has on top: the page gutter, the right-aligned
+   state hint, the Install app row as a button, the alert's title and spacing,
+   and the plain account block. Tokens only — dark mode follows. */
+
+/* The tab pages' gutter: 16px at the sides like Runs, Ended, Repos and New
+   (.page.page-wide), so the head and the rows do not shift when switching
+   tabs. Two classes, so it outranks the >=640px .page step in cards.css. */
+.page.more-page {
+  padding: var(--space-3) var(--space-4) var(--space-6);
+}
+
+/* The one line of state each row carries, right-aligned before the chevron.
+   It yields to the title: long hints (the Settings category list) truncate. */
+.more-row-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.more-list .settings-index-text {
+  flex: 1 0 auto;
+}
+
+.more-list .chip {
+  flex: none;
+}
+
+/* Install app is an action, not a destination: a button dressed as a row
+   (the base `button` rule's border, fill and padding undone; the row's
+   hairline between siblings still comes from settings-ia.css). */
+.more-row-button {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+/* The logged-out alert (a Needs you problem item): the bold title over its
+   sentence, the item's own 12px gap above the rows. */
+.more-alert {
+  margin-bottom: var(--space-3);
+}
+
+.more-alert-title {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+/* The account: who is signed in, the live dot, Log out — the rail foot's
+   contents, plain on the page under the rows (the mockup draws no card), inset
+   like the rows' content. */
+.more-account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+
+.more-page > .banner + .more-account {
+  margin-top: 0;
+}
+
+.more-account-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.more-account-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.more-account-live {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.more-logout {
+  flex: none;
+}
+
+/* Errors from Log out sit between the rows and the account card. */
+.more-list + .banner {
+  margin: var(--space-4) 0 var(--space-3);
+}

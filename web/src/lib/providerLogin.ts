@@ -16,6 +16,8 @@ export interface ProviderLogin {
   provider: () => Provider | undefined;
   /** True only on a positive "logged out" answer — unknown/loading/errored is false. */
   loggedOut: () => boolean;
+  /** True only on a positive "logged in" answer — unknown/loading/errored is false. */
+  loggedIn: () => boolean;
 }
 
 export function createProviderLogin(): ProviderLogin {
@@ -35,5 +37,6 @@ export function createProviderLogin(): ProviderLogin {
   return {
     provider,
     loggedOut: () => resourceValue(status)?.logged_in === false,
+    loggedIn: () => resourceValue(status)?.logged_in === true,
   };
 }

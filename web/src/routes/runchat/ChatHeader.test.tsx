@@ -15,9 +15,11 @@
 //   >=640px) always offers "Run details" and, whenever the run is live, the
 //   one-tap turn Interrupt (POST /interrupt, no confirm, a `pause` glyph
 //   distinct from the two-step danger `square` Stop); below 640px it also
-//   carries the open affordance and the two-step Stop.
+//   carries the open affordance and the two-step Stop;
+// - the Back button (issue #76) pops the in-app history when lib/navHistory
+//   says an in-app entry exists, else replaces the chat with Runs (`/`).
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ConversationState } from '../../api';
 import {
   DESKTOP_QUERY,
@@ -32,7 +34,14 @@ import {
   settle,
   stubMatchMedia,
   buttonByLabel,
+  chatHistory,
 } from './harness';
+
+// navHistory reads the real window.history's router stamps, which a
+// MemoryRouter never writes — so the "is there an in-app entry" answer is
+// driven directly here (default: none, a cold open).
+const nav = vi.hoisted(() => ({ canGoBack: false }));
+vi.mock('../../lib/navHistory', () => ({ canGoBack: () => nav.canGoBack }));
 
 // The header's own breakpoint: the `•••` menu is a dropdown from here up.
 const MENU_DROPDOWN_QUERY = '(min-width: 640px)';
@@ -797,5 +806,32 @@ describe('ChatHeader', () => {
     await settle();
     expect(details()).toBeNull();
     expect(container.querySelector('.chat-sheet-scrim')).toBeNull();
+  });
+
+  it('Back pops the in-app history to the page the chat was opened from', async () => {
+    nav.canGoBack = true;
+    try {
+      await mountChat('/history');
+      const back = buttonByLabel('Back');
+      expect(back?.tagName).toBe('BUTTON');
+      expect(back?.classList.contains('chat-back')).toBe(true);
+      back!.click();
+      await settle();
+      expect(chatHistory.get()).toBe('/history');
+    } finally {
+      nav.canGoBack = false;
+    }
+  });
+
+  it('Back on a cold open replaces the chat with Runs', async () => {
+    // An entry sits below the chat (a foreign page, as far as the app knows),
+    // but navHistory says it is not the app's own: Back must not pop to it.
+    await mountChat('/history');
+    buttonByLabel('Back')!.click();
+    await settle();
+    expect(chatHistory.get()).toBe('/');
+    // A replace, not a push: one step back is the entry below, not the chat.
+    chatHistory.go(-1);
+    expect(chatHistory.get()).toBe('/history');
   });
 });

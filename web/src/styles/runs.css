@@ -1,12 +1,53 @@
 /* Runs ------------------------------------------------------------------------- */
+/* The Ended side of the Runs page (routes/History, issue #76): the rows are
+   RunList's (runlist.css); this file carries the filter row, the extras under
+   a row (failure reason, the escalated note + Re-arm) and the outcome chips. */
 
-.runs-filter {
-  margin-bottom: 0;
-  min-width: 180px;
+.runs-filters {
+  display: flex;
+  gap: 0.65rem;
+  margin: var(--space-2) 0 0;
 }
 
-.run-times {
-  font-size: 0.82rem;
+/* Phone: the two selects share one row at equal widths. From 640px they
+   keep their natural width. */
+.runs-filter {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.runs-filter select {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .runs-filter {
+    flex: 0 1 auto;
+    min-width: 180px;
+  }
+}
+
+/* The outcome chip next to an ended row's title. */
+.outcome-chip {
+  font-size: 0.72rem;
+}
+
+/* Extras render under the row, outside its link — indented to the row body
+   (row padding + dot + gap) so they read as the row's. */
+.ended-run-extra {
+  padding-left: calc(0.65rem + 9px + 0.65rem);
+  padding-right: 0.65rem;
+}
+
+.ended-run-extra.run-failure,
+.ended-run-extra .run-escalated-note {
+  margin-top: 0;
+}
+
+.ended-run-extra .card-actions {
+  margin-bottom: var(--space-2);
 }
 
 .run-failure {

@@ -136,8 +136,8 @@
 }
 /* The dropdown's (and Run details popover's) outside-tap catcher: transparent,
    BELOW the header (z-index 1 vs 2), so the header's own controls stay live. A
-   dedicated class (not .nav-scrim, which sits at z:5 and would paint over the
-   z:2 header and its own panel). */
+   dedicated class (not a full-viewport scrim, which would paint over the z:2
+   header and its own panel). */
 .chat-menu-scrim {
   position: fixed;
   inset: 0;

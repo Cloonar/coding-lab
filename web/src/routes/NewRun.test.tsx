@@ -1,4 +1,5 @@
-// New run page contract (issue #66; the composer since issue #41):
+// New run page contract (issue #66; the composer since issue #41; at /new
+// with a phone-only "New run" header since issue #76):
 // - with repos present the page is the repository pills, the composer (the
 //   field with Model / Effort / ⋯ chips and the send) and the selected repo's
 //   Issues card — no Repository chip, no Agent chip in the bar, no AFK strip,
@@ -325,15 +326,15 @@ function RunStub() {
   return <div class="run-stub">run:{params.id}</div>;
 }
 
-async function mountHome(): Promise<void> {
+async function mountNewRun(): Promise<void> {
   container = document.createElement('div');
   document.body.appendChild(container);
   const history = createMemoryHistory();
-  history.set({ value: '/' });
+  history.set({ value: '/new' });
   dispose = render(
     () => (
       <MemoryRouter history={history} root={App}>
-        <Route path="/" component={NewRun} />
+        <Route path="/new" component={NewRun} />
         <Route path="/runs/:id" component={RunStub} />
         <Route path="*" component={() => <p class="elsewhere">navigated</p>} />
       </MemoryRouter>
@@ -515,7 +516,7 @@ afterEach(() => {
 
 describe('NewRun page', () => {
   it('renders the pills, the composer and the Issues card (not the empty state) when repos exist', async () => {
-    await mountHome();
+    await mountNewRun();
 
     expect(container.querySelector('.repo-pills')).not.toBeNull();
     expect(pill('coding-lab')?.getAttribute('aria-pressed')).toBe('true');
@@ -534,15 +535,48 @@ describe('NewRun page', () => {
     // A repo that can run shows nothing about it: no blocker, no readiness line.
     expect(container.querySelector('.composer-blockers')).toBeNull();
     expect(container.textContent).not.toContain('No repositories yet');
-    // DOM order: pills, composer, Issues card (CSS moves the dock last on a phone).
+    // DOM order: the phone header, pills, composer, Issues card (CSS moves the
+    // dock last on a phone).
     const parts = Array.from(container.querySelectorAll('main.newrun > div[class^="newrun-"]')).map(
       (el) => el.className,
     );
-    expect(parts).toEqual(['newrun-pills', 'newrun-dock', 'newrun-issues']);
+    expect(parts).toEqual(['newrun-head', 'newrun-pills', 'newrun-dock', 'newrun-issues']);
+  });
+
+  it('opens with a "New run" page header below 1024px (issue #76)', async () => {
+    await mountNewRun();
+    const head = container.querySelector('main.newrun > .newrun-head');
+    expect(head?.querySelector('.section-head h2')?.textContent).toBe('New run');
+  });
+
+  it('keeps the header in the zero-repos state too', async () => {
+    reposOnServer = [];
+    await mountNewRun();
+    expect(container.querySelector('.newrun-head h2')?.textContent).toBe('New run');
+    expect(container.textContent).toContain('No repositories yet');
+  });
+
+  it('has no page header from 1024px: the centered column stays bare', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === '(min-width: 1024px)',
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        onchange: null,
+        dispatchEvent: () => false,
+      })),
+    );
+    await mountNewRun();
+    expect(container.querySelector('.newrun-head')).toBeNull();
+    expect(container.querySelector('.composer-field')).not.toBeNull();
   });
 
   it('spawns with label/model/effort and the typed text as first_message, and navigates', async () => {
-    await mountHome();
+    await mountNewRun();
 
     typeText('do the thing');
     await chooseFromChip('Model', 'Opus');
@@ -566,7 +600,7 @@ describe('NewRun page', () => {
   });
 
   it('spawns a plain run with no first_message when the box is empty', async () => {
-    await mountHome();
+    await mountNewRun();
 
     sendButton().click();
     await settle();
@@ -579,7 +613,7 @@ describe('NewRun page', () => {
 
   it('keeps the text and shows the server message verbatim on a spawn failure', async () => {
     instancePost = { status: 409, runID: 'run_new' };
-    await mountHome();
+    await mountNewRun();
 
     typeText('try me');
     sendButton().click();
@@ -594,7 +628,7 @@ describe('NewRun page', () => {
 
   it('shows the exact zero-repos empty state and hides the composer', async () => {
     reposOnServer = [];
-    await mountHome();
+    await mountNewRun();
 
     expect(container.textContent).toContain('No repositories yet');
     expect(container.querySelector('.composer-field')).toBeNull();
@@ -614,7 +648,7 @@ describe('NewRun page', () => {
 // it comes from, and a pick that differs from it outlines the chip.
 describe('NewRun run-option chips', () => {
   it('changes the model in two taps; the chip takes the accent and the request carries it', async () => {
-    await mountHome();
+    await mountNewRun();
     expect(chip('Model')!.classList.contains('changed')).toBe(false);
 
     chip('Model')!.click(); // tap 1
@@ -644,7 +678,7 @@ describe('NewRun run-option chips', () => {
   it('keeps the model, effort, agent and attachment picks across a repo.changed refetch', async () => {
     providersOnServer = [...PROVIDERS, CODEX];
     issuesOnServer = [issueFixture()];
-    await mountHome();
+    await mountNewRun();
     await chooseFromChip('Model', 'Opus');
     await chooseFromChip('Effort', 'High');
     await attachAction(47, 'Triage');
@@ -672,7 +706,7 @@ describe('NewRun run-option chips', () => {
   it("names the repo's settings as the source when the repo's own default applies", async () => {
     reposOnServer = [repoFixture({ model_default: 'opus', effort_default: 'high' })];
     settingsOnServer = { spawn_model_default: 'sonnet' };
-    await mountHome();
+    await mountNewRun();
 
     expect(chipLabel('Model')).toBe('Opus');
     chip('Model')!.click();
@@ -688,7 +722,7 @@ describe('NewRun run-option chips', () => {
   });
 
   it('picking the inherited default again clears the pick and the accent', async () => {
-    await mountHome();
+    await mountNewRun();
 
     await chooseFromChip('Model', 'Opus');
     expect(chip('Model')!.classList.contains('changed')).toBe(true);
@@ -709,7 +743,7 @@ describe('NewRun run-option chips', () => {
 describe('NewRun composer keyboard send (issue #70)', () => {
   it('fine-pointer: Shift+Enter never spawns; bare Enter spawns and sends the typed text as first_message', async () => {
     finePointer(true);
-    await mountHome();
+    await mountNewRun();
     typeText('do the thing');
     await settle();
 
@@ -733,7 +767,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
 
   it('fine-pointer: Cmd/Ctrl+Enter spawns', async () => {
     finePointer(true);
-    await mountHome();
+    await mountNewRun();
     typeText('ctrl spawn');
     await settle();
 
@@ -747,7 +781,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
 
   it('bare Enter never spawns without a fine pointer (no matchMedia, or a touch profile)', async () => {
     // Default jsdom: no window.matchMedia at all — reads as "not fine-pointer".
-    await mountHome();
+    await mountNewRun();
     typeText('no matchMedia here');
     await settle();
 
@@ -765,7 +799,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
 
   it('touch profile: bare Enter does not spawn; Cmd/Ctrl+Enter still does', async () => {
     finePointer(false);
-    await mountHome();
+    await mountNewRun();
     typeText('tap city');
     await settle();
 
@@ -783,7 +817,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
 
   it('fine-pointer: Enter fired mid-IME-composition does not spawn', async () => {
     finePointer(true);
-    await mountHome();
+    await mountNewRun();
     typeText('still composing');
     await settle();
 
@@ -801,7 +835,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
 
   it('fine-pointer + empty box: bare Enter does not spawn (and preventDefaults it); Cmd/Ctrl+Enter still spawns the plain run', async () => {
     finePointer(true);
-    await mountHome();
+    await mountNewRun();
 
     const evt = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
     composerInput().dispatchEvent(evt);
@@ -823,7 +857,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
   it('fine-pointer + empty box with an issue action attached: bare Enter sends it', async () => {
     finePointer(true);
     issuesOnServer = [issueFixture()];
-    await mountHome();
+    await mountNewRun();
     await attachAction(47, 'Triage');
 
     composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -834,7 +868,7 @@ describe('NewRun composer keyboard send (issue #70)', () => {
   });
 
   it('carries the "Start run (Enter)" tooltip on the send button', async () => {
-    await mountHome();
+    await mountNewRun();
     expect(sendButton().title).toBe('Start run (Enter)');
     expect(sendButton().getAttribute('aria-label')).toBe('Start run');
   });
@@ -851,7 +885,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
 
   it('offers no agent control with a single provider', async () => {
     providersOnServer = [...PROVIDERS];
-    await mountHome();
+    await mountNewRun();
 
     const panel = await openMore();
     expect(panel.querySelector('[role="radiogroup"]')).toBeNull();
@@ -860,7 +894,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
   it('resolves the global provider_default when the repo inherits', async () => {
     reposOnServer = [repoFixture({ provider: null })];
     settingsOnServer = { provider_default: 'codex' };
-    await mountHome();
+    await mountNewRun();
 
     // The model catalog follows the effective provider…
     expect(chipLabel('Model')).toBe('GPT-5 Codex');
@@ -872,7 +906,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
   it('lets the repo provider override the global default', async () => {
     reposOnServer = [repoFixture({ provider: 'claude-code' })];
     settingsOnServer = { provider_default: 'codex' };
-    await mountHome();
+    await mountNewRun();
 
     expect(chipLabel('Model')).toBe('Sonnet');
     expect(chip('Effort')).not.toBeNull();
@@ -881,7 +915,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
 
   it('picking an agent re-catalogs model/effort, resets prior picks, outlines ⋯ and rides the POST', async () => {
     reposOnServer = [repoFixture({ provider: 'claude-code' })];
-    await mountHome();
+    await mountNewRun();
 
     // Foreign picks made under the previous provider…
     await chooseFromChip('Model', 'Opus');
@@ -906,7 +940,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
 
   it('omits provider from the POST when the operator never touched the agent', async () => {
     reposOnServer = [repoFixture({ provider: 'codex' })];
-    await mountHome();
+    await mountNewRun();
 
     sendButton().click();
     await settle();
@@ -921,7 +955,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
       repoFixture({ provider: 'claude-code' }),
       repoFixture({ id: 'repo_2', name: 'other-repo', provider: 'claude-code' }),
     ];
-    await mountHome();
+    await mountNewRun();
 
     await chooseAgent('Codex');
     await closePicker();
@@ -940,7 +974,7 @@ describe('NewRun agent in More options (multi-provider)', () => {
   it('keys the logged-out blocker on the effective provider and names its display_name', async () => {
     reposOnServer = [repoFixture({ provider: 'codex' })];
     authOnServer = { logged_in: false, email: '', method: '', checked_at: '' };
-    await mountHome();
+    await mountNewRun();
 
     // The status route was asked about the EFFECTIVE provider…
     expect(authRequests).toContain('codex');
@@ -963,7 +997,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
   });
 
   it('catalogs the effort chip from the selected model and re-catalogs on a model switch', async () => {
-    await mountHome();
+    await mountNewRun();
 
     // Terra (the resolved default model) offers the full ladder…
     expect(await chipOptionTitles('Effort')).toEqual([
@@ -982,7 +1016,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
   });
 
   it("snaps a stale effort pick to the new model's default_effort on the POST", async () => {
-    await mountHome();
+    await mountNewRun();
 
     await chooseFromChip('Effort', 'Ultra');
     await chooseFromChip('Model', 'GPT-5.6-Luna');
@@ -998,7 +1032,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
   });
 
   it('keeps a still-valid effort pick across a model switch', async () => {
-    await mountHome();
+    await mountNewRun();
 
     await chooseFromChip('Effort', 'High');
     await chooseFromChip('Model', 'GPT-5.6-Luna');
@@ -1014,7 +1048,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
   });
 
   it("an untouched composer sends the model's reported default_effort, not the first entry", async () => {
-    await mountHome();
+    await mountNewRun();
 
     sendButton().click();
     await settle();
@@ -1026,7 +1060,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
 
   it('a global default effort valid for the model beats the model default', async () => {
     settingsOnServer = { spawn_effort_default: 'xhigh' };
-    await mountHome();
+    await mountNewRun();
 
     sendButton().click();
     await settle();
@@ -1036,7 +1070,7 @@ describe('NewRun composer per-model efforts (issue #156)', () => {
 
   it('skips a global default effort the model does not support; the model default rides', async () => {
     settingsOnServer = { spawn_effort_default: 'turbo' };
-    await mountHome();
+    await mountNewRun();
 
     sendButton().click();
     await settle();
@@ -1060,7 +1094,7 @@ describe('NewRun composer remote control', () => {
   const isOn = (el: HTMLButtonElement) => el.getAttribute('aria-checked') === 'true';
 
   it('defaults off and sends no remote key when untouched', async () => {
-    await mountHome();
+    await mountNewRun();
 
     expect(isOn(await remoteSwitch())).toBe(false);
     expect(document.querySelector('.picker.run-more')?.textContent).toContain('inherited · off');
@@ -1072,7 +1106,7 @@ describe('NewRun composer remote control', () => {
   });
 
   it('turning it on sends remote:true, reads "set here" and outlines ⋯', async () => {
-    await mountHome();
+    await mountNewRun();
 
     (await remoteSwitch()).click();
     await settle();
@@ -1087,7 +1121,7 @@ describe('NewRun composer remote control', () => {
 
   it('pre-fills from the global default; an untouched inherited-on sends nothing', async () => {
     settingsOnServer = { spawn_remote_default: true };
-    await mountHome();
+    await mountNewRun();
 
     expect(isOn(await remoteSwitch())).toBe(true);
     await closePicker();
@@ -1103,7 +1137,7 @@ describe('NewRun composer remote control', () => {
     // would re-resolve the inherited ON and ignore the operator.
     reposOnServer = [repoFixture({ remote_default: true })];
     settingsOnServer = { spawn_remote_default: false };
-    await mountHome();
+    await mountNewRun();
 
     const el = await remoteSwitch();
     expect(isOn(el)).toBe(true);
@@ -1119,7 +1153,7 @@ describe('NewRun composer remote control', () => {
   it('a repo override beats the global default in the pre-fill', async () => {
     reposOnServer = [repoFixture({ remote_default: false })];
     settingsOnServer = { spawn_remote_default: true };
-    await mountHome();
+    await mountNewRun();
 
     expect(isOn(await remoteSwitch())).toBe(false);
   });
@@ -1127,7 +1161,7 @@ describe('NewRun composer remote control', () => {
   it('disables the switch with a note for a provider with no remote knob', async () => {
     providersOnServer = [...PROVIDERS, CODEX];
     reposOnServer = [repoFixture({ provider: 'codex' })];
-    await mountHome();
+    await mountNewRun();
 
     const el = await remoteSwitch();
     expect(el.disabled).toBe(true);
@@ -1141,7 +1175,7 @@ describe('NewRun composer remote control', () => {
   });
 
   it('a typed label outlines ⋯ and rides the request', async () => {
-    await mountHome();
+    await mountNewRun();
 
     typeLabel(await openMore(), 'mine');
     await closePicker();
@@ -1159,7 +1193,7 @@ describe('NewRun Runner', () => {
   it('names an inherited container Runner and links to the Runner settings', async () => {
     reposOnServer = [repoFixture({ runner: null })];
     settingsOnServer = { runner_default: 'container' };
-    await mountHome();
+    await mountNewRun();
 
     expect(container.querySelector('.composer-blocker-host')).toBeNull();
     const panel = await openMore();
@@ -1173,7 +1207,7 @@ describe('NewRun Runner', () => {
   it("warns above the field when the repo's own Runner is host", async () => {
     reposOnServer = [repoFixture({ runner: 'host' })];
     settingsOnServer = { runner_default: 'container' };
-    await mountHome();
+    await mountNewRun();
 
     expect(container.querySelector('.composer-blocker-host')?.textContent).toContain(
       'Runs on the host, unsandboxed, with full host access.',
@@ -1185,7 +1219,7 @@ describe('NewRun Runner', () => {
   it('warns when the inherited global Runner is host', async () => {
     reposOnServer = [repoFixture({ runner: null })];
     settingsOnServer = { runner_default: 'host' };
-    await mountHome();
+    await mountNewRun();
 
     expect(container.querySelector('.composer-blocker-host')).not.toBeNull();
   });
@@ -1204,7 +1238,7 @@ describe('NewRun repository pills', () => {
   });
 
   it('"All N" opens the repository picker with a working filter and never navigates', async () => {
-    await mountHome();
+    await mountNewRun();
 
     const all = container.querySelector<HTMLButtonElement>('.repo-pill-all')!;
     expect(all.textContent).toContain('All 3');
@@ -1233,7 +1267,7 @@ describe('NewRun repository pills', () => {
   });
 
   it('writes the recent list to lab.last-repo as a JSON array, most recent first', async () => {
-    await mountHome();
+    await mountNewRun();
 
     pill('third-repo')!.click();
     await settle();
@@ -1251,7 +1285,7 @@ describe('NewRun repository pills', () => {
 
   it('preselects the most recent repo from a stored JSON list', async () => {
     localStorage.setItem('lab.last-repo', JSON.stringify(['repo_3', 'repo_2']));
-    await mountHome();
+    await mountNewRun();
 
     expect(pill('third-repo')?.getAttribute('aria-pressed')).toBe('true');
     // The pills are the stored list, in order (not padded).
@@ -1264,7 +1298,7 @@ describe('NewRun repository pills', () => {
 
   it('still preselects from the old bare-id format', async () => {
     localStorage.setItem('lab.last-repo', 'repo_2');
-    await mountHome();
+    await mountNewRun();
 
     expect(pill('other-repo')?.getAttribute('aria-pressed')).toBe('true');
     sendButton().click();
@@ -1274,7 +1308,7 @@ describe('NewRun repository pills', () => {
 
   it('changing the repository clears the attachment', async () => {
     issuesOnServer = [issueFixture()];
-    await mountHome();
+    await mountNewRun();
     await attachAction(47, 'Triage');
     expect(container.querySelector('.composer-attach')).not.toBeNull();
 
@@ -1292,7 +1326,7 @@ describe('NewRun repository pills', () => {
       ...reposOnServer[1]!,
       summary: { ...failingTracker(), open_issues: 8 },
     };
-    await mountHome();
+    await mountNewRun();
     expect(container.querySelector('.issues-card-count')?.textContent).toBe('3');
 
     pill('other-repo')!.click();
@@ -1322,7 +1356,7 @@ describe('NewRun issue actions', () => {
   });
 
   it('Triage: attaches, relabels Send, and starts the run with /triage #n and label triage-n', async () => {
-    await mountHome();
+    await mountNewRun();
 
     await attachAction(47, 'Triage');
 
@@ -1350,7 +1384,7 @@ describe('NewRun issue actions', () => {
   });
 
   it('a typed label wins over the action default', async () => {
-    await mountHome();
+    await mountNewRun();
 
     await attachAction(56, 'Implement');
     typeLabel(await openMore(), 'flaky');
@@ -1366,7 +1400,7 @@ describe('NewRun issue actions', () => {
   });
 
   it('Discuss asks what to discuss; removing the attachment restores the plain composer', async () => {
-    await mountHome();
+    await mountNewRun();
 
     await attachAction(47, 'Discuss');
     expect(composerInput().placeholder).toBe('Say what you want to discuss about #47…');
@@ -1387,7 +1421,7 @@ describe('NewRun issue actions', () => {
 describe('NewRun blockers', () => {
   it('a logged-out agent: Reconnect banner, the field and Send disabled', async () => {
     authOnServer = { logged_in: false, email: '', method: '', checked_at: '' };
-    await mountHome();
+    await mountNewRun();
 
     const banner = container.querySelector('.composer-blocker-logged-out');
     // Copy flows from the provider's display_name, not a hardcoded brand.
@@ -1401,7 +1435,7 @@ describe('NewRun blockers', () => {
 
   it('a cloning repo: the live-percent notice, the field disabled', async () => {
     reposOnServer = [repoFixture({ clone_status: 'cloning' })];
-    await mountHome();
+    await mountNewRun();
 
     expect(container.querySelector('.composer-blocker-cloning')?.textContent).toContain(
       'Runs can start when the clone finishes.',
@@ -1416,7 +1450,7 @@ describe('NewRun blockers', () => {
 
   it('a failed clone: the clone error with a Retry that retries and refetches; the field disabled', async () => {
     reposOnServer = [repoFixture({ clone_status: 'error', clone_error: 'auth failed' })];
-    await mountHome();
+    await mountNewRun();
 
     const banner = container.querySelector('.composer-blocker-clone-failed');
     expect(banner?.textContent).toContain('auth failed');
@@ -1431,7 +1465,7 @@ describe('NewRun blockers', () => {
 
   it('a failing tracker check: the warning with Fix, and the field stays enabled', async () => {
     reposOnServer = [repoFixture({ summary: failingTracker() })];
-    await mountHome();
+    await mountNewRun();
 
     const banner = container.querySelector('.composer-blocker-tracker');
     expect(banner?.textContent).toContain('The tracker token was refused. A run can still start.');

@@ -44,8 +44,6 @@ export default function SectionNav(props: {
   current: string;
   /** Scrolls to a section (and puts its URL in the address bar). */
   onGo: (slug: string) => void;
-  /** How far below the viewport top the chips stick, in px (the mobile top strip). */
-  stickyTop: number;
   /** Receives the chips row, whose height the page's scroll offsets include. */
   chipsRef?: (element: HTMLElement | undefined) => void;
 }) {
@@ -88,7 +86,6 @@ export default function SectionNav(props: {
         <nav
           class="settings-chips"
           aria-label="Settings sections"
-          style={{ top: `${props.stickyTop}px` }}
           ref={(element) => {
             chips = element;
             props.chipsRef?.(element);

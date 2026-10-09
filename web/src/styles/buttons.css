@@ -41,7 +41,7 @@ input:focus-visible {
   outline-offset: 1px;
 }
 
-/* Shared icon-only control — hamburger, back, stop, send, dismiss. Colored via
+/* Shared icon-only control — back, stop, send, dismiss. Colored via
    currentColor so callers set color (nav/topbar inherit --text; .danger flips
    to --danger). Class beats the `button` element selector, so on a <button> it
    overrides the card bg/border/padding. 44px touch target. */

@@ -5,9 +5,9 @@
    pinned at the bottom of .chat-column — the column wrapper that carries the
    old page-as-column layout now that the tool panel sidebar (issue #145) can
    sit beside it. Inside the app shell (issue #41) the rail sits BESIDE the
-   chat (a width, never a height), and the mobile top strip is hidden on
-   /runs/:id, so this 100dvh fill still equals the viewport at every
-   breakpoint — a flex/height chain, no magic offset for chrome above. */
+   chat (a width, never a height), and the phone's tab bar is not rendered on
+   /runs/:id (issue #76), so this 100dvh fill still equals the viewport at
+   every breakpoint — a flex/height chain, no magic offset for chrome. */
 .chat-page {
   display: flex;
   flex-direction: row;
