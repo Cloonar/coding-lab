@@ -13,7 +13,7 @@ Issues and PRDs for this repo live as GitHub issues on https://github.com/Cloona
 - **Labels must exist before you apply them.** GitHub rejects an unknown label. Create it first — `labctl label create --name "..." [--color "#..." --description "..."]` is idempotent (create-if-missing, safe to run unconditionally). `labctl label list` shows the repo's labels.
 - **Close**: `labctl issue close <n>`. There is no closing-comment flag, so post the explanation first with `labctl issue comment <n> "..."`, then close.
 - **Reopen**: not on the agent surface — `labctl` has no reopen verb. If an issue needs reopening, ask the operator to do it from the forge.
-- **Pull requests**: managed with `labctl pr ...` (`create`, `view`, `list`, `checks`, `merge`, plus the verdict verbs `reject` / `approve` / `rerequest` / `escalate` and `comment`). The `land-pr` skill drives the GitHub pull request flow.
+- **Pull requests**: managed with `labctl pr ...` (`create`, `view`, `list`, `checks`, `merge`, plus the verdict verbs `reject` / `approve` / `rerequest` / `escalate` and `comment`). `labctl pr merge <n>` prints one tab-separated line — number, state, URL, then the head outcome: by default the merge also deletes the PR's head branch on origin (`head-deleted`), `head-kept: <reason>` when the `merge_delete_head` setting is off or the head lives in a fork, and `head-delete-failed: <reason>` when the delete was refused. It exits 0 in all three cases: the merge landed. The `land-pr` skill drives the GitHub pull request flow.
 
 ## Maintainers
 
