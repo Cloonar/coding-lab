@@ -1,122 +1,98 @@
-// Global settings › General coverage (issue #198), new for the split: the git
-// author card saves a dirty-fields-only PATCH (an untouched field never rides
-// along), and a clean submit notes 'Nothing to save.' without a PATCH. Mounted
-// at /settings/general.
+// Global settings › General (issues #198, #81, #85): Git author and
+// Transcripts as fields that wait for the save bar, then the read-only
+// Credential gateway and SSH bastion status cards at the end of the section,
+// outside the saved fields. Transcript retention is a whole number from 0
+// (keep none) to 365, checked at its field before anything is sent.
 
 import { describe, expect, it } from 'vitest';
 import {
-  container,
+  fieldError,
+  fieldHint,
+  fieldLabel,
   h,
   input,
   installSettingsHooks,
-  mountAt,
-  settle,
-  submitForm,
-  typeInto,
-  waitFor,
+  mountPage,
+  pageSection,
+  save,
+  saveBarTitle,
+  typeField,
 } from '../harness';
 
 installSettingsHooks();
 
-const mountGeneral = () => mountAt('/settings/general');
+describe('General: git author', () => {
+  it('editing only the name PATCHes exactly git_author_name, trimmed', async () => {
+    await mountPage();
+    expect(fieldLabel('git_author_name')).toBe('Git author name');
+    expect(fieldHint('git_author_name')).toBe('Used for commits unless a repo overrides it.');
 
-describe('Settings general — git author (issue #198)', () => {
-  it('editing only the name PATCHes exactly git_author_name', async () => {
-    h.settingsOnServer = { git_author_name: 'Old Name', git_author_email: 'me@example.com' };
-    await mountGeneral();
-    await waitFor(
-      () => container.querySelector('input[name="git_author_name"]'),
-      'git author card',
-    );
+    await typeField('git_author_name', '  Dominik  ');
+    await save();
 
-    typeInto(input('git_author_name'), 'New Name');
-    submitForm();
-    await settle();
-
-    // Dirty-fields-only: the untouched email stays out of the patch.
-    expect(h.patchBodies).toEqual([{ git_author_name: 'New Name' }]);
+    expect(h.patchBodies).toEqual([{ git_author_name: 'Dominik' }]);
   });
 
-  it('a clean submit notes "Nothing to save." and never PATCHes', async () => {
-    h.settingsOnServer = { git_author_name: 'Dominik', git_author_email: 'd@example.com' };
-    await mountGeneral();
-    await waitFor(
-      () => container.querySelector('input[name="git_author_name"]'),
-      'git author card',
-    );
-
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([]);
-    expect(container.textContent).toContain('Nothing to save.');
+  it('seeds both fields from the stored settings', async () => {
+    h.settingsOnServer = {
+      ...h.settingsOnServer,
+      git_author_name: 'Lab',
+      git_author_email: 'lab@example.com',
+    };
+    await mountPage();
+    expect(input('git_author_name').value).toBe('Lab');
+    expect(input('git_author_email').value).toBe('lab@example.com');
   });
 });
 
-describe('Settings general — transcript retention (issue #81)', () => {
-  const field = () =>
-    waitFor(
-      () => container.querySelector('input[name="transcript_retention_days"]'),
-      'transcript retention field',
-    );
-
-  it('seeds from the server value and renders the help copy', async () => {
-    h.settingsOnServer = { transcript_retention_days: 30 };
-    await mountGeneral();
-    await field();
-
+describe('General: transcript retention (issue #81)', () => {
+  it('seeds from the server value and explains the range', async () => {
+    await mountPage();
     expect(input('transcript_retention_days').value).toBe('30');
-    expect(container.textContent).toContain('Transcript retention (days)');
-    expect(container.textContent).toContain(
-      'Ended runs keep their transcript for this many days; 0 keeps none',
+    expect(fieldHint('transcript_retention_days')).toBe(
+      'Ended runs keep their transcript for this many days; 0 keeps none (max 365).',
     );
   });
 
-  it('editing it PATCHes exactly transcript_retention_days as a number', async () => {
-    h.settingsOnServer = { git_author_name: 'Dominik', transcript_retention_days: 30 };
-    await mountGeneral();
-    await field();
-
-    typeInto(input('transcript_retention_days'), '90');
-    submitForm();
-    await settle();
-
-    expect(h.patchBodies).toEqual([{ transcript_retention_days: 90 }]);
-  });
-
-  it('0 is the off switch, not rejected', async () => {
-    h.settingsOnServer = { transcript_retention_days: 30 };
-    await mountGeneral();
-    await field();
-
-    typeInto(input('transcript_retention_days'), '0');
-    submitForm();
-    await settle();
-
+  it('0 is the off switch, not a problem', async () => {
+    await mountPage();
+    await typeField('transcript_retention_days', '0');
+    await save();
     expect(h.patchBodies).toEqual([{ transcript_retention_days: 0 }]);
   });
 
-  it('the cap 365 saves; 366 and a non-number block the save client-side', async () => {
-    h.settingsOnServer = { transcript_retention_days: 30 };
-    await mountGeneral();
-    await field();
-
-    typeInto(input('transcript_retention_days'), '366');
-    submitForm();
-    await settle();
-    expect(h.patchBodies).toEqual([]);
-    expect(container.textContent).toContain('Must be at most 365.');
-    expect(input('transcript_retention_days').getAttribute('aria-invalid')).toBe('true');
-
-    typeInto(input('transcript_retention_days'), '-1');
-    submitForm();
-    await settle();
-    expect(h.patchBodies).toEqual([]);
-    expect(container.textContent).toContain('Enter a whole number.');
-
-    typeInto(input('transcript_retention_days'), '365');
-    submitForm();
-    await settle();
+  it('the cap 365 saves', async () => {
+    await mountPage();
+    await typeField('transcript_retention_days', '365');
+    await save();
     expect(h.patchBodies).toEqual([{ transcript_retention_days: 365 }]);
+  });
+
+  it('366 and a non-number are problems at the field, and nothing is sent', async () => {
+    await mountPage();
+    await typeField('transcript_retention_days', '366');
+    await save();
+    expect(fieldError('transcript_retention_days')).toBe('Use a whole number from 0 to 365.');
+    expect(saveBarTitle()).toBe('1 problem to fix');
+
+    await typeField('transcript_retention_days', 'forever');
+    await save();
+    expect(fieldError('transcript_retention_days')).toBe('Use a whole number from 0 to 365.');
+    expect(h.patchBodies).toEqual([]);
+  });
+});
+
+describe('General: status cards', () => {
+  it('ends with the credential gateway and SSH bastion cards, outside the saved fields', async () => {
+    await mountPage();
+    const section = pageSection('general');
+    const cards = Array.from(section.querySelectorAll(':scope > .card'));
+
+    expect(cards).toHaveLength(3);
+    expect(cards[0]?.querySelector('[data-field="git_author_name"]')).not.toBeNull();
+    expect(cards[1]?.querySelector('h2')?.textContent).toBe('Credential gateway');
+    expect(cards[2]?.querySelector('h2')?.textContent).toBe('SSH bastion');
+    expect(cards[1]?.querySelector('[data-field]')).toBeNull();
+    expect(cards[2]?.querySelector('[data-field]')).toBeNull();
   });
 });

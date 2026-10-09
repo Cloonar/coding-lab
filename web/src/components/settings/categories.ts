@@ -13,17 +13,17 @@ import type { IconName } from '../Icon';
 export interface SettingsCategory<Group extends string = string> {
   slug: string;
   title: string;
-  /** One line, shown under the section heading (and in the mobile index rows). */
+  /** One line, shown under the section heading. */
   description: string;
   /** A vendored icon name, rendered as <Icon name={...} />. */
   icon: IconName;
   /** Danger category: pinned last by convention, rendered in --danger red. */
   danger?: boolean;
   /**
-   * The group the outline lists the section under; null or absent =
-   * ungrouped (the repo page's Danger zone).
+   * The group the outline lists the section under; null = ungrouped (the
+   * repo page's Danger zone).
    */
-  group?: Group | null;
+  group: Group | null;
   /**
    * True for a section whose rows are independent objects with their own
    * server calls (the repo page's Schedules, Secrets, Imports): they apply at

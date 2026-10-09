@@ -17,7 +17,8 @@
 //     "inherited" or "set here" — in words, and as part of the control's
 //     description. Set here, it also shows "Default: <what it would inherit>"
 //     and a Reset action that returns it to inherited (a change like any
-//     other: it waits for Save and is saved as a null override). Inherited,
+//     other: it waits for Save and is saved as an inherit — null on the repo
+//     page, "" for a global text override). Inherited,
 //     it shows what it resolves to — as the first pick of a select or
 //     segmented control ("Inherited · <value>"), as the placeholder of a text
 //     or number field. The value is the store's `inheritedText`; while that

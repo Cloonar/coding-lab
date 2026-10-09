@@ -87,7 +87,7 @@ export interface FieldBinding<T extends FormShape, K extends FieldKey<T>> {
    * server; global Settings words another draft on the same page).
    */
   inheritedText: Accessor<string | null>;
-  /** Returns an overridable field to inherited (a change, saved as null). */
+  /** Returns an overridable field to inherited (a change, saved as an inherit). */
   reset: () => void;
 }
 

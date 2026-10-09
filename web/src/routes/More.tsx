@@ -33,13 +33,13 @@ import { install } from '../lib/install';
 import { createMediaQuery } from '../lib/media';
 import { createProviderLogin } from '../lib/providerLogin';
 import { resourceValue } from '../lib/resource';
-import { GLOBAL_SETTINGS_CATEGORIES } from './settings/categories';
+import { settingsSummary } from './settings/categories';
 
 /** The shell breakpoint (AppShell's DESKTOP_MIN_PX): the rail replaces More. */
 const DESKTOP_QUERY = '(min-width: 1024px)';
 
-/** The Settings row's hint: the category names, from the one registry. */
-const SETTINGS_HINT = GLOBAL_SETTINGS_CATEGORIES.map((c) => c.title).join(' · ');
+/** The Settings row's hint: the section names, in the row's own fixed order. */
+const SETTINGS_HINT = settingsSummary();
 
 export default function More() {
   const desktop = createMediaQuery(DESKTOP_QUERY);

@@ -10,9 +10,11 @@
 //   - how the draft normalises to the wire,
 //   - the rule the browser checks before Save sends anything,
 //   - and whether the field is OVERRIDABLE: an entry with an `inherit` draft
-//     is a field whose own value may be null, meaning "inherit" — the page
-//     then shows "inherited" or "set here" at its label, and Reset puts the
-//     `inherit` draft back (saved as a null override).
+//     is a field whose own value may be "inherit" — the page then shows
+//     "inherited" or "set here" at its label, and Reset puts the `inherit`
+//     draft back. On the repo page "inherit" is null on the wire; a page whose
+//     PATCH spells it otherwise (global Settings saves an inheriting text
+//     override as "") says which drafts inherit with `inherits`.
 //
 // A page names its table's types once, as a FormShape (its drafts, its PATCH
 // body, its saved object, what a wire form may read besides its own draft,
@@ -63,9 +65,15 @@ export interface FieldSpec<T extends FormShape, K extends FieldKey<T>> {
   validate?: (draft: DraftOf<T, K>) => string | null;
   /**
    * Present exactly on the OVERRIDABLE fields: the draft that means "inherit"
-   * (null on the wire). Reset sets it.
+   * (null on the wire, unless `inherits` says otherwise). Reset sets it.
    */
   inherit?: DraftOf<T, K>;
+  /**
+   * Whether a draft of an overridable field leaves it inherited; default: its
+   * wire value is null. For a PATCH that spells "inherit" as something else
+   * (global Settings' text overrides: "").
+   */
+  inherits?: (draft: DraftOf<T, K>) => boolean;
 }
 
 /** A whole table: one entry per field, in page order. */
@@ -102,7 +110,8 @@ export interface FieldTable<T extends FormShape> {
   ): boolean;
   /**
    * Whether a draft of an overridable field leaves it inherited: it would be
-   * saved as null. Always false for a field that cannot inherit.
+   * saved as null (or as the field's own `inherits` spelling). Always false
+   * for a field that cannot inherit.
    */
   draftInherits<K extends FieldKey<T>>(
     key: K,
@@ -174,8 +183,13 @@ export function createFieldTable<T extends FormShape>(fields: FieldSpecs<T>): Fi
     overridableKeys: keys.filter(isOverridable),
     sameDraft,
     draftDiffers,
-    draftInherits: (key, draft, context) =>
-      isOverridable(key) && spec(key).wire(draft, context) === null,
+    draftInherits: (key, draft, context) => {
+      if (!isOverridable(key)) return false;
+      const entry = spec(key);
+      return entry.inherits !== undefined
+        ? entry.inherits(draft)
+        : entry.wire(draft, context) === null;
+    },
     validateDraft,
     changedFields,
     buildPatch: (edits, saved, context) => {

@@ -1,12 +1,23 @@
-// Global settings › Notifications coverage (issue #198), ported from the old
-// Settings.test.tsx: the Web Push block (issue #98) — its hard support gate,
-// device list, enable/remove/test flows — and the PWA install re-entry row
-// (issue #142). Mounted at /settings/notifications; behavior and strings are
-// byte-identical to the monolith.
+// Global settings › Notifications coverage (issues #198, #85): the Web Push
+// block (issue #98) — its hard support gate, device list, enable/remove/test
+// flows — and the PWA install re-entry row (issue #142), now a section of the
+// one settings page. Its content is unchanged; its rows act at once, so its
+// heading carries the "applies immediately" tag and nothing here ever shows
+// the save bar. Mounted at /settings/notifications.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PushDevice } from '../../../api';
-import { button, container, h, installSettingsHooks, mountAt, settle, waitFor } from '../harness';
+import {
+  button,
+  container,
+  h,
+  installSettingsHooks,
+  mountAt,
+  pageSection,
+  saveBar,
+  settle,
+  waitFor,
+} from '../harness';
 
 installSettingsHooks();
 
@@ -146,6 +157,26 @@ describe('Settings notifications (issue #98)', () => {
 
     expect(h.deletedSubIDs).toEqual(['sub_1']);
     expect(unsubscribeCalls).toBe(1);
+  });
+
+  it('is a section of the page, tagged as applying immediately, that never waits for Save', async () => {
+    installPushSupport();
+    h.subsOnServer = [device('sub_1', 'Chrome on macOS', 'https://push.example/one')];
+    await mountNotifications();
+    await waitFor(
+      () => (container.textContent?.includes('Chrome on macOS') ? true : null),
+      'device list',
+    );
+
+    const section = pageSection('notifications');
+    expect(section.querySelector('.settings-tag')?.textContent).toBe('applies immediately');
+    expect(section.querySelector('[data-field]')).toBeNull();
+
+    button('Send test').click();
+    await settle();
+    expect(h.testedSubIDs).toEqual(['sub_1']);
+    expect(saveBar()).toBeNull();
+    expect(h.patchBodies).toEqual([]);
   });
 
   it('Send test calls testPushDevice and confirms', async () => {

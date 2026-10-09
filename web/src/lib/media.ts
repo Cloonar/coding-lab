@@ -1,7 +1,8 @@
 // Reactive matchMedia primitive (issue #198): a boolean accessor tracking a
-// media query live. SettingsLayout gates its mobile-index / desktop
-// master-detail split on it, so the split must FLIP on viewport resize — a
-// one-shot `.matches` read would strand the layout on the mount-time width.
+// media query live. The settings pages swap their section chips for the
+// outline on it (and More redirects on it), so the layout must FLIP on
+// viewport resize — a one-shot `.matches` read would strand it on the
+// mount-time width.
 // jsdom ships no window.matchMedia at all; its absence reads as a static
 // "no match" (the composerKeys.ts convention), never a crash.
 
