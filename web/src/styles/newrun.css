@@ -1,23 +1,28 @@
 /* New run page layout (issue #66, routes/NewRun.tsx; reference
-   docs/reference/new-run-mockup.html). The DOM order is pills, composer dock,
-   Issues card — the desktop order, so Tab follows what is seen. The pieces
-   style themselves (newrun-repos.css, newrun-issues.css, newrun-composer.css,
-   composer.css for the field); this file places them.
+   docs/reference/new-run-mockup.html). The pieces style themselves
+   (newrun-repos.css, newrun-issues.css, newrun-composer.css, composer.css for
+   the field); this file places them. One pills row moves between two spots
+   by breakpoint (issue #87; NewRun places the node): a sibling before the
+   dock from 1024px, the dock's first row below it.
 
-   Phone (<1024px): the "New run" page header (issue #76), the pills row, the
-   Issues card, and the composer docked at the bottom edge (CSS `order` moves
-   it last). The page is a flex column that fills the content area, so the
-   dock sits at the bottom edge even when the card is short, and sticks there
-   while a long card scrolls under it. The bottom edge is the top of the tab
-   bar while it shows (issue #76): the shell keeps the content clear of the
-   bar and publishes its height as --tabbar-space (0px without a bar), so the
+   Phone (<1024px): the "New run" page header (issue #76; the selected repo as
+   its subtitle since issue #87), the Issues card, and the composer docked at
+   the bottom edge — the pills row on top, then the blockers and the field.
+   The DOM order is header, dock, Issues card; CSS `order` moves the dock
+   last. The page is a flex column that fills the content area, so the dock
+   sits at the bottom edge even when the card is short, and sticks there while
+   a long card scrolls under it. The bottom edge is the top of the tab bar
+   while it shows (issue #76): the shell keeps the content clear of the bar
+   and publishes its height as --tabbar-space (0px without a bar), so the
    sticky dock offsets by it and only pads for the home indicator when no bar
    covers it. The page has no side padding of its own: each part takes the
-   16px gutter, which lets the pills scroll out to the screen edge.
+   16px gutter, and the pills row breaks out of the dock's to scroll out to
+   the screen edge.
 
    Desktop (>=1024px): a centered 720px column — pills, composer, Issues
-   card, no page header (NewRun renders it below 1024px only) — top-aligned
-   with the old composer's clamp(1.5rem, 8vh, 5rem).
+   card, in DOM order, so Tab follows what is seen; no page header (NewRun
+   renders it below 1024px only) — top-aligned with the old composer's
+   clamp(1.5rem, 8vh, 5rem).
 
    All of it applies while the page has repositories (`.newrun-docked`): the
    repos load error and the zero-repositories empty state keep the plain
@@ -57,20 +62,29 @@
 }
 
 /* Docked, the page has no padding: the header takes the gutter itself, and
-   the pills row below it drops its own top spacing (SectionHead's margin
-   already separates them). */
+   the Issues card below it drops its own top spacing (SectionHead's margin
+   already separates them). The header renders below 1024px only, so the
+   sibling rule never reaches the desktop column. */
 .newrun-docked .newrun-head {
   padding: var(--space-3) var(--space-4) 0;
+}
+
+.newrun-head ~ .newrun-issues {
+  padding-top: 0;
 }
 
 .newrun-pills {
   flex: none;
   min-width: 0;
-  padding-top: var(--space-3);
 }
 
-.newrun-head + .newrun-pills {
-  padding-top: 0;
+/* The phone's pills row, first in the dock (issue #87): the wrapper breaks
+   out of the dock's 16px gutter so the row still scrolls out to the screen
+   edge, while .repo-pills keeps the gutter as its inner padding (below); the
+   same 8px step as the banner and the blockers separates it from what
+   follows. */
+.newrun-dock > .newrun-pills {
+  margin: 0 calc(-1 * var(--space-4)) var(--space-2);
 }
 
 .newrun .repo-pills {
@@ -85,11 +99,17 @@
   padding: var(--space-3) var(--space-4) var(--space-2);
 }
 
-/* The dock: the Chat's shape — the field sits on the page background at the
-   bottom edge, above the tab bar while it shows and clear of the home
-   indicator; content scrolling under it fades out above the field. The bar
-   (when present) already covers the safe area — --tabbar-space includes the
-   inset — so max() pads for the indicator only when no bar is there. */
+/* The dock: the Chat's shape — the pills row and the field sit on the page
+   background at the bottom edge, above the tab bar while it shows and clear
+   of the home indicator; content scrolling under it fades out above the
+   pills. The fade is a fixed 12px, exactly the dock's top padding (issue
+   #87): a percentage stop grows with the dock, and with the pills row on top
+   the old 35% would reach past it, letting scrolled content show between the
+   pills. A fixed length keeps a soft edge above and the pills row and the
+   field on solid background.
+   The bar (when present) already covers the safe area — --tabbar-space
+   includes the inset — so max() pads for the indicator only when no bar is
+   there. */
 .newrun-dock {
   order: 1;
   position: sticky;
@@ -97,9 +117,9 @@
   z-index: 3;
   flex: none;
   min-width: 0;
-  padding: var(--space-2) var(--space-4)
+  padding: var(--space-3) var(--space-4)
     calc(var(--space-3) + max(0px, env(safe-area-inset-bottom, 0px) - var(--tabbar-space, 0px)));
-  background: linear-gradient(to bottom, transparent, var(--bg) 35%);
+  background: linear-gradient(to bottom, transparent, var(--bg) var(--space-3));
 }
 
 .newrun-dock > .banner {
@@ -128,10 +148,13 @@
   flex: none;
 }
 
-/* The AFK toast clears a one-line dock on the phone — and the tab bar under
-   it, which covers the safe area itself when it shows. */
+/* The AFK toast clears the dock on the phone — and the tab bar under it,
+   which covers the safe area itself when it shows. 7.5rem cleared a one-line
+   field; the pills row on top (issue #87) adds 3.75rem: the 44px pill, the
+   row's 2px scroll padding above and below, the 8px gap under it and the
+   dock's 4px taller top padding (60px). */
 .newrun .toast {
-  bottom: calc(7.5rem + max(env(safe-area-inset-bottom, 0px), var(--tabbar-space, 0px)));
+  bottom: calc(11.25rem + max(env(safe-area-inset-bottom, 0px), var(--tabbar-space, 0px)));
 }
 
 @media (min-width: 1024px) {
@@ -140,10 +163,6 @@
     margin: 0 auto;
     padding: clamp(1.5rem, 8vh, 5rem) var(--space-4) var(--space-6);
     min-height: 0;
-  }
-
-  .newrun-pills {
-    padding-top: 0;
   }
 
   .newrun .repo-pills {

@@ -1,5 +1,6 @@
 // New run page contract (issue #66; the composer since issue #41; at /new
-// with a phone-only "New run" header since issue #76):
+// with a phone-only "New run" header since issue #76; the pills in the phone
+// dock and the selected repo as the header's subtitle since issue #87):
 // - with repos present the page is the repository pills, the composer (the
 //   field with Model / Effort / ⋯ chips and the send) and the selected repo's
 //   Issues card — no Repository chip, no Agent chip in the bar, no AFK strip,
@@ -457,6 +458,38 @@ function finePointer(matches: boolean): void {
   );
 }
 
+// A viewport fake for the shell breakpoint: `(min-width: 1024px)` matches
+// while `desktop` is set, every other query reads false. The returned setter
+// crosses the breakpoint live — it flips the lists' `matches` and fires their
+// change listeners, which createMediaQuery re-reads (lib/media.ts).
+function viewport(desktop: boolean): (next: boolean) => void {
+  let wide = desktop;
+  const lists: { query: string; listeners: Set<() => void> }[] = [];
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => {
+      const list = { query, listeners: new Set<() => void>() };
+      lists.push(list);
+      return {
+        get matches() {
+          return wide && query === '(min-width: 1024px)';
+        },
+        media: query,
+        addEventListener: (_: string, fn: () => void) => list.listeners.add(fn),
+        removeEventListener: (_: string, fn: () => void) => list.listeners.delete(fn),
+        addListener: () => {},
+        removeListener: () => {},
+        onchange: null,
+        dispatchEvent: () => false,
+      };
+    }),
+  );
+  return (next) => {
+    wide = next;
+    for (const list of lists) for (const fn of list.listeners) fn();
+  };
+}
+
 function composerInput(): HTMLTextAreaElement {
   return container.querySelector('.composer-input') as HTMLTextAreaElement;
 }
@@ -535,12 +568,12 @@ describe('NewRun page', () => {
     // A repo that can run shows nothing about it: no blocker, no readiness line.
     expect(container.querySelector('.composer-blockers')).toBeNull();
     expect(container.textContent).not.toContain('No repositories yet');
-    // DOM order: the phone header, pills, composer, Issues card (CSS moves the
-    // dock last on a phone).
+    // DOM order below 1024px: the header, the dock (the pills inside it,
+    // issue #87), the Issues card — CSS moves the dock last on a phone.
     const parts = Array.from(container.querySelectorAll('main.newrun > div[class^="newrun-"]')).map(
       (el) => el.className,
     );
-    expect(parts).toEqual(['newrun-head', 'newrun-pills', 'newrun-dock', 'newrun-issues']);
+    expect(parts).toEqual(['newrun-head', 'newrun-dock', 'newrun-issues']);
   });
 
   it('opens with a "New run" page header below 1024px (issue #76)', async () => {
@@ -549,27 +582,31 @@ describe('NewRun page', () => {
     expect(head?.querySelector('.section-head h2')?.textContent).toBe('New run');
   });
 
+  it("subtitles the phone header with the selected repo's name (issue #87)", async () => {
+    reposOnServer = [repoFixture(), repoFixture({ id: 'repo_2', name: 'other-repo' })];
+    await mountNewRun();
+    const sub = () => container.querySelector('main.newrun > .newrun-head .section-sub');
+    expect(container.querySelector('.newrun-head h2')?.textContent).toBe('New run');
+    expect(sub()?.textContent).toBe('coding-lab');
+
+    // It follows a pick; the Issues card keeps its own heading.
+    pill('other-repo')!.click();
+    await settle();
+    expect(sub()?.textContent).toBe('other-repo');
+    expect(container.querySelector('.issues-card h2')?.textContent).toBe('Issues');
+  });
+
   it('keeps the header in the zero-repos state too', async () => {
     reposOnServer = [];
     await mountNewRun();
     expect(container.querySelector('.newrun-head h2')?.textContent).toBe('New run');
+    // No repo to name: the plain head row, no subtitle.
+    expect(container.querySelector('.newrun-head .section-sub')).toBeNull();
     expect(container.textContent).toContain('No repositories yet');
   });
 
   it('has no page header from 1024px: the centered column stays bare', async () => {
-    vi.stubGlobal(
-      'matchMedia',
-      vi.fn((query: string) => ({
-        matches: query === '(min-width: 1024px)',
-        media: query,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-        addListener: () => {},
-        removeListener: () => {},
-        onchange: null,
-        dispatchEvent: () => false,
-      })),
-    );
+    viewport(true);
     await mountNewRun();
     expect(container.querySelector('.newrun-head')).toBeNull();
     expect(container.querySelector('.composer-field')).not.toBeNull();
@@ -1222,6 +1259,78 @@ describe('NewRun Runner', () => {
     await mountNewRun();
 
     expect(container.querySelector('.composer-blocker-host')).not.toBeNull();
+  });
+});
+
+// Where the pills row sits (issue #87): below 1024px it is the dock's first
+// row, above the blockers and the field, so the repo is picked where the thumb
+// already is; from 1024px it is the desktop column's first part, before the
+// dock. One RepoPills either way — the same node moves on a crossing.
+describe('NewRun pills placement', () => {
+  /** The direct children of the dock, by class (the pills wrapper included). */
+  const dockParts = () =>
+    Array.from(container.querySelector('.newrun-dock')!.children).map((el) => el.className);
+
+  it('renders the pills inside the dock below 1024px, before the composer field', async () => {
+    reposOnServer = [repoFixture(), repoFixture({ id: 'repo_2', name: 'other-repo' })];
+    await mountNewRun();
+
+    const dock = container.querySelector('.newrun-dock')!;
+    expect(container.querySelectorAll('.repo-pills')).toHaveLength(1);
+    expect(dock.querySelector('.repo-pills')).not.toBeNull();
+    expect(dock.querySelector('.repo-pill-all')).not.toBeNull();
+    expect(dockParts()[0]).toBe('newrun-pills');
+    expect(dockParts().indexOf('newrun-pills')).toBeLessThan(dockParts().indexOf('composer-field'));
+    // Nothing of the pills is left outside the dock.
+    expect(container.querySelector('main.newrun > .newrun-pills')).toBeNull();
+
+    // Behavior is unchanged in the dock: a pill picks the repo.
+    pill('other-repo')!.click();
+    await settle();
+    expect(pill('other-repo')?.getAttribute('aria-pressed')).toBe('true');
+    expect(composerInput().placeholder).toBe('Describe a task for other-repo…');
+  });
+
+  it('renders the pills before the dock, outside it, from 1024px', async () => {
+    viewport(true);
+    await mountNewRun();
+
+    expect(container.querySelectorAll('.repo-pills')).toHaveLength(1);
+    expect(container.querySelector('.newrun-dock .repo-pills')).toBeNull();
+    expect(dockParts()).not.toContain('newrun-pills');
+    // The desktop DOM order is unchanged: pills, composer, Issues card.
+    const parts = Array.from(container.querySelectorAll('main.newrun > div[class^="newrun-"]')).map(
+      (el) => el.className,
+    );
+    expect(parts).toEqual(['newrun-pills', 'newrun-dock', 'newrun-issues']);
+  });
+
+  it('moves the one pills row across the breakpoint, keeping an open picker', async () => {
+    reposOnServer = [repoFixture(), repoFixture({ id: 'repo_2', name: 'other-repo' })];
+    const setDesktop = viewport(false);
+    await mountNewRun();
+
+    const row = container.querySelector('.newrun-pills')!;
+    const all = container.querySelector<HTMLButtonElement>('.repo-pill-all')!;
+    all.click();
+    await settle();
+    expect(picker()).not.toBeNull();
+
+    setDesktop(true);
+    await settle();
+    // The same element, now a sibling before the dock — not a second mount.
+    expect(container.querySelectorAll('.newrun-pills')).toHaveLength(1);
+    expect(container.querySelector('main.newrun > .newrun-pills')).toBe(row);
+    expect(row.nextElementSibling?.className).toBe('newrun-dock');
+    expect(container.querySelector('.repo-pill-all')).toBe(all);
+    expect(all.getAttribute('aria-expanded')).toBe('true');
+    expect(picker()).not.toBeNull();
+
+    setDesktop(false);
+    await settle();
+    expect(container.querySelector('.newrun-dock')!.firstElementChild).toBe(row);
+    expect(container.querySelectorAll('.newrun-pills')).toHaveLength(1);
+    expect(picker()).not.toBeNull();
   });
 });
 

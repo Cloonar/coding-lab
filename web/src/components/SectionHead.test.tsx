@@ -7,7 +7,9 @@
 // string like SectionCard's) is also pinned here: a heading may be a fragment
 // carrying the detail routes' inline issue-number span, and an action may
 // itself be several controls (History's two filter selects), which all land in
-// the row, in order, after the spacer.
+// the row, in order, after the spacer. An optional subtitle (issue #87) puts
+// the h2 and a muted line in one column in the h2's place; without one the
+// markup is exactly the plain row.
 
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -71,6 +73,40 @@ describe('SectionHead', () => {
     expect(Array.from(head().children).map((el) => el.tagName)).toEqual(['H2', 'SPAN']);
     expect(head().querySelector('.spacer')).not.toBeNull();
     expect(head().querySelector('button')).toBeNull();
+  });
+
+  it('stacks a subtitle under the h2 in one column, before the spacer', () => {
+    mount(() => (
+      <SectionHead
+        title="New run"
+        subtitle="coding-lab"
+        action={
+          <button type="button" class="primary">
+            Go
+          </button>
+        }
+      />
+    ));
+
+    const children = Array.from(head().children);
+    expect(children.map((el) => el.className || el.tagName)).toEqual([
+      'section-head-text',
+      'spacer',
+      'primary',
+    ]);
+    const text = head().querySelector('.section-head-text')!;
+    expect(Array.from(text.children).map((el) => el.tagName)).toEqual(['H2', 'P']);
+    expect(text.querySelector('h2')?.textContent).toBe('New run');
+    const sub = text.querySelector('p')!;
+    expect(sub.className).toBe('section-sub muted');
+    expect(sub.textContent).toBe('coding-lab');
+  });
+
+  it('keeps the plain row when the subtitle is undefined', () => {
+    mount(() => <SectionHead title="New run" subtitle={undefined} />);
+
+    expect(Array.from(head().children).map((el) => el.tagName)).toEqual(['H2', 'SPAN']);
+    expect(head().querySelector('.section-sub')).toBeNull();
   });
 
   it('renders a JSX title inside the single h2', () => {

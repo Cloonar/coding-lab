@@ -194,6 +194,21 @@
 
 /* `.section-head h2` is reset alongside the other head rows in cards.css. */
 
+/* SectionHead's optional subtitle (issue #87): the heading and a muted line
+   under it share one column. The column may shrink (min-width: 0) so a long
+   subtitle ellipsizes inside the row instead of widening it at phone width. */
+.section-head-text {
+  min-width: 0;
+}
+
+.section-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .center-note {
   color: var(--muted);
   text-align: center;
