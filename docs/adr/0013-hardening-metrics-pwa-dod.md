@@ -15,6 +15,8 @@ The adversarial review earned its keep on all three fronts; thirteen findings, n
 
 Accepted. Ships M8; with it every brief milestone (M1–M8) is implemented. §15 items 5/6/8/9 verified by tests on this tree, 2/3/4/7 verified with the external boundary faked (documented per item), item 1 awaits a real NixOS host — the residue is recorded in docs/definition-of-done.md rather than hand-waved.
 
+- **ADR-0082:** the PWA icons gain a separate opaque, full-bleed `apple-touch-icon.png` for iOS Home Screen installs, generated with the other PNG icons by `web/scripts/icons.sh`; manifest, service worker and offline shell are unchanged.
+
 ## Considered options
 
 - **Maintained gauge for `lab_instances_active`** (increment/decrement at start/stop). Rejected: every writer becomes a drift hazard; the scrape-time collector reads the same two cheap sources the reaper trusts, and a snapshot failure yields an absent series (the alert signal) while `/metrics` stays 200.
