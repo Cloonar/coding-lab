@@ -42,7 +42,9 @@ export function TriageChip(props: { labels: readonly string[] }): JSX.Element {
 /**
  * One issue as a full-width button (>=44px): the number in mono, the title
  * clamped to two lines, the triage chip, the open PR's chip (`PR #88`, run
- * tint) when the issue has one, the age. Other labels are not shown.
+ * tint) when the issue has one, the age. Other labels are not shown. The
+ * chips share one wrapping group, so on a phone the two stack rather than
+ * squeeze the title down to a word.
  */
 export function IssueRow(props: {
   issue: IssueSummary;
@@ -53,10 +55,12 @@ export function IssueRow(props: {
     <button type="button" class="issue-row" aria-haspopup="dialog" onClick={() => props.onSelect()}>
       <span class="mono muted issue-row-number">#{props.issue.number}</span>
       <span class="issue-row-title">{props.issue.title}</span>
-      <TriageChip labels={props.issue.labels} />
-      <Show when={props.issue.pull}>
-        {(pull) => <span class={`chip pr-chip ${TINT_CLASS.run}`}>PR #{pull().number}</span>}
-      </Show>
+      <span class="issue-row-chips">
+        <TriageChip labels={props.issue.labels} />
+        <Show when={props.issue.pull}>
+          {(pull) => <span class={`chip pr-chip ${TINT_CLASS.run}`}>PR #{pull().number}</span>}
+        </Show>
+      </span>
       <small class="muted issue-row-age">{issueAge(props.issue.created_at, props.now())}</small>
     </button>
   );

@@ -149,6 +149,19 @@
   flex: none;
 }
 
+/* The triage chip and the PR chip (issue #88) as one group: capped below
+   half the row and wrapping, so on a phone the two chips stack instead of
+   squeezing the title to a broken word; a wide row keeps them side by side. */
+.issue-row-chips {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 45%;
+}
+
 .issue-row-age {
   flex: none;
 }
