@@ -1,16 +1,9 @@
 // The Runner vocabulary the two Runner settings pages share (issue #55): the
 // repo's own pick (repo-settings › Runner) and the global runner default
-// (settings › Runner) offer the SAME two options with the SAME labels — one
-// module so the copy can never drift between them. "host" is deliberately
-// spelled out as unsandboxed/break-glass (issue #205's UI copy is pinned
-// verbatim in its acceptance criteria).
-
-import type { SelectOption } from '../components/Select';
-
-export const RUNNER_OPTIONS: SelectOption[] = [
-  { value: 'container', label: 'Container — rootless podman' },
-  { value: 'host', label: 'Host — unsandboxed, full host access' },
-];
+// (settings › Runner) — one module so the copy can never drift between them.
+// Both pick "Container" / "Host" (issue #85); "host" is spelled out as
+// unsandboxed/break-glass by the warning below, shown under either pick
+// whenever it is set to host.
 
 /** Shown under a Runner picker whenever the effective runner is `host`. */
 export const HOST_RUNNER_HINT =

@@ -17,7 +17,7 @@ lab holds credentials that reach real infrastructure and spawns agent sessions a
 
 - **Master key** — the vault encrypts every stored credential at rest with AES-256-GCM, keyed by a 32-byte master key kept in a 0600 file.
 - **Run token** — each run gets its own short-lived `lab_run_…` credential, scoped to that run's repo and handed to the session as `LAB_TOKEN`; it is the agent's only tracker surface.
-- **Runner** — the `host` runner is the deliberate break-glass: global Settings → Runner labels it "Host — unsandboxed, full host access", and repo settings warn "Host runs are unsandboxed — the agent has full host access to the server." whenever a repo's effective Runner is `host`, as does the New run page above its composer ("Runs on the host, unsandboxed, with full host access."); the `container` runner runs the pane command as rootless podman in the repo's dev image instead.
+- **Runner** — the `host` runner is the deliberate break-glass: both Runner settings (global Settings → Runner and a repo's) warn "Host runs are unsandboxed — the agent has full host access to the server." whenever the runner they set is `host`, saving a switch of the global default to `host` asks first in a dialog naming how many repos inherit it, as does the New run page above its composer ("Runs on the host, unsandboxed, with full host access."); the `container` runner runs the pane command as rootless podman in the repo's dev image instead.
 
 ### Already documented, not a vulnerability
 
