@@ -1,15 +1,15 @@
 // The New run page's rules (issue #66), as pure functions: the recent
 // repositories list behind the pills (and its localStorage key), the repo
 // picker's rows and filter, the Issues card (triage state, filters, counts,
-// age), the issue action that rides as the run's first_message (issue #96),
-// the AFK line, and the blockers shown at the composer. routes/NewRun.tsx and
-// its components render what these return; nothing here touches the DOM
-// (the two storage helpers guard themselves), so every rule is unit-tested
-// in newRun.test.ts.
+// age), the issue action that rides as the run's first_message (issue #96;
+// Land and its collision notes, issue #88), the AFK line, and the blockers
+// shown at the composer. routes/NewRun.tsx and its components render what
+// these return; nothing here touches the DOM (the two storage helpers guard
+// themselves), so every rule is unit-tested in newRun.test.ts.
 //
 // The reference for copy and behavior is docs/reference/new-run-mockup.html.
 
-import type { Repo } from '../api';
+import type { Instance, IssuePull, Repo } from '../api';
 import type { CloneProgress } from '../stores/cloneProgress';
 import { AFK_PAUSE_THRESHOLD } from './afk';
 import { READY_LABEL } from './issues';
@@ -364,14 +364,22 @@ export function issueAge(createdAt: string, nowMs: number): string {
 // --- Issue actions (the run's first_message, issue #96) ---
 
 /** What the agent is asked to do with the tapped issue. */
-export type IssueAction = 'triage' | 'implement' | 'discuss';
+export type IssueAction = 'triage' | 'implement' | 'discuss' | 'land';
 
-/** The action sheet's three rows, in order, with their one-line descriptions. */
-export const ISSUE_ACTIONS: readonly {
+/** One row of the action sheet. */
+export interface IssueActionRow {
   id: IssueAction;
   label: string;
-  describe: (n: number) => string;
-}[] = [
+  /** The row's one-line description, for issue `n` and its open PR (if any). */
+  describe: (n: number, pull: IssuePull | null) => string;
+}
+
+/**
+ * Every action, in the sheet's order, with its one-line description. Land
+ * (issue #88) is the fourth and only applies to an issue with an open PR;
+ * issueActions() picks the rows a given issue shows.
+ */
+export const ISSUE_ACTIONS: readonly IssueActionRow[] = [
   {
     id: 'triage',
     label: 'Triage',
@@ -388,14 +396,40 @@ export const ISSUE_ACTIONS: readonly {
     label: 'Discuss',
     describe: (n) => `Opens a chat with #${n} as context. Nothing happens until you type.`,
   },
+  {
+    id: 'land',
+    label: 'Land',
+    // Only shown with a pull; the wording without one is a fallback.
+    describe: (n, pull) =>
+      pull === null
+        ? `Validate and merge the open PR resolving #${n}.`
+        : `Validate and merge PR #${pull.number}. Runs /land-pr ${pull.number}; it merges once you confirm.`,
+  },
 ];
+
+/**
+ * The rows the action sheet shows for an issue: Triage, Implement and Discuss
+ * always; Land, as a fourth row, only when the issue has an open PR (issue
+ * #88). Without one the sheet is the three-row sheet it always was.
+ */
+export function issueActions(issue: { pull: IssuePull | null }): IssueActionRow[] {
+  return ISSUE_ACTIONS.filter((action) => action.id !== 'land' || issue.pull !== null);
+}
 
 function actionLabel(action: IssueAction): string {
   return ISSUE_ACTIONS.find((a) => a.id === action)?.label ?? action;
 }
 
-/** The action marked "Suggested": triage for needs-triage, implement for ready-for-agent, else discuss. */
-export function suggestedAction(labels: readonly string[]): IssueAction {
+/**
+ * The action marked "Suggested": land when the issue has an open PR (issue
+ * #88 — it wins over every label), else triage for needs-triage, implement
+ * for ready-for-agent, else discuss.
+ */
+export function suggestedAction(
+  labels: readonly string[],
+  pull: IssuePull | null = null,
+): IssueAction {
+  if (pull !== null) return 'land';
   switch (triageState(labels)) {
     case 'needs-triage':
       return 'triage';
@@ -413,10 +447,14 @@ export function suggestedAction(labels: readonly string[]): IssueAction {
  * - triage: `/triage #47`
  * - implement: `Implement issue #47 "<title>". Read it with `labctl issue view 47` first; it is your brief.`
  * - discuss: `Let's discuss issue #47 "<title>". Read it with `labctl issue view 47`, then wait for my questions.`
+ * - land: `/land-pr 88` — the PR's number, not the issue's (issue #88). The
+ *   sheet only offers Land with a pull; should one be composed without it,
+ *   the skill gets the issue to resolve instead
+ *   (`/land-pr the open PR resolving issue #47`) and finds the PR itself.
  */
 export function composeFirstMessage(
   action: IssueAction,
-  issue: { number: number; title: string },
+  issue: { number: number; title: string; pull?: IssuePull | null },
   text: string,
 ): string {
   const n = issue.number;
@@ -431,12 +469,59 @@ export function composeFirstMessage(
     case 'discuss':
       head = `Let's discuss issue #${n} "${issue.title}". Read it with \`labctl issue view ${n}\`, then wait for my questions.`;
       break;
+    case 'land':
+      head =
+        issue.pull !== undefined && issue.pull !== null
+          ? `/land-pr ${issue.pull.number}`
+          : `/land-pr the open PR resolving issue #${n}`;
+      break;
   }
   const typed = text.trim();
   return typed === '' ? head : `${head}\n${typed}`;
 }
 
-/** The run label an attached action defaults to: `triage-47`. */
+// --- Land's collision notes (issue #88) ---
+
+/** The note under Land while the repo's autoland may pick the same PR up. */
+export const LAND_NOTE_AUTOLAND = 'Autoland is on for this repo';
+
+/** The note under Land while an autoland run is already working the PR. */
+export const LAND_NOTE_LIVE_LANDER = 'A lander run is live on this PR';
+
+/** The run kinds autoland spawns on a PR (each carries its pull_number). */
+const AUTOLAND_KINDS: ReadonlySet<string> = new Set(['lander', 'fix', 'escalate']);
+
+/**
+ * The one-line notes under the Land row, when landing by hand could collide
+ * with autoland. In order:
+ * - LAND_NOTE_AUTOLAND when the repo's autoland switch is on and the PR is
+ *   not escalated (an escalated PR is one autoland has given up on);
+ * - LAND_NOTE_LIVE_LANDER when the runs list has a live lander, fix or
+ *   escalate run of this repo on this PR.
+ * Both can show. The notes only inform: they never disable the row, the
+ * operator decides.
+ */
+export function landNotes(input: {
+  repoID: string;
+  pull: IssuePull;
+  autoland: boolean;
+  runs: readonly Pick<Instance, 'repo_id' | 'kind' | 'live' | 'pull_number'>[];
+}): string[] {
+  const { repoID, pull, autoland, runs } = input;
+  const notes: string[] = [];
+  if (autoland && !pull.escalated) notes.push(LAND_NOTE_AUTOLAND);
+  const live = runs.some(
+    (run) =>
+      run.live &&
+      run.repo_id === repoID &&
+      AUTOLAND_KINDS.has(run.kind) &&
+      run.pull_number === pull.number,
+  );
+  if (live) notes.push(LAND_NOTE_LIVE_LANDER);
+  return notes;
+}
+
+/** The run label an attached action defaults to: `triage-47`, `land-47` (the issue's number, not the PR's). */
 export function defaultRunLabel(action: IssueAction, issueNumber: number): string {
   return `${action}-${issueNumber}`;
 }
@@ -454,7 +539,7 @@ export function runLabelFor(typed: string, attachment: AttachmentRef | null): st
   return attachment === null ? '' : defaultRunLabel(attachment.action, attachment.number);
 }
 
-/** The attachment chip's text: `Triage #47 · <title>`. */
+/** The attachment chip's text: `Triage #47 · <title>`, `Land #47 · <title>` (the issue's number). */
 export function attachmentText(
   action: IssueAction,
   issue: { number: number; title: string },
@@ -462,7 +547,7 @@ export function attachmentText(
   return `${actionLabel(action)} #${issue.number} · ${issue.title}`;
 }
 
-/** The Send button's label: `Start: Triage #47` with an attachment, else `Start run`. */
+/** The Send button's label: `Start: Triage #47` (`Start: Land #47`) with an attachment, else `Start run`. */
 export function sendLabel(attachment: AttachmentRef | null): string {
   return attachment === null
     ? 'Start run'
@@ -471,8 +556,8 @@ export function sendLabel(attachment: AttachmentRef | null): string {
 
 /**
  * The textarea's placeholder: `Describe a task for <repo>…` with nothing
- * attached; Discuss asks what to discuss; Triage and Implement take optional
- * extra guidance.
+ * attached; Discuss asks what to discuss; Triage, Implement and Land take
+ * optional extra guidance.
  */
 export function composerPlaceholder(attachment: AttachmentRef | null, repoName: string): string {
   if (attachment === null) return `Describe a task for ${repoName}…`;

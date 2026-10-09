@@ -7,8 +7,10 @@
 // which closes this picker and opens the action sheet.
 //
 // The rows are the card's own (IssueRow, exported here with TriageChip so
-// the card, this picker and the action sheet draw an issue one way). The
-// filtering and counting rules live in lib/newRun.ts.
+// the card, this picker and the action sheet draw an issue one way); an
+// issue with an open PR adds a "PR #88" chip in the run tint after the
+// triage chip (issue #88). The filtering and counting rules live in
+// lib/newRun.ts.
 
 import { For, Show, createEffect, createSignal, createUniqueId, on, type JSX } from 'solid-js';
 import type { IssueSummary } from '../../api';
@@ -39,7 +41,10 @@ export function TriageChip(props: { labels: readonly string[] }): JSX.Element {
 
 /**
  * One issue as a full-width button (>=44px): the number in mono, the title
- * clamped to two lines, the triage chip, the age. Other labels are not shown.
+ * clamped to two lines, the triage chip, the open PR's chip (`PR #88`, run
+ * tint) when the issue has one, the age. Other labels are not shown. The
+ * chips share one wrapping group, so on a phone the two stack rather than
+ * squeeze the title down to a word.
  */
 export function IssueRow(props: {
   issue: IssueSummary;
@@ -50,7 +55,12 @@ export function IssueRow(props: {
     <button type="button" class="issue-row" aria-haspopup="dialog" onClick={() => props.onSelect()}>
       <span class="mono muted issue-row-number">#{props.issue.number}</span>
       <span class="issue-row-title">{props.issue.title}</span>
-      <TriageChip labels={props.issue.labels} />
+      <span class="issue-row-chips">
+        <TriageChip labels={props.issue.labels} />
+        <Show when={props.issue.pull}>
+          {(pull) => <span class={`chip pr-chip ${TINT_CLASS.run}`}>PR #{pull().number}</span>}
+        </Show>
+      </span>
       <small class="muted issue-row-age">{issueAge(props.issue.created_at, props.now())}</small>
     </button>
   );

@@ -307,6 +307,8 @@ type stubForgeTracker struct {
 	gotEdits []tracker.IssueEdit
 	editErr  error // when set, EditIssue records the edit and fails with it
 	readErr  error // when set, Issue (the follow-up detail read) fails with it
+	pulls    []tracker.PullRef
+	pullsErr error // when set, Pulls fails with it
 }
 
 func (s *stubForgeTracker) ReadyIssues(context.Context) ([]tracker.Issue, error) {
@@ -334,7 +336,13 @@ func (s *stubForgeTracker) Issue(_ context.Context, number int) (tracker.Issue, 
 func (s *stubForgeTracker) CreateComment(context.Context, int, string) error { return nil }
 
 func (s *stubForgeTracker) Pulls(context.Context) ([]tracker.PullRef, error) {
-	return []tracker.PullRef{}, nil
+	if s.pullsErr != nil {
+		return nil, s.pullsErr
+	}
+	if s.pulls == nil {
+		return []tracker.PullRef{}, nil
+	}
+	return s.pulls, nil
 }
 
 func (s *stubForgeTracker) PullsForHead(context.Context, string, string) ([]tracker.PullRef, error) {
@@ -987,5 +995,240 @@ func TestTrackerUnknownRepo404(t *testing.T) {
 		resp := x.do(tt.method, tt.path, tt.body, h)
 		wantStatus(t, resp, http.StatusNotFound)
 		_ = resp.Body.Close()
+	}
+}
+
+// seedForgeBoundRepo is TestForgeBoundRepo's setup in one call: a real
+// vault-encrypted forge_token credential and a forgejo-bound repo naming it,
+// so TrackerFor runs the real registry down to the stubbed REST client.
+func seedForgeBoundRepo(t *testing.T, x *testServer, vlt *vault.Vault, name string) store.Repo {
+	t.Helper()
+	blob, err := vlt.EncryptPayload(vault.ForgeTokenPayload{Host: "forge.example.com", Token: "sekret-tok"})
+	if err != nil {
+		t.Fatalf("EncryptPayload: %v", err)
+	}
+	credID := ids.NewID("cred")
+	if _, err := x.st.CreateCredential(context.Background(), credID, "forge", store.CredentialKindForgeToken, blob, time.Now()); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	return seedTrackerRepo(t, x, name, func(r *store.Repo) {
+		r.TrackerBinding = store.TrackerBindingForge
+		r.ForgeKind = "forgejo"
+		r.ForgeCredentialID = &credID
+	})
+}
+
+// pullsByIssue maps each list row's number to its `pull` value, failing when
+// a row lacks the key: `pull` is on EVERY row, null when no open pull
+// resolves the issue — never omitted (issue #88).
+func pullsByIssue(t *testing.T, items []map[string]any) map[int]map[string]any {
+	t.Helper()
+	out := make(map[int]map[string]any, len(items))
+	for _, it := range items {
+		v, ok := it["pull"]
+		if !ok {
+			t.Fatalf("issue row %v has no pull key", it)
+		}
+		n := int(it["number"].(float64))
+		if v == nil {
+			out[n] = nil
+			continue
+		}
+		out[n] = v.(map[string]any)
+	}
+	return out
+}
+
+// escalatePull writes an escalated run row for pull n ending at endedAt — the
+// store half of autoland's terminality test the list reads.
+func escalatePull(t *testing.T, x *testServer, repoID string, n int, endedAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	run, err := x.st.CreateRun(ctx, store.Run{
+		ID: ids.NewID("run"), RepoID: repoID, Kind: store.RunKindEscalate, Provider: "claude-code",
+		Branch: fmt.Sprintf("pr-%d-head", n), WorktreePath: "/wt/x", SessionName: fmt.Sprintf("proj~escalate-%d", n),
+		Model: "opus[1m]", Effort: "max", StartedAt: endedAt.Add(-time.Minute), Outcome: store.RunOutcomeActive,
+		PullNumber: &n,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun (escalate pull %d): %v", n, err)
+	}
+	if err := x.st.EndRun(ctx, run.ID, store.RunOutcomeEscalated, endedAt, ""); err != nil {
+		t.Fatalf("EndRun (escalate pull %d): %v", n, err)
+	}
+}
+
+// TestIssueListPulls_forge pins the issue list's `pull` field (issue #88) on
+// a forge binding: the one Pulls read joined onto the rows — a claim-branch
+// head and a closing directive both resolve an issue, a pull closing two
+// issues attaches to both, closed-unmerged and merged pulls are no pull, the
+// newest open pull wins a collision — and `escalated` read from the store's
+// escalated-run row, cleared by a later re-arm. The ready queue shares the
+// row shape but spends no pulls read, so its rows answer null.
+func TestIssueListPulls_forge(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	issue := func(n int) tracker.Issue {
+		return tracker.Issue{Number: n, Title: fmt.Sprintf("issue %d", n), State: "open", Labels: []string{tracker.ReadyLabel}, CreatedAt: now, UpdatedAt: now}
+	}
+	open := func(n int, head string, closes ...int) tracker.PullRef {
+		if closes == nil {
+			closes = []int{}
+		}
+		return tracker.PullRef{Number: n, HeadBranch: head, State: tracker.PullOpen,
+			URL: fmt.Sprintf("https://forge.example.com/o/r/pulls/%d", n), Closes: closes}
+	}
+	stub := &stubForgeTracker{
+		issues: []tracker.Issue{issue(47), issue(48), issue(49), issue(50), issue(51), issue(52), issue(53)},
+		ready:  []tracker.Issue{issue(47)},
+		pulls: []tracker.PullRef{
+			open(100, "afk/47"),            // branch match
+			open(101, "feature/x", 48, 53), // closes match, two issues
+			{Number: 102, HeadBranch: "afk/49", State: tracker.PullClosed, Closes: []int{49}}, // closed-unmerged
+			{Number: 103, HeadBranch: "afk/50", State: tracker.PullMerged, Closes: []int{50}}, // merged
+			open(104, "afk/51"),        // older open pull for 51 ...
+			open(110, "feature/y", 51), // ... the newest wins
+		},
+	}
+	x, vlt := newTrackerServer(t, func(tracker.ForgejoConfig) tracker.Tracker { return stub }, nil)
+	repo := seedForgeBoundRepo(t, x, vlt, "forged")
+	base := "/api/v1/repos/" + repo.ID
+
+	// #100 escalated and never re-armed: terminal. #110 escalated, then
+	// re-armed after: no longer terminal.
+	escalatePull(t, x, repo.ID, 100, now)
+	escalatePull(t, x, repo.ID, 110, now)
+	if err := x.st.RearmPull(context.Background(), repo.ID, 110, now.Add(time.Hour)); err != nil {
+		t.Fatalf("RearmPull: %v", err)
+	}
+
+	resp := x.do("GET", base+"/issues", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := pullsByIssue(t, issuesOf(t, decodeBody(t, resp)))
+	if len(got) != 7 {
+		t.Fatalf("rows = %v, want all 7 issues", got)
+	}
+	want := map[int]struct {
+		number    int
+		head      string
+		escalated bool
+	}{
+		47: {100, "afk/47", true},
+		48: {101, "feature/x", false},
+		53: {101, "feature/x", false},
+		51: {110, "feature/y", false},
+	}
+	for n, p := range got {
+		w, ok := want[n]
+		if !ok {
+			if p != nil {
+				t.Errorf("issue %d pull = %v, want null", n, p)
+			}
+			continue
+		}
+		if p == nil {
+			t.Errorf("issue %d pull = null, want #%d", n, w.number)
+			continue
+		}
+		if p["number"] != float64(w.number) || p["head_branch"] != w.head ||
+			p["url"] != fmt.Sprintf("https://forge.example.com/o/r/pulls/%d", w.number) || p["escalated"] != w.escalated {
+			t.Errorf("issue %d pull = %v, want #%d %s escalated=%v", n, p, w.number, w.head, w.escalated)
+		}
+		if len(p) != 4 {
+			t.Errorf("issue %d pull keys = %v, want exactly number/head_branch/url/escalated", n, p)
+		}
+	}
+
+	// The ready queue shares issueResponse but reads no pulls: null.
+	resp = x.do("GET", base+"/ready", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	for n, p := range pullsByIssue(t, issuesOf(t, decodeBody(t, resp))) {
+		if p != nil {
+			t.Errorf("ready issue %d pull = %v, want null", n, p)
+		}
+	}
+}
+
+// TestIssueListPulls_pullsReadFails pins that the pulls half is an
+// enrichment, never the list: a failing Pulls read still answers 200 with
+// every issue, each `pull: null`.
+func TestIssueListPulls_pullsReadFails(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	stub := &stubForgeTracker{
+		issues: []tracker.Issue{
+			{Number: 47, Title: "a", State: "open", CreatedAt: now, UpdatedAt: now},
+			{Number: 48, Title: "b", State: "open", CreatedAt: now, UpdatedAt: now},
+		},
+		pulls:    []tracker.PullRef{{Number: 100, HeadBranch: "afk/47", State: tracker.PullOpen, Closes: []int{48}}},
+		pullsErr: errors.New("forgejo GET /repos/o/r/pulls: unexpected status 502: bad gateway"),
+	}
+	x, vlt := newTrackerServer(t, func(tracker.ForgejoConfig) tracker.Tracker { return stub }, nil)
+	repo := seedForgeBoundRepo(t, x, vlt, "forged")
+
+	resp := x.do("GET", "/api/v1/repos/"+repo.ID+"/issues", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := pullsByIssue(t, issuesOf(t, decodeBody(t, resp)))
+	if len(got) != 2 {
+		t.Fatalf("rows = %v, want both issues despite the failed pulls read", got)
+	}
+	for n, p := range got {
+		if p != nil {
+			t.Errorf("issue %d pull = %v, want null after a failed pulls read", n, p)
+		}
+	}
+}
+
+// TestIssueListPulls_builtin runs the same join through the real builtin
+// tracker: a CR on the claim branch resolves its issue, a CR whose persisted
+// cr_closes names an issue resolves that one, a closed CR resolves nothing,
+// and the URL is the CR's lab-relative SPA route. Escalation reads the same
+// run rows, keyed on the CR number.
+func TestIssueListPulls_builtin(t *testing.T) {
+	x, _ := newTrackerServer(t, nil, nil)
+	repo := seedTrackerRepo(t, x, "local", nil)
+	ctx := context.Background()
+	now := time.Now()
+	for i := 1; i <= 4; i++ {
+		if _, err := x.st.CreateIssue(ctx, repo.ID, fmt.Sprintf("issue %d", i), "", now); err != nil {
+			t.Fatalf("CreateIssue %d: %v", i, err)
+		}
+	}
+	// CR #1 on afk/1 (branch); CR #2 on feature/x closing issue 2; CR #3 on
+	// afk/3 closed-unmerged.
+	if _, err := x.st.CreateCR(ctx, repo.ID, "one", "", "afk/1", "main", nil, now); err != nil {
+		t.Fatalf("CreateCR #1: %v", err)
+	}
+	if _, err := x.st.CreateCR(ctx, repo.ID, "two", "Closes #2", "feature/x", "main", []int{2}, now); err != nil {
+		t.Fatalf("CreateCR #2: %v", err)
+	}
+	if _, err := x.st.CreateCR(ctx, repo.ID, "three", "", "afk/3", "main", []int{3}, now); err != nil {
+		t.Fatalf("CreateCR #3: %v", err)
+	}
+	if _, err := x.st.CloseCR(ctx, repo.ID, 3, now); err != nil {
+		t.Fatalf("CloseCR #3: %v", err)
+	}
+	escalatePull(t, x, repo.ID, 2, now)
+
+	resp := x.do("GET", "/api/v1/repos/"+repo.ID+"/issues", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := pullsByIssue(t, issuesOf(t, decodeBody(t, resp)))
+	if len(got) != 4 {
+		t.Fatalf("rows = %v, want 4", got)
+	}
+	for n, want := range map[int]map[string]any{
+		1: {"number": float64(1), "head_branch": "afk/1", "url": "/repos/" + repo.ID + "/crs/1", "escalated": false},
+		2: {"number": float64(2), "head_branch": "feature/x", "url": "/repos/" + repo.ID + "/crs/2", "escalated": true},
+		3: nil,
+		4: nil,
+	} {
+		p := got[n]
+		if want == nil {
+			if p != nil {
+				t.Errorf("issue %d pull = %v, want null", n, p)
+			}
+			continue
+		}
+		if fmt.Sprint(p) != fmt.Sprint(want) {
+			t.Errorf("issue %d pull = %v, want %v", n, p, want)
+		}
 	}
 }

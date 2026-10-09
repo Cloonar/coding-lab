@@ -783,6 +783,7 @@ func (c *Client) MergePull(ctx context.Context, number int) (tracker.PullRef, er
 		HeadBranch: gh.Head.Ref,
 		State:      tracker.PullMerged,
 		URL:        gh.HTMLURL,
+		Closes:     tracker.ParseCloses(gh.Body),
 	}, nil
 }
 
@@ -1238,12 +1239,18 @@ func changesRequestedReviewers(reviews []tracker.Review) []string {
 	return out
 }
 
+// toPullRef reduces a GitHub pull onto the PullRef vocabulary. Closes is
+// parsed from the body the list endpoint already carries (GitHub's pulls
+// listing returns full rows, body included), so the issue-list join learns
+// which issues a pull resolves without a per-pull read; the body itself is
+// dropped here.
 func toPullRef(gh ghPull) tracker.PullRef {
 	return tracker.PullRef{
 		Number:     gh.Number,
 		HeadBranch: gh.Head.Ref,
 		State:      derivePullState(gh.State, gh.MergedAt != nil),
 		URL:        gh.HTMLURL,
+		Closes:     tracker.ParseCloses(gh.Body),
 	}
 }
 

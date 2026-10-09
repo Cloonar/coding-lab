@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -418,6 +419,64 @@ func TestBuiltin_Pulls_stateMappingAndPRPresent(t *testing.T) {
 	} {
 		if got := tracker.PRPresent(pulls, head); got != want {
 			t.Errorf("PRPresent(%q) = %v, want %v", head, got, want)
+		}
+	}
+}
+
+// TestBuiltin_Pulls_carriesCloses pins the built-in half of PullRef.Closes
+// (issue #88): each ref carries its CR's persisted cr_closes rows — sorted,
+// in the open set AND the recent-closed window alike — and a CR with no
+// closing directive carries the empty non-nil slice, ParseCloses's
+// convention, so the issue-list join reads the same shape on every binding.
+// The slice is a copy: scribbling on one Pulls answer never reaches the next.
+func TestBuiltin_Pulls_carriesCloses(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	repo := seedRepo(t, s)
+	tr := newTracker(s, repo.ID)
+
+	// #1 open closing 7 and 3 (persisted sorted), #2 open closing nothing,
+	// #3 closed-unmerged closing 9 (in the recent-closed window).
+	if _, err := s.CreateCR(ctx, repo.ID, "closes two", "", "feature/x", "main", []int{7, 3}, fixedNow); err != nil {
+		t.Fatalf("CreateCR #1: %v", err)
+	}
+	if _, err := s.CreateCR(ctx, repo.ID, "closes none", "", "afk/5", "main", nil, fixedNow); err != nil {
+		t.Fatalf("CreateCR #2: %v", err)
+	}
+	if _, err := s.CreateCR(ctx, repo.ID, "closed one", "", "afk/9", "main", []int{9}, fixedNow); err != nil {
+		t.Fatalf("CreateCR #3: %v", err)
+	}
+	if _, err := s.CloseCR(ctx, repo.ID, 3, fixedNow); err != nil {
+		t.Fatalf("CloseCR #3: %v", err)
+	}
+
+	pulls, err := tr.Pulls(ctx)
+	if err != nil {
+		t.Fatalf("Pulls: %v", err)
+	}
+	want := map[int][]int{1: {3, 7}, 2: {}, 3: {9}}
+	if len(pulls) != len(want) {
+		t.Fatalf("Pulls = %+v, want %d refs", pulls, len(want))
+	}
+	for _, p := range pulls {
+		w, ok := want[p.Number]
+		if !ok {
+			t.Fatalf("unexpected CR #%d", p.Number)
+		}
+		if p.Closes == nil || !slices.Equal(p.Closes, w) {
+			t.Errorf("CR #%d Closes = %#v, want %#v (non-nil)", p.Number, p.Closes, w)
+		}
+		if len(p.Closes) > 0 {
+			p.Closes[0] = -1
+		}
+	}
+	again, err := tr.Pulls(ctx)
+	if err != nil {
+		t.Fatalf("Pulls (again): %v", err)
+	}
+	for _, p := range again {
+		if !slices.Equal(p.Closes, want[p.Number]) {
+			t.Errorf("CR #%d Closes after mutating an earlier answer = %v, want %v", p.Number, p.Closes, want[p.Number])
 		}
 	}
 }

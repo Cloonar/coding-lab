@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -500,7 +501,10 @@ func pullRows(start, n int, state string) string {
 // still derived from state+merged per row — a merged pull in the window maps
 // to "merged". #9 and #80 share head afk/7 across the two sets; the client
 // returns BOTH (open-beats-closed precedence when heads collide is the
-// tracker package's pure PullState fn, not this client's job).
+// tracker package's pure PullState fn, not this client's job). Each ref's
+// Closes is parsed off the body the LIST row already carries (issue #88) —
+// real directives only ("discloses #99" is not one), a null or absent body
+// the empty non-nil slice — with no per-pull read behind it.
 func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("state") {
@@ -510,15 +514,15 @@ func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 				return
 			}
 			_, _ = io.WriteString(w, `[
-			  {"number":72,"state":"open","merged":false,"head":{"ref":"afk/63"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"},
-			  {"number":80,"state":"open","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}
+			  {"number":72,"state":"open","merged":false,"body":"Closes #63","head":{"ref":"afk/63"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/72"},
+			  {"number":80,"state":"open","merged":false,"body":"Fixes #7, resolves #12; discloses #99","head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/80"}
 			]`)
 		case "closed":
 			if got := r.URL.Query().Get("sort"); got != "recentclose" {
 				t.Errorf("closed sort = %q; want recentclose", got)
 			}
 			_, _ = io.WriteString(w, `[
-			  {"number":40,"state":"closed","merged":true,"head":{"ref":"afk/12"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/40"},
+			  {"number":40,"state":"closed","merged":true,"body":null,"head":{"ref":"afk/12"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/40"},
 			  {"number":9,"state":"closed","merged":false,"head":{"ref":"afk/7"},"html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/9"}
 			]`)
 		default:
@@ -532,16 +536,16 @@ func TestPulls_openPlusRecentClosedWindow(t *testing.T) {
 		t.Fatalf("Pulls: %v", err)
 	}
 	want := []tracker.PullRef{
-		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/72"},
-		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/80"},
-		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/40"},
-		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/9"},
+		{Number: 72, HeadBranch: "afk/63", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/72", Closes: []int{63}},
+		{Number: 80, HeadBranch: "afk/7", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/80", Closes: []int{7, 12}},
+		{Number: 40, HeadBranch: "afk/12", State: "merged", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/40", Closes: []int{}},
+		{Number: 9, HeadBranch: "afk/7", State: "closed", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/9", Closes: []int{}},
 	}
 	if len(pulls) != len(want) {
 		t.Fatalf("got %d pulls; want %d", len(pulls), len(want))
 	}
 	for i := range want {
-		if pulls[i] != want[i] {
+		if !reflect.DeepEqual(pulls[i], want[i]) {
 			t.Errorf("pull[%d] = %+v; want %+v", i, pulls[i], want[i])
 		}
 	}
@@ -1427,7 +1431,7 @@ func TestCreatePull(t *testing.T) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		gotBody = decodeBody(t, r)
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, `{"number":100,"state":"open","merged":false,"head":{"ref":"afk/63"},
+		_, _ = io.WriteString(w, `{"number":100,"state":"open","merged":false,"body":"Closes #63","head":{"ref":"afk/63"},
 		  "html_url":"https://git.cloonar.com/Cloonar/nixos/pulls/100"}`)
 	})
 
@@ -1445,8 +1449,10 @@ func TestCreatePull(t *testing.T) {
 			t.Errorf("request body %s = %v; want %q", k, gotBody[k], want)
 		}
 	}
-	want := tracker.PullRef{Number: 100, HeadBranch: "afk/63", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/100"}
-	if ref != want {
+	// The forge echoes the created pull's body, so Closes is parsed off it
+	// exactly as on the list path.
+	want := tracker.PullRef{Number: 100, HeadBranch: "afk/63", State: "open", URL: "https://git.cloonar.com/Cloonar/nixos/pulls/100", Closes: []int{63}}
+	if !reflect.DeepEqual(ref, want) {
 		t.Errorf("returned PullRef = %+v; want %+v", ref, want)
 	}
 }
@@ -1493,8 +1499,8 @@ func TestMergePull_success(t *testing.T) {
 	if len(mergeBody) != 1 {
 		t.Errorf("merge body = %v; want only Do (no delete_branch_after_merge)", mergeBody)
 	}
-	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://git.cloonar.com/o/r/pulls/42"}
-	if ref != want {
+	want := tracker.PullRef{Number: 42, HeadBranch: "afk/42", State: tracker.PullMerged, URL: "https://git.cloonar.com/o/r/pulls/42", Closes: []int{}}
+	if !reflect.DeepEqual(ref, want) {
 		t.Errorf("PullRef = %+v; want %+v", ref, want)
 	}
 }

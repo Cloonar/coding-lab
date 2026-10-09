@@ -54,16 +54,34 @@ func (s *Server) publishIssueChanged(repoID string) {
 }
 
 // issueResponse is the pinned list-view issue JSON (comments_count, no
-// comment bodies).
+// comment bodies). Pull is the open pull request resolving the issue (issue
+// #88) — a pointer so a row no open pull resolves serializes `"pull": null`
+// rather than a zero object. Only handleIssueList fills it; every other view
+// sharing this shape (the ready queue) spends no pulls read and answers null.
 type issueResponse struct {
-	Number        int      `json:"number"`
-	Title         string   `json:"title"`
-	Body          string   `json:"body"`
-	State         string   `json:"state"`
-	Labels        []string `json:"labels"`
-	CommentsCount int      `json:"comments_count"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
+	Number        int                `json:"number"`
+	Title         string             `json:"title"`
+	Body          string             `json:"body"`
+	State         string             `json:"state"`
+	Labels        []string           `json:"labels"`
+	CommentsCount int                `json:"comments_count"`
+	CreatedAt     string             `json:"created_at"`
+	UpdatedAt     string             `json:"updated_at"`
+	Pull          *issuePullResponse `json:"pull"`
+}
+
+// issuePullResponse is an issue-list row's `pull` (issue #88): the OPEN pull
+// request that resolves the issue — by claim-branch match or by a closing
+// directive in its body (tracker.IssuePulls) — so the New run page can offer
+// to land it from the row. URL is the forge web URL, or the CR's lab-relative
+// SPA route on the built-in binding. Escalated says autoland has given up on
+// the pull (ADR-0048) and not been re-armed since: autoland will not pick it
+// up, so the page drops its "Autoland is on" collision note on Land.
+type issuePullResponse struct {
+	Number     int    `json:"number"`
+	HeadBranch string `json:"head_branch"`
+	URL        string `json:"url"`
+	Escalated  bool   `json:"escalated"`
 }
 
 // issueDetailResponse is the pinned detail JSON: the full comment thread
@@ -295,6 +313,15 @@ func filterTrackerIssuesByLabel(issues []tracker.Issue, label string) []tracker.
 // tracker.RecentClosedWindow most recently updated closed issues, not full
 // closed history (issue #176); the builtin path reads the store directly
 // and stays unbounded, a local read being cheap.
+//
+// Every row also carries `pull` (issue #88): the open pull request resolving
+// that issue, or null. It costs ONE extra Tracker.Pulls read per list, on
+// either binding, run concurrently with the issue read so the page's latency
+// is the slower of the two rather than their sum, and joined onto the rows
+// client-side (tracker.IssuePulls) — never a per-issue round-trip. The pulls
+// half is an enrichment, not the list: a failing Pulls read (or a tracker
+// that will not resolve for it) is logged and every row answers `pull: null`,
+// while the issue read keeps exactly its own error mapping.
 func (s *Server) handleIssueList(w http.ResponseWriter, r *http.Request) {
 	repo, ok := s.loadRepo(w, r)
 	if !ok {
@@ -313,9 +340,12 @@ func (s *Server) handleIssueList(w http.ResponseWriter, r *http.Request) {
 	label := r.URL.Query().Get("label")
 
 	items := make([]issueResponse, 0)
+	var pulls <-chan []tracker.PullRef
 	if repo.TrackerBinding == store.TrackerBindingBuiltin {
+		pulls = s.startIssuePullsRead(r.Context(), repo, nil)
 		issues, err := s.store.IssuesByRepo(r.Context(), repo.ID, state)
 		if err != nil {
+			<-pulls // let the pulls read land; see startIssuePullsRead
 			s.internalError(w, "listing issues", err)
 			return
 		}
@@ -330,8 +360,10 @@ func (s *Server) handleIssueList(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		pulls = s.startIssuePullsRead(r.Context(), repo, tk)
 		issues, err := tk.Issues(r.Context(), state)
 		if err != nil {
+			<-pulls // let the pulls read land; see startIssuePullsRead
 			s.writeTrackerError(w, "listing issues", repo, err)
 			return
 		}
@@ -342,10 +374,122 @@ func (s *Server) handleIssueList(w http.ResponseWriter, r *http.Request) {
 			items = append(items, trackerIssueListJSON(is))
 		}
 	}
+	s.attachIssuePulls(r.Context(), repo, items, <-pulls)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"binding": repo.TrackerBinding,
 		"issues":  items,
 	})
+}
+
+// startIssuePullsRead starts the issue list's one Pulls read in the
+// background and returns the channel its answer arrives on: the refs, or nil
+// when the read failed — a failure the list absorbs (every row's pull null),
+// so it is logged here and never reaches the caller as an error. tk is the
+// tracker the forge path already resolved for its issue read (no second
+// credential decrypt); nil resolves one, which is the builtin path — whose
+// issue read goes to the store directly and so never needed a tracker.
+//
+// The handler drains the channel on EVERY path, its own issue-read failures
+// included, though an error response has no use for the answer: the pulls
+// read is a recorded list read (the readiness report judges every kind of
+// tracker read, issue #61), and one abandoned mid-flight would be cancelled
+// with the request, go unrecorded, and leave an older verdict standing — a
+// forge 404 on the issue list judged beside a stale pulls success reads as
+// "one listing failed" instead of "the forge does not show this repository".
+// Both reads start together, so the wait costs the error path next to
+// nothing. The buffer is only so a sender can never block on a path that
+// does not drain. A read that still sees its context cancelled (the client
+// went away) is no failure worth a log line. On the builtin binding both
+// reads land on the store, and on sqlite's single connection they serialize
+// rather than overlap — still correct, as neither holds rows open across a
+// second query.
+func (s *Server) startIssuePullsRead(ctx context.Context, repo store.Repo, tk tracker.Tracker) <-chan []tracker.PullRef {
+	ch := make(chan []tracker.PullRef, 1)
+	go func() {
+		ch <- s.readIssuePulls(ctx, repo, tk)
+	}()
+	return ch
+}
+
+// readIssuePulls is startIssuePullsRead's body: resolve the tracker if the
+// caller has none, read Pulls, and degrade any failure to nil with a Warn.
+func (s *Server) readIssuePulls(ctx context.Context, repo store.Repo, tk tracker.Tracker) []tracker.PullRef {
+	if tk == nil {
+		var err error
+		if tk, err = s.tracker.TrackerFor(ctx, repo); err != nil {
+			if ctx.Err() == nil {
+				s.log.Warn("issue list: resolving tracker for pulls", "component", "httpapi", "repo", repo.ID, "err", err)
+			}
+			return nil
+		}
+	}
+	pulls, err := tk.Pulls(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("issue list: listing pulls", "component", "httpapi", "repo", repo.ID, "err", err)
+		}
+		return nil
+	}
+	return pulls
+}
+
+// attachIssuePulls fills each row's Pull from the issue→pull join over the
+// one Pulls read (tracker.IssuePulls with the repo's afk_branch_pattern: a
+// claim-branch head or a closing directive, open pulls only, newest wins). A
+// nil read leaves every row null. Escalated is spent only on pulls actually
+// attached to a row, once per pull however many issues it resolves.
+func (s *Server) attachIssuePulls(ctx context.Context, repo store.Repo, items []issueResponse, pulls []tracker.PullRef) {
+	byIssue := tracker.IssuePulls(pulls, repo.AFKBranchPattern)
+	if len(byIssue) == 0 {
+		return
+	}
+	escalated := make(map[int]bool)
+	for i := range items {
+		p, ok := byIssue[items[i].Number]
+		if !ok {
+			continue
+		}
+		esc, seen := escalated[p.Number]
+		if !seen {
+			esc = s.pullEscalated(ctx, repo, p.Number)
+			escalated[p.Number] = esc
+		}
+		items[i].Pull = &issuePullResponse{
+			Number:     p.Number,
+			HeadBranch: p.HeadBranch,
+			URL:        p.URL,
+			Escalated:  esc,
+		}
+	}
+}
+
+// pullEscalated reports whether pull n's autoland escalation is still
+// terminal by the STORE half of the poller's test (internal/afk/autoland.go):
+// an escalated run row for the pull, newer than the pull's last re-arm —
+// strictly after, so an escalation and a re-arm at the same stored instant
+// read as re-armed, the human's gesture being the newer information. The
+// marker half (an escalate word in the PR's comments) is deliberately not
+// read: it would be a forge read per attached pull on every list render, and
+// this field is a UI hint, not the gate — autoland's own pass stays the
+// authority. The run row is the durable half anyway (a human can delete the
+// marker comment, never the row). The rearm read is spent only once an
+// escalated row exists, the rare case. A store error is logged and reads as
+// not escalated: a hint never fails the list.
+func (s *Server) pullEscalated(ctx context.Context, repo store.Repo, n int) bool {
+	at, ok, err := s.store.EscalatedRunForPull(ctx, repo.ID, n)
+	if err != nil {
+		s.log.Warn("issue list: escalated run for pull", "component", "httpapi", "repo", repo.ID, "pull", n, "err", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	rearmedAt, err := s.store.PullRearmedAt(ctx, repo.ID, n)
+	if err != nil {
+		s.log.Warn("issue list: pull rearm moment", "component", "httpapi", "repo", repo.ID, "pull", n, "err", err)
+		return false
+	}
+	return at.After(rearmedAt)
 }
 
 func hasLabelName(labels []string, want string) bool {

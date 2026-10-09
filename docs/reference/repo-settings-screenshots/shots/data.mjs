@@ -415,6 +415,7 @@ export const issues = [
   body: '',
   state: 'open',
   comments_count: 0,
+  pull: null,
   created_at: ago((i + 2) * DAY),
   updated_at: ago((i + 1) * 60 * MIN),
   ...issue,

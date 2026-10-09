@@ -93,12 +93,12 @@ Read `validation-core.md` in this skill's directory — it is the single definit
 When merging the PR would conflict with its base. You don't pre-reason the forge's mergeability (branch protection, required checks — that's the backend's call, surfaced verbatim when you attempt the merge); a *textual* conflict you resolve on the head yourself, and you'll see it the moment you merge the base into the head locally. Resolve it before the merge gate so the human's single go-ahead covers the resolved tree:
 
 1. **Working tree must be clean** (else stop — see the non-negotiable rules). Head branch comes from `labctl pr view <N>`.
-2. **Fetch & check out the head:** `git fetch origin <head>` then `git checkout <head>`.
+2. **Fetch & check out the head, detached:** note the branch you are on (`git branch --show-current`), then `git fetch origin <head>` and `git checkout --detach FETCH_HEAD`. Never `git checkout <head>`: in a lab run the AFK run's parked worktree usually still holds that branch (`afk/<N>`), so git refuses to check it out a second time.
 3. **Bring the base in** with a merge, never a rebase: `git merge origin/<base>`. (A rebase needs a force-push that rewrites the branch and disrupts the open PR.)
 4. **Resolve** per the conflict policy in `validation-core.md`: auto-resolve silently only when the resolution is deterministic and behaviour-preserving; the moment it's a *semantic choice*, **grill** the human — inline and targeted, not a full interview — showing both sides and asking the single question you need (*"PR sets the timeout to 30s, `main` changed it to 60s — which wins, or is there a combined intent?"*), then apply the answer. For a genuinely tangled, multi-point resolution, offer to escalate to a `/grill-me` session.
-5. **Commit** the merge and **push** to the head branch (ordinary push, never force, never to base).
+5. **Commit** the merge and **push** to the head branch with the explicit refspec `git push origin HEAD:refs/heads/<head>` — you are detached, so a bare `git push` has no upstream to go to (ordinary push, never force, never to base).
 6. **Re-verify — mandatory.** The resolution commit is one *no gate has seen*, so the "a signal already vouches" shortcut no longer applies: run the project's own checks on the resolved tree now.
-7. **Show the resolution diff** to the human before the merge gate; optionally record it as `labctl pr comment <N> "<summary>"` (disclaimer line first) for the audit trail.
+7. **Show the resolution diff** to the human before the merge gate; optionally record it as `labctl pr comment <N> "<summary>"` (disclaimer line first) for the audit trail. Then check the branch you noted in step 2 back out (`git checkout <that branch>`) — the prior-branch restore the rules above require.
 
 The same principle generalises: act autonomously while the call is safe; **grill the moment a judgement is needed** — a semantic conflict or a validation ambiguity — and only then.
 

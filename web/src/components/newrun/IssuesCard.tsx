@@ -1,18 +1,20 @@
 // The Issues card of the New run page (issue #66), for the selected repo:
 // the heading with the open-issue count and the Auto switch, one AFK line
 // (it replaces the AFK strip that sat under the composer), then the newest
-// open issues — at most four — with their triage chip and age, and "All N
-// open issues" for the rest (IssuePicker). Tapping an issue opens the action
-// sheet (IssueActionSheet); the chosen action goes to the page, which
-// attaches it to the composer.
+// open issues — at most four — with their triage chip, open-PR chip and age,
+// and "All N open issues" for the rest (IssuePicker). Tapping an issue opens
+// the action sheet (IssueActionSheet); the chosen action goes to the page,
+// which attaches it to the composer.
 //
 // Reads: the repo's open issues through listIssues(repo, 'open') — the same
 // bounded read the repo's Issues tab makes (routes/RepoIssues.tsx,
-// ADR-0050), refetched on this repo's issue.changed — and the live instance
-// list for the "N AFK runs live" count. Nothing else: the ready count is the
-// repo summary's claimable count, so the card adds no forge request of its
-// own. A failing tracker check skips the issue read entirely and shows the
-// check's detail instead of rows (and no AFK line: nothing can be claimed).
+// ADR-0050), refetched on this repo's issue.changed; each row carries its
+// open PR, joined server-side (issue #88) — and the live instance list for
+// the "N AFK runs live" count and the action sheet's live-lander note on
+// Land. Nothing else: the ready count is the repo summary's claimable count,
+// so the card adds no forge request of its own. A failing tracker check skips
+// the issue read entirely and shows the check's detail instead of rows (and
+// no AFK line: nothing can be claimed).
 //
 // Run one, Auto and Reset go through AFKStrip's createAFKActions, so busy
 // states, errors and the optimistic Auto match the repo home's AFK card. An
@@ -235,6 +237,9 @@ export default function IssuesCard(props: IssuesCardProps): JSX.Element {
       />
       <IssueActionSheet
         issue={sheetIssue()}
+        repoID={props.repo.id}
+        autoland={props.repo.autoland_enabled}
+        runs={resourceValue(instances) ?? []}
         onClose={() => setSheetIssue(null)}
         onChoose={choose}
         now={now}

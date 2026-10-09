@@ -511,13 +511,19 @@ func (t *Tracker) labelIDsByName(ctx context.Context, names []string) ([]string,
 // toPullRef reduces a store CR to the tracker's PullRef vocabulary. The URL
 // is the lab-relative SPA route of the CR's detail view (there is no forge
 // web URL for a lab-internal CR); the state strings are shared, so State
-// carries over verbatim.
+// carries over verbatim. Closes is the CR's persisted cr_closes rows —
+// already ParseCloses(body) at create time, so the built-in answer matches
+// what a forge backend parses off its list body — copied, so a caller
+// mutating the ref can never reach the store row, and never nil (a CR value
+// not read through a closes-loading accessor still yields the empty slice,
+// ParseCloses's convention).
 func toPullRef(cr store.CR) tracker.PullRef {
 	return tracker.PullRef{
 		Number:     cr.Number,
 		HeadBranch: cr.HeadBranch,
 		State:      cr.State,
 		URL:        fmt.Sprintf("/repos/%s/crs/%d", cr.RepoID, cr.Number),
+		Closes:     append(make([]int, 0, len(cr.Closes)), cr.Closes...),
 	}
 }
 

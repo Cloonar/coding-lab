@@ -2,8 +2,11 @@ package tracker
 
 // Pure decision functions over a Pulls() result. The reaper (M5) and the
 // parked-badge UI call these to match a run's head branch against the repo's
-// pull requests client-side — no tracker round-trip per candidate branch.
-// Both are pure and table-tested (design §4d, §11 TestPullState).
+// pull requests client-side — no tracker round-trip per candidate branch; the
+// issue list (issue #88) calls IssuePulls to join the same one read onto its
+// rows. All are pure and table-tested (design §4d, §11 TestPullState).
+
+import "git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 
 // PullState returns the state of the pull request whose head branch equals
 // head, or ("", false) when no matching PR exists. When several PRs collide on
@@ -76,4 +79,50 @@ func stateRank(state string) int {
 	default:
 		return 0
 	}
+}
+
+// IssuePulls joins a Pulls() result onto issue numbers: for every issue some
+// OPEN pull resolves, the pull that resolves it — the issue list's `pull`
+// field (issue #88), which lets the New run page offer to land an issue's
+// pull straight from the row. It is the one read the list spends on pulls,
+// joined client-side like PullState, never a per-issue tracker round-trip.
+//
+// A pull resolves issue N by either of two signals, and may resolve several
+// issues at once:
+//
+//   - its head branch is the repo's claim branch for N — gitx.MatchBranch
+//     against branchPattern (the repo's afk_branch_pattern), the same
+//     strict-inverse mapping the autoland poller reads a PR's issue through,
+//     so a branch that is not an exact rendering (leading zeros, a stray
+//     suffix) claims nothing;
+//   - N is in its Closes — the body's real closing directives, which is how
+//     a pull on a non-claim branch (a human's feature/x saying "Closes #47"),
+//     or one closing several issues, still resolves them.
+//
+// Only PullOpen counts: a merged pull has nothing left to land, and a
+// closed-unmerged one is "no PR" here exactly as it is to the reaper — the
+// operator's answer to an issue whose pull was abandoned is a new run, not a
+// stale Land. When several open pulls resolve one issue the highest Number
+// wins: numbers are allocated monotonically on every backend, so it is the
+// newest attempt, and the join never depends on Pulls' list order. An issue no
+// open pull resolves is absent from the map; the result is never nil.
+func IssuePulls(pulls []PullRef, branchPattern string) map[int]PullRef {
+	out := make(map[int]PullRef)
+	for _, p := range pulls {
+		if p.State != PullOpen {
+			continue
+		}
+		attach := func(n int) {
+			if cur, ok := out[n]; !ok || p.Number > cur.Number {
+				out[n] = p
+			}
+		}
+		if n, ok := gitx.MatchBranch(branchPattern, p.HeadBranch); ok {
+			attach(n)
+		}
+		for _, n := range p.Closes {
+			attach(n)
+		}
+	}
+	return out
 }

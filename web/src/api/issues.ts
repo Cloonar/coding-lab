@@ -14,6 +14,26 @@ export interface IssueComment {
   created_at: string;
 }
 
+/**
+ * The open pull request resolving an issue (issue #88), joined onto the issue
+ * list server-side from one bounded read of the repo's pulls. Only open pulls
+ * are ever attached: a closed-unmerged or merged one reads as no PR.
+ */
+export interface IssuePull {
+  /** The PR number on the tracker — what `/land-pr <number>` takes. */
+  number: number;
+  /** The PR's head branch (`afk/47`, `lab/…`). */
+  head_branch: string;
+  /** The PR's page on the forge. */
+  url: string;
+  /**
+   * Whether autoland's escalation on this PR is still terminal (the runs-store
+   * half, read without a forge request): autoland leaves the PR alone until
+   * a human re-arms it.
+   */
+  escalated: boolean;
+}
+
 /** List-row shape: label names and a comment count, but no comment bodies. */
 export interface IssueSummary {
   number: number;
@@ -24,6 +44,13 @@ export interface IssueSummary {
   comments_count: number;
   created_at: string;
   updated_at: string;
+  /**
+   * The open PR resolving this issue (issue #88): its head branch matches the
+   * repo's AFK branch pattern for this issue, or its body closes it; the
+   * newest (highest number) wins when several do. null when there is none, or
+   * when the server's pulls read failed (it never fails the issue list).
+   */
+  pull: IssuePull | null;
 }
 
 /** Full issue: label names plus the loaded comments (detail view). */
