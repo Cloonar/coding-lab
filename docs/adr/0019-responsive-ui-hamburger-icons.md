@@ -88,6 +88,14 @@ package is dropped, and the SPA's runtime dependency set is again
 `solid-js` + `@solidjs/router`. The decision above stands unamended: `Icon` is
 the single icon entry point.
 
+Amended by issue #97 (2026-10-10, ADR-0083): "the 44px touch-target ...
+rules survive untouched" now reads as a hit-area rule. Pill-shaped controls
+(repository pills, composer chips, the Schedule editor's weekday and flow
+toggles, the Picker's filter buttons) paint 36px at every width. On a coarse
+pointer a transparent `::after` extends each of them 4px above and below, to
+a 44px hit area. Other controls keep their 44px paint, and the 16px-input
+rule stands. This ADR is not rewritten.
+
 ## Considered options
 
 - **A bottom tab bar for mobile navigation.** Rejected: the chat view (`/runs/:id`)

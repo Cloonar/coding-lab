@@ -52,3 +52,15 @@ export function tabBarHidden(pathname: string): boolean {
   if (/^\/runs\/[^/]+/.test(path)) return true;
   return /^\/repos\/[^/]+\/settings\/schedules\/[^/]+$/.test(path);
 }
+
+/**
+ * True while the bar slides out of the way of the on-screen keyboard (issue
+ * #97, ADR-0083): on New run only, while `keyboardOpen` (lib/visualViewport's
+ * createKeyboardOpen) reads true. Every other tab-bar page keeps the bar while
+ * typing — a general rule would move the repo settings save bar under the
+ * typist's thumb. Not a route rule of its own: tabBarHidden stays the one place
+ * that decides where the bar exists; this only moves a bar that does.
+ */
+export function tabBarSlidesOut(pathname: string, keyboardOpen: boolean): boolean {
+  return keyboardOpen && normalize(pathname) === '/new';
+}

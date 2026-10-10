@@ -17,8 +17,21 @@
    unless the shell carries .has-tabbar (AppShell sets it whenever the bar
    renders) below 1024px. The content column pads by it so pages scroll clear
    of the bar, and anything fixed to the bottom of a tab-bar page (the toast,
-   the repo settings save bar, the New-run page's docked composer) sits at
-   `bottom: var(--tabbar-space, 0px)` instead of 0. Tokens only. */
+   the repo settings save bar) sits at `bottom: var(--tabbar-space, 0px)`
+   instead of 0. The bounded New run page (issue #97) subtracts it from its
+   height instead, so its dock ends on the bar's top edge.
+
+   Keyboard (issue #97, ADR-0083): on New run only, while the on-screen
+   keyboard is open (a visual-viewport shrink, never focus — lib/visualViewport),
+   AppShell adds .tabbar-out to the shell. Below 1024px that slides the bar down
+   out of view (translateY by its own height, top border included) and collapses
+   --tabbar-space to 0px, so the content padding and everything at
+   `bottom: var(--tabbar-space)` drop it and New run gets the whole visual
+   viewport above the keyboard. The bar slides in 200ms ease-out, alongside the
+   keyboard, both ways; prefers-reduced-motion makes it instant. It stays in the
+   DOM and keeps its state. The transform is safe here: nothing is portaled
+   into the bar, so it never becomes a containing block for an overlay. Every
+   other tab-bar page keeps the bar while typing. Tokens only. */
 
 :root {
   --tabbar-space: 0px;
@@ -39,6 +52,7 @@
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--border);
+  transition: transform 200ms ease-out;
 }
 
 .tab {
@@ -137,6 +151,21 @@
 
   .shell.has-tabbar .shell-content {
     padding-bottom: var(--tabbar-space);
+  }
+
+  /* Keyboard open on New run (issue #97): the bar slides out, its room goes. */
+  .shell.has-tabbar.tabbar-out {
+    --tabbar-space: 0px;
+  }
+
+  .shell.tabbar-out .tabbar {
+    transform: translateY(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabbar {
+    transition: none;
   }
 }
 

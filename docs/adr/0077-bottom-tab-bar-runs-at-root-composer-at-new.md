@@ -49,6 +49,8 @@ Accepted 2026-10-09. Resolves issue #76, the GitHub issue.
 - **ADR-0072:** unchanged. The Chat dock owns the bottom edge because the tab bar is not there.
 - **ADR-0073:** unchanged. The repo home and Repositories keep their routes; the Repos tab lands on `/repos`.
 
+Amended by issue #97 (2026-10-10, ADR-0083): the anatomy gains the keyboard case. On New run only, while the on-screen keyboard is open, the shell carries `.tabbar-out`. The bar slides down out of view (200ms ease-out, instant under reduced motion) but stays mounted, and `--tabbar-space` collapses to 0px. "Keyboard open" is read from the visual viewport shrinking more than 120px below its per-width baseline, never from focus. `tabBarHidden` is still the one route rule, and `tabBarSlidesOut` only moves a bar that exists. Every other tab-bar page keeps the bar while typing. The New run page's docked composer no longer sits at `bottom: var(--tabbar-space, 0px)`. The page is bounded and subtracts `--tabbar-space` from its height instead, and its AFK toast is anchored to the page. The toast elsewhere and the repo settings save bar still sit at `bottom: var(--tabbar-space, 0px)`.
+
 The user-facing docs follow in the same change (the `update-docs` skill).
 
 ## Considered options

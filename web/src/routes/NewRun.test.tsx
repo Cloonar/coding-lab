@@ -1348,6 +1348,74 @@ describe('NewRun pills placement', () => {
   });
 });
 
+// The keyboard-aware page (issue #97, ADR-0083): below 1024px the docked page
+// is bounded like the Chat and sized from window.visualViewport, which NewRun
+// binds onto the page element as --vv-height / --vv-top (lib/visualViewport,
+// the Chat's primitive). jsdom has no visualViewport: faked here as in
+// lib/visualViewport.test.ts, restored after each test.
+describe('NewRun visual viewport binding', () => {
+  class FakeVisualViewport extends EventTarget {
+    height = 800;
+    offsetTop = 0;
+    width = 390;
+    scale = 1;
+  }
+
+  const original = Object.getOwnPropertyDescriptor(window, 'visualViewport');
+
+  function installViewport(value: unknown): void {
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value });
+  }
+
+  afterEach(() => {
+    if (original === undefined) Reflect.deleteProperty(window, 'visualViewport');
+    else Object.defineProperty(window, 'visualViewport', original);
+  });
+
+  const docked = () => container.querySelector<HTMLElement>('main.newrun.newrun-docked');
+
+  it('writes --vv-height / --vv-top on the docked page and follows the keyboard', async () => {
+    const vv = new FakeVisualViewport();
+    installViewport(vv);
+    await mountNewRun();
+
+    const page = docked();
+    expect(page).not.toBeNull();
+    expect(page!.style.getPropertyValue('--vv-height')).toBe('800px');
+    expect(page!.style.getPropertyValue('--vv-top')).toBe('0px');
+
+    // The keyboard opens and iOS pans the visual viewport.
+    vv.height = 460;
+    vv.offsetTop = 120;
+    vv.dispatchEvent(new Event('resize'));
+    vv.dispatchEvent(new Event('scroll'));
+    expect(page!.style.getPropertyValue('--vv-height')).toBe('460px');
+    expect(page!.style.getPropertyValue('--vv-top')).toBe('120px');
+  });
+
+  it('sets neither variable without visualViewport: the page is 100dvh at top 0', async () => {
+    installViewport(undefined);
+    await mountNewRun();
+
+    const page = docked();
+    expect(page).not.toBeNull();
+    expect(page!.style.getPropertyValue('--vv-height')).toBe('');
+    expect(page!.style.getPropertyValue('--vv-top')).toBe('');
+  });
+
+  it('removes the variables when the page goes away', async () => {
+    installViewport(new FakeVisualViewport());
+    await mountNewRun();
+    const page = docked()!;
+    expect(page.style.getPropertyValue('--vv-height')).toBe('800px');
+
+    dispose?.();
+    dispose = undefined;
+    expect(page.style.getPropertyValue('--vv-height')).toBe('');
+    expect(page.style.getPropertyValue('--vv-top')).toBe('');
+  });
+});
+
 // The pills and the repository picker (issue #66): recent repos from
 // `lab.last-repo`, "All N" opens the picker in place, a pick records the
 // repo (startable ones only) and clears the attachment.

@@ -4,8 +4,10 @@
 // rows keep their identity) while run.changed refetches the list; the bottom
 // TabBar's route rules (hidden on the Chat and the Schedule editor, shown on
 // the schedules section), its Runs badge and More dot as fed by the shell;
-// the `(N) lab` document title and the app badge; and that the retired mobile
-// chrome (top strip, hamburger, drawer, scrim) no longer renders.
+// the `(N) lab` document title and the app badge; that the retired mobile
+// chrome (top strip, hamburger, drawer, scrim) no longer renders; and that the
+// bar slides out (.tabbar-out, still mounted) while the visual viewport says
+// the keyboard is open on New run, and only there (issue #97).
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { For, Show, useContext } from 'solid-js';
@@ -365,6 +367,82 @@ describe('AppShell tab bar (issue #76)', () => {
     expect(document.querySelector('.shell-scrim')).toBeNull();
     expect(shell()?.classList.contains('drawer-open')).toBe(false);
     expect(shell()?.classList.contains('drawer-dragging')).toBe(false);
+  });
+});
+
+// A fake window.visualViewport (crib: lib/visualViewport.test.ts) so the
+// shell's keyboard reading can be driven by shrinking it.
+class FakeVisualViewport extends EventTarget {
+  height = 844;
+  offsetTop = 0;
+  width = 390;
+  scale = 1;
+}
+
+describe('AppShell tab bar slides out for the keyboard on New run (issue #97)', () => {
+  const original = Object.getOwnPropertyDescriptor(window, 'visualViewport');
+  let vv: FakeVisualViewport;
+
+  beforeEach(() => {
+    vv = new FakeVisualViewport();
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+  });
+
+  afterEach(() => {
+    if (original === undefined) Reflect.deleteProperty(window, 'visualViewport');
+    else Object.defineProperty(window, 'visualViewport', original);
+  });
+
+  /** The on-screen keyboard: the visual viewport shrinks well past the
+   *  threshold (lib/visualViewport's KEYBOARD_MIN_SHRINK_PX). */
+  async function openKeyboard(): Promise<void> {
+    vv.height = 500;
+    vv.dispatchEvent(new Event('resize'));
+    await settle();
+  }
+
+  it('slides the bar out on /new while the keyboard is open, keeping it mounted', async () => {
+    await mount('/new');
+    const bar = tabBar();
+    expect(shell()?.classList.contains('tabbar-out')).toBe(false);
+
+    await openKeyboard();
+    expect(shell()?.classList.contains('tabbar-out')).toBe(true);
+    expect(shell()?.classList.contains('has-tabbar')).toBe(true);
+    expect(tabBar()).toBe(bar); // same node: never unmounted
+
+    vv.height = 844;
+    vv.dispatchEvent(new Event('resize'));
+    await settle();
+    expect(shell()?.classList.contains('tabbar-out')).toBe(false);
+    expect(tabBar()).toBe(bar);
+  });
+
+  it.each(['/repos', '/repos/x/settings'])(
+    'keeps the bar on %s while the keyboard is open',
+    async (path) => {
+      await mount(path);
+      await openKeyboard();
+      expect(shell()?.classList.contains('tabbar-out')).toBe(false);
+      expect(tabBar()).toBeTruthy();
+    },
+  );
+
+  it('keeps the bar on /new for a shrink below the threshold (URL bar)', async () => {
+    await mount('/new');
+    vv.height = 764;
+    vv.dispatchEvent(new Event('resize'));
+    await settle();
+    expect(shell()?.classList.contains('tabbar-out')).toBe(false);
+  });
+
+  it('never slides the bar out without visualViewport', async () => {
+    Reflect.deleteProperty(window, 'visualViewport');
+    await mount('/new');
+    window.dispatchEvent(new Event('resize'));
+    await settle();
+    expect(shell()?.classList.contains('tabbar-out')).toBe(false);
+    expect(tabBar()).toBeTruthy();
   });
 });
 
