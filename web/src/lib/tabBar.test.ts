@@ -1,9 +1,10 @@
 // Tab bar route rules (issue #76): which tab a path lights (sub-pages keep
 // their section's tab), where the bar hides (the Chat and the Schedule
-// editor, but not the schedules section itself), and each tab's root.
+// editor, but not the schedules section itself), and each tab's root; and
+// where the bar slides out for the keyboard (New run only, issue #97).
 
 import { describe, expect, it } from 'vitest';
-import { TAB_ROOTS, activeTab, tabBarHidden } from './tabBar';
+import { TAB_ROOTS, activeTab, tabBarHidden, tabBarSlidesOut } from './tabBar';
 
 describe('activeTab', () => {
   it.each([
@@ -58,6 +59,23 @@ describe('tabBarHidden', () => {
     '/more',
   ])('shows on %s', (path) => {
     expect(tabBarHidden(path)).toBe(false);
+  });
+});
+
+describe('tabBarSlidesOut (issue #97)', () => {
+  it.each(['/new', '/new/'])('slides out on %s while the keyboard is open', (path) => {
+    expect(tabBarSlidesOut(path, true)).toBe(true);
+  });
+
+  it.each(['/', '/repos', '/repos/x/settings', '/repos/x/issues/new', '/more', '/newx'])(
+    'stays on %s while the keyboard is open',
+    (path) => {
+      expect(tabBarSlidesOut(path, true)).toBe(false);
+    },
+  );
+
+  it('stays on /new while the keyboard is closed', () => {
+    expect(tabBarSlidesOut('/new', false)).toBe(false);
   });
 });
 

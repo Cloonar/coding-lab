@@ -2,8 +2,8 @@
    option chips, More options, the attachment chip) and
    components/newrun/ComposerBlockers.tsx (the banners above the field). The
    chips reuse the `.composer-chip` pill (composer.css); the chip row's
-   horizontal scroll is the page's (newrun.css). 44px controls below 1024px;
-   fine pointers at desktop width get the mockup's compact sizes. */
+   horizontal scroll is the page's (newrun.css). The chips paint 36px at every
+   width with a 44px hit area on coarse pointers (composer.css, issue #97). */
 
 /* Run option chips ------------------------------------------------------------ */
 
@@ -24,8 +24,8 @@
 
 .composer-chip.run-chip-more {
   justify-content: center;
-  width: 44px;
-  min-width: 44px;
+  width: 36px;
+  min-width: 36px;
   padding: 0;
 }
 
@@ -143,15 +143,6 @@
 }
 
 @media (min-width: 1024px) and (pointer: fine) {
-  .composer-chip.run-chip {
-    min-height: 40px;
-  }
-
-  .composer-chip.run-chip-more {
-    width: 40px;
-    min-width: 40px;
-  }
-
   .composer-attach {
     min-height: 36px;
   }

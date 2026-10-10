@@ -927,11 +927,25 @@
   margin-top: 0.2rem;
 }
 
-/* Touch targets: 44px below 1024px, for flows as for weekdays. */
+/* Flows and weekdays paint 36px tall (min-width 36) at every width, with a
+   44px hit area on coarse pointers via a transparent ::after, 4px above and
+   below the paint (issue #97; the Chat send button's technique, chatui.css).
+   The groups wrap, so nothing clips the extension; the 0.4rem row gap leaves
+   the extensions of neighbouring rows overlapping by under 2px. */
 .schedule-editor-flows .chip-toggle,
 .schedule-editor-weekdays .chip-toggle {
-  min-height: 44px;
-  min-width: 44px;
+  position: relative;
+  min-height: 36px;
+  min-width: 36px;
+}
+
+@media (pointer: coarse) {
+  .schedule-editor-flows .chip-toggle::after,
+  .schedule-editor-weekdays .chip-toggle::after {
+    content: '';
+    position: absolute;
+    inset: -4px 0; /* 36 + 2*4 = 44px hit area */
+  }
 }
 
 .schedule-editor .cadence-preview {
@@ -1018,11 +1032,6 @@
 
   .schedule-editor-note {
     flex: 1 1 auto;
-  }
-
-  .schedule-editor-flows .chip-toggle,
-  .schedule-editor-weekdays .chip-toggle {
-    min-height: 36px;
   }
 }
 

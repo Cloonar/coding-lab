@@ -5,53 +5,58 @@
    by breakpoint (issue #87; NewRun places the node): a sibling before the
    dock from 1024px, the dock's first row below it.
 
-   Phone (<1024px): the "New run" page header (issue #76; the selected repo as
-   its subtitle since issue #87), the Issues card, and the composer docked at
-   the bottom edge — the pills row on top, then the blockers and the field.
-   The DOM order is header, dock, Issues card; CSS `order` moves the dock
-   last. The page is a flex column that fills the content area, so the dock
-   sits at the bottom edge even when the card is short, and sticks there while
-   a long card scrolls under it. The bottom edge is the top of the tab bar
-   while it shows (issue #76): the shell keeps the content clear of the bar
-   and publishes its height as --tabbar-space (0px without a bar), so the
-   sticky dock offsets by it and only pads for the home indicator when no bar
-   covers it. The page has no side padding of its own: each part takes the
+   Phone (<1024px): a BOUNDED page, the Chat's shape (issue #97, ADR-0083;
+   chat.css .chat-page). The page is a flex column exactly as tall as the
+   space between the top of the visual viewport and the top of the tab bar —
+   or the top of the on-screen keyboard while the keyboard is up — so the
+   document never scrolls on /new. Inside it: the "New run" page header
+   (issue #76; the selected repo as its subtitle since issue #87), the Issues
+   card region, the ONE scroll container, which takes whatever height is
+   left, and the composer dock as the last flex item — the pills row on top,
+   then the blockers and the field — at the bottom edge of the page. The DOM
+   order is header, dock, Issues card (desktop's reading order, below); CSS
+   `order` moves the dock last.
+
+   The height. The shell content pads its bottom by --tabbar-space (the bar's
+   49px plus the safe-area inset while the bar shows, tabbar.css), so the page
+   is var(--vv-height, 100dvh) MINUS --tabbar-space and the two add up to the
+   viewport: no document scroll, the dock's bottom edge on the bar's top
+   edge. While the keyboard is open on New run the bar slides out and
+   --tabbar-space collapses to 0px, so the page takes the whole visual
+   viewport above the keyboard. The keyboard reaches the page in two layers,
+   as on the Chat: Android resizes the layout viewport (the viewport meta's
+   interactive-widget=resizes-content, index.html), so the 100dvh fallback
+   follows it with no script; iOS Safari never resizes the layout viewport,
+   so NewRun binds window.visualViewport onto the page as --vv-height /
+   --vv-top (lib/visualViewport.ts). top: var(--vv-top) moves the page down by
+   however far iOS panned the visual viewport, via position: relative + top —
+   never transform, which would become the containing block of the portaled
+   Picker and the dropdowns' fixed panels. Without visualViewport (jsdom, old
+   browsers), or while pinch-zoomed, both vars are unset and the page is
+   100dvh minus the bar, at top 0.
+
+   The sticky dock with its gradient fade and the `.shell:has(...)` flex chain
+   that once made the scrolling page fill the viewport are gone (issue #97):
+   nothing scrolls under the dock any more, and the bounded height needs no
+   flex parent. The page has no side padding of its own: each part takes the
    16px gutter, and the pills row breaks out of the dock's to scroll out to
    the screen edge.
 
-   Desktop (>=1024px): a centered 720px column — pills, composer, Issues
-   card, in DOM order, so Tab follows what is seen; no page header (NewRun
-   renders it below 1024px only) — top-aligned with the old composer's
-   clamp(1.5rem, 8vh, 5rem).
+   Desktop (>=1024px): unchanged — a centered 720px column (pills, composer,
+   Issues card, in DOM order, so Tab follows what is seen; no page header,
+   NewRun renders it below 1024px only), top-aligned with the old composer's
+   clamp(1.5rem, 8vh, 5rem); the document scrolls and the dock is a plain
+   block. Every bounded rule lives in the max-width block below.
 
    All of it applies while the page has repositories (`.newrun-docked`): the
    repos load error and the zero-repositories empty state keep the plain
    `.page` look they always had. */
 
-/* The flex chain that lets the page fill the viewport on the phone (the
-   shell is a plain block there and the document scrolls): only
-   while this page is mounted. Without :has() the dock still docks, it just
-   rides up under a short card. */
-@media (max-width: 1023.98px) {
-  .shell:has(.page.newrun-docked) {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .shell-content:has(.page.newrun-docked) {
-    flex: 1 0 auto;
-    display: flex;
-    flex-direction: column;
-  }
-}
-
 .page.newrun-docked {
   display: flex;
   flex-direction: column;
-  flex: 1 0 auto;
   width: 100%;
   min-width: 0;
-  min-height: 100%;
   max-width: none;
   padding: 0;
 }
@@ -92,34 +97,22 @@
 }
 
 .newrun-issues {
-  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
   padding: var(--space-3) var(--space-4) var(--space-2);
 }
 
-/* The dock: the Chat's shape — the pills row and the field sit on the page
-   background at the bottom edge, above the tab bar while it shows and clear
-   of the home indicator; content scrolling under it fades out above the
-   pills. The fade is a fixed 12px, exactly the dock's top padding (issue
-   #87): a percentage stop grows with the dock, and with the pills row on top
-   the old 35% would reach past it, letting scrolled content show between the
-   pills. A fixed length keeps a soft edge above and the pills row and the
-   field on solid background.
-   The bar (when present) already covers the safe area — --tabbar-space
-   includes the inset — so max() pads for the indicator only when no bar is
-   there. */
+/* The dock: the Chat's shape — the pills row and the field on the page
+   background at the bottom edge of the page, the last flex item (order: 1
+   moves it after the Issues card, which precedes it in the DOM only on the
+   desktop's terms). It pads its bottom by --newrun-dock-inset on top of the
+   12px step: the home indicator's room, set below 1024px (below). */
 .newrun-dock {
   order: 1;
-  position: sticky;
-  bottom: var(--tabbar-space, 0px);
-  z-index: 3;
   flex: none;
   min-width: 0;
-  padding: var(--space-3) var(--space-4)
-    calc(var(--space-3) + max(0px, env(safe-area-inset-bottom, 0px) - var(--tabbar-space, 0px)));
-  background: linear-gradient(to bottom, transparent, var(--bg) var(--space-3));
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + var(--newrun-dock-inset, 0px));
 }
 
 .newrun-dock > .banner {
@@ -148,13 +141,70 @@
   flex: none;
 }
 
-/* The AFK toast clears the dock on the phone — and the tab bar under it,
-   which covers the safe area itself when it shows. 7.5rem cleared a one-line
-   field; the pills row on top (issue #87) adds 3.75rem: the 44px pill, the
-   row's 2px scroll padding above and below, the 8px gap under it and the
-   dock's 4px taller top padding (60px). */
-.newrun .toast {
-  bottom: calc(11.25rem + max(env(safe-area-inset-bottom, 0px), var(--tabbar-space, 0px)));
+@media (max-width: 1023.98px) {
+  /* The bounded page (see the header). The three heights are fallbacks in
+     order, as in chat.css: 100vh, then 100dvh, then the visual viewport's
+     height when NewRun has bound it. */
+  .page.newrun-docked {
+    /* The home indicator's room under the dock: the safe-area inset, unless
+       the shell has a tab bar (overridden just below). */
+    --newrun-dock-inset: env(safe-area-inset-bottom, 0px);
+    height: calc(100vh - var(--tabbar-space, 0px));
+    height: calc(100dvh - var(--tabbar-space, 0px));
+    height: calc(var(--vv-height, 100dvh) - var(--tabbar-space, 0px));
+    position: relative;
+    top: var(--vv-top, 0px);
+  }
+
+  /* With a tab bar the dock never pads for the home indicator: while the bar
+     shows it covers the safe area itself (--tabbar-space includes the inset,
+     and the page ends at the bar's top edge); while it is slid out
+     (--tabbar-space 0px) the keyboard is up and covers the indicator, so the
+     inset would only open a gap between the dock and the keyboard. Keyed on
+     the bar's presence (.has-tabbar), not on --tabbar-space, which is 0px in
+     both "no bar" and "bar slid out". Only a shell without any bar pads. */
+  .shell.has-tabbar .page.newrun-docked {
+    --newrun-dock-inset: 0px;
+  }
+
+  /* The Issues card region is the page's one scroll container: it takes the
+     height the header and the dock leave and scrolls within it; contain
+     keeps a fling at either end from chaining to the (unscrollable)
+     document or rubber-banding the whole page. */
+  .newrun-issues {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* The AFK toast clears the dock. It is anchored to the bounded page rather
+     than to the viewport: the toast region (controls.css, out of flow) is
+     stretched over the page and the toast placed absolutely in it, so its
+     offset is measured from the page's bottom edge — the bar's top, or the
+     keyboard's top while it is up, on iOS too, where a fixed toast would sit
+     behind the keyboard at the layout viewport's bottom. No --tabbar-space
+     term is needed: the page already ends above the bar. The offset is the
+     docked composer's height plus the toast's 1.25rem step (toast.css),
+     with a one-line field on a touch phone: the dock's 12px top padding, the
+     pills row's 48px (the 36px pill, the row's 2px scroll padding above and
+     below — its coarse-pointer 4px is offset by a -2px margin, below — and
+     the 8px gap under it), the 102px field (1px border top and bottom, 4px
+     top padding, the 2.75rem textarea, the 44px bar — the send button's
+     44px; the 36px chips' row is 40 — and 8px bottom padding) and the
+     dock's 12px bottom padding: 174px, plus 20px = 194px = 12.125rem, plus
+     the home-indicator room the dock pads (0px under a tab bar). A taller
+     field (more lines, an attachment, blockers) grows the dock past it. */
+  .newrun-docked > .toast-region {
+    inset: 0;
+    width: auto;
+    height: auto;
+  }
+
+  .newrun-docked .toast {
+    position: absolute;
+    bottom: calc(12.125rem + var(--newrun-dock-inset, 0px));
+  }
 }
 
 @media (min-width: 1024px) {
@@ -162,7 +212,6 @@
     max-width: 720px;
     margin: 0 auto;
     padding: clamp(1.5rem, 8vh, 5rem) var(--space-4) var(--space-6);
-    min-height: 0;
   }
 
   .newrun .repo-pills {
@@ -171,17 +220,30 @@
 
   .newrun-dock {
     order: 0;
-    position: static;
     padding: var(--space-3) 0 0;
-    background: none;
   }
 
   .newrun-issues {
-    flex: none;
     padding: var(--space-4) 0 0;
   }
 
   .newrun .toast {
     bottom: 1.25rem;
+  }
+}
+
+/* Coarse pointers (issue #97, ADR-0083): the pills and the composer chips
+   paint 36px and extend their hit area 4px above and below with a
+   transparent ::after (newrun-repos.css, composer.css). Both rows scroll
+   sideways, so their overflow clip would cut that extension at the 2px
+   padding: pad them 4px top and bottom instead, with a -2px margin so the
+   layout height stays 36 + 2 + 2 and nothing derived above moves. Inline
+   padding is untouched (the gutter, or 2px on the desktop). After the
+   desktop block, which resets the pills row's padding shorthand. */
+@media (pointer: coarse) {
+  .newrun .repo-pills,
+  .composer-chips {
+    padding-block: 4px;
+    margin-block: -2px;
   }
 }

@@ -28,8 +28,9 @@
   align-items: center;
   gap: 0.4rem;
   flex: none;
-  min-height: 44px;
-  padding: 0 0.85rem;
+  position: relative; /* anchors the coarse-pointer hit-area ::after (below) */
+  min-height: 36px;
+  padding: 0 0.7rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--card);
@@ -95,9 +96,17 @@
   color: var(--muted);
 }
 
-/* Fine pointers at desktop width: the mockup's compact 40px pills. */
-@media (min-width: 1024px) and (pointer: fine) {
-  .repo-pill {
-    min-height: 40px;
+/* Issue #97: the pill paints 36px at every width; the 44px floor (ADR-0083)
+   is its hit area. On a coarse pointer a transparent ::after extends the
+   target 4px above and below the paint — the Chat send button's technique
+   (chatui.css). A fine pointer gets no extension, so a mouse hovering just
+   outside the pill does not light it. The extension only survives inside the
+   scrolling .repo-pills row if the row pads 4px above and below (clipped
+   overflow is not hit-testable): newrun.css owns that padding. */
+@media (pointer: coarse) {
+  .repo-pill::after {
+    content: '';
+    position: absolute;
+    inset: -4px 0; /* 36 + 2*4 = 44px hit area */
   }
 }

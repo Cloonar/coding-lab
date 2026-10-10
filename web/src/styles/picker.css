@@ -307,7 +307,8 @@
   align-items: center;
   gap: 0.3rem;
   flex: none;
-  min-height: 44px;
+  position: relative; /* anchors the coarse-pointer hit-area ::after (below) */
+  min-height: 36px;
   padding: 0 0.8rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
@@ -350,10 +351,21 @@
   font-size: 0.83rem;
 }
 
-/* Fine pointers at desktop width: the mockup's compact 34px filter chips. */
-@media (min-width: 1024px) and (pointer: fine) {
-  .picker-filters button {
-    min-height: 34px;
-    padding: 0 0.7rem;
+/* Issue #97: the filter pills paint 36px at every width; the 44px floor
+   (ADR-0083) is the hit area. On a coarse pointer a transparent ::after
+   extends it 4px above and below the paint (the Chat send button's technique,
+   chatui.css). The row scrolls sideways, so its overflow clip would cut the
+   extension at its 2px padding: pad it 4px instead, with an equal negative
+   margin so the layout height is unchanged. A fine pointer gets neither. */
+@media (pointer: coarse) {
+  .picker-filters {
+    padding: 4px 0;
+    margin: -2px 0;
+  }
+
+  .picker-filters button::after {
+    content: '';
+    position: absolute;
+    inset: -4px 0; /* 36 + 2*4 = 44px hit area */
   }
 }

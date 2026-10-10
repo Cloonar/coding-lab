@@ -53,12 +53,17 @@
   padding: 0 var(--space-1) 0 var(--space-2);
 }
 
-/* Chip-styled controls: 44px touch targets, pill shape. */
+/* Chip-styled controls: pill shape, 36px paint at every width (issue #97).
+   The 44px touch target is the hit area, not the paint: on a coarse pointer a
+   transparent ::after extends it 4px above and below (the Chat send button's
+   technique, chatui.css). The scrolling .composer-chips row pads 4px on
+   coarse pointers so the extension is not clipped (newrun.css). */
 .composer-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  min-height: 44px;
+  position: relative; /* anchors the coarse-pointer hit-area ::after (below) */
+  min-height: 36px;
   padding: 0 0.7rem;
   font-size: 0.9rem;
   font-weight: 550;
@@ -68,6 +73,13 @@
   border-radius: var(--radius-pill);
   cursor: pointer;
   white-space: nowrap;
+}
+@media (pointer: coarse) {
+  .composer-chip::after {
+    content: '';
+    position: absolute;
+    inset: -4px 0; /* 36 + 2*4 = 44px hit area */
+  }
 }
 .composer-chip:hover {
   background: var(--hover);

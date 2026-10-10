@@ -14,16 +14,27 @@
 // Runner settings link.
 //
 // The composer keeps the Chat's dock shape: below 1024px it is docked at the
-// bottom edge (sticky, safe-area inset; above the tab bar since issue #76), so
-// the field is where the Chat's composer will be a second later, and the pills
-// ride in the dock as its first row (issue #87) — the repo is picked where the
-// thumb already is, right above the blockers and the field. From 1024px the
-// pills sit above the composer in a centered 720px column. The DOM follows
-// each layout's reading order: desktop is pills, composer, Issues, so keyboard
-// focus follows what is seen where Tab is used most; on the phone the dock
-// (pills inside) precedes the Issues card and CSS `order` moves it last
-// (styles/newrun.css). One RepoPills serves both: the same node moves between
-// the two spots on a breakpoint crossing (see the hasRepos branch below).
+// bottom edge, so the field is where the Chat's composer will be a second
+// later, and the pills ride in the dock as its first row (issue #87) — the
+// repo is picked where the thumb already is, right above the blockers and the
+// field. From 1024px the pills sit above the composer in a centered 720px
+// column and the document scrolls. The DOM follows each layout's reading
+// order: desktop is pills, composer, Issues, so keyboard focus follows what is
+// seen where Tab is used most; on the phone the dock (pills inside) precedes
+// the Issues card and CSS `order` moves it last (styles/newrun.css). One
+// RepoPills serves both: the same node moves between the two spots on a
+// breakpoint crossing (see the hasRepos branch below).
+//
+// Below 1024px the docked page is BOUNDED like the Chat (issue #97, ADR-0083):
+// a flex column as tall as the visual viewport less the tab bar's room (the
+// bar slides out while the keyboard is open here, and that room goes to 0),
+// with the Issues card region as its one scroll container and the dock as its
+// last flex item, so the document never scrolls and the dock rides the
+// keyboard's top edge. iOS never resizes the layout viewport for the
+// keyboard, so the page binds window.visualViewport onto itself
+// (bindVisualViewport, the Chat's primitive: --vv-height / --vv-top, which
+// only the phone CSS reads); without visualViewport or while pinch-zoomed the
+// page is 100dvh less the bar, at top 0.
 //
 // The field: an optional attached issue action (AttachmentChip), the
 // autogrowing textarea, and a bar with the run-option chips — Model, Effort
@@ -56,6 +67,7 @@ import {
   createSignal,
   on,
   onCleanup,
+  onMount,
   untrack,
   type Accessor,
   type JSX,
@@ -118,6 +130,7 @@ import {
 } from '../lib/newRun';
 import { resourceValue } from '../lib/resource';
 import { providerFor, resolveEffortOption, resolveRemote, resolveSpawnOption } from '../lib/spawn';
+import { bindVisualViewport } from '../lib/visualViewport';
 import { createCloneProgressStore } from '../stores/cloneProgress';
 
 export default function NewRun() {
@@ -584,8 +597,20 @@ function NewRunView() {
   };
   const hasRepos = () => (resourceValue(repos)?.length ?? 0) > 0;
 
+  // Size the page to the visible area above the on-screen keyboard (issue
+  // #97, as RunChat does since issue #82): --vv-height / --vv-top on the
+  // page, a no-op without visualViewport. Bound for the page's whole life —
+  // the vars are read only by the phone's bounded `.newrun-docked` rules, so
+  // the error and empty states, and the desktop column, ignore them. onMount:
+  // the ref is set by then, and the binding's listeners and effect belong to
+  // this component and go with it.
+  let pageEl: HTMLElement | undefined;
+  onMount(() => {
+    if (pageEl !== undefined) bindVisualViewport(pageEl);
+  });
+
   return (
-    <main class="page newrun" classList={{ 'newrun-docked': hasRepos() }}>
+    <main ref={pageEl} class="page newrun" classList={{ 'newrun-docked': hasRepos() }}>
       {/* The phone page header (issue #76): the New tab's root names itself,
           like Runs, Repos and More. Desktop keeps the bare centered column.
           Its subtitle is the selected repository (issue #87): with the pills

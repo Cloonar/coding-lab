@@ -8,6 +8,15 @@
 // at all. Unauthenticated sessions render their children bare — /login and
 // /setup therefore never get the shell.
 //
+// Keyboard on New run (issue #97, ADR-0083): while the on-screen keyboard is
+// open on /new the shell carries .tabbar-out, which slides the bar down out of
+// view and zeroes --tabbar-space (styles/tabbar.css) so the page gets the
+// whole visual viewport above the keyboard. The keyboard reading is the
+// viewport shrink (lib/visualViewport's createKeyboardOpen), never focus; the
+// route rule is lib/tabBar's tabBarSlidesOut, combined here with the
+// unchanged tabBarHidden. The bar stays mounted — only the class moves — so it
+// keeps its state and slides back the moment the keyboard closes.
+//
 // The shell owns the SINGLE listInstances resource and hands it to the tree
 // through ShellInstancesContext (lib/shellInstances): the rail, the Runs page,
 // the tab bar's Runs badge, the `(N) lab` document title and the app badge all
@@ -38,7 +47,8 @@ import { createLiveResource } from '../lib/liveResource';
 import { createProviderLogin } from '../lib/providerLogin';
 import { resourceValue } from '../lib/resource';
 import { ShellInstancesContext, attentionCount } from '../lib/shellInstances';
-import { tabBarHidden } from '../lib/tabBar';
+import { tabBarHidden, tabBarSlidesOut } from '../lib/tabBar';
+import { createKeyboardOpen } from '../lib/visualViewport';
 import Icon from './Icon';
 import InstallSheet from './InstallSheet';
 import SideNav from './SideNav';
@@ -146,6 +156,10 @@ function ShellFrame(props: ParentProps) {
   const providerLogin = createProviderLogin();
 
   const showTabBar = () => !tabBarHidden(location.pathname);
+  // One keyboard reading for the shell's lifetime (issue #97); constant false
+  // without visualViewport, so jsdom and old browsers never slide the bar.
+  const keyboardOpen = createKeyboardOpen();
+  const tabBarOut = () => showTabBar() && tabBarSlidesOut(location.pathname, keyboardOpen());
 
   // --- collapse (desktop only; CSS gates the visual effect to >=1024px) -----
   const readCollapsed = (): boolean => {
@@ -189,6 +203,9 @@ function ShellFrame(props: ParentProps) {
           'rail-collapsed': collapsed(),
           // Reserves --tabbar-space below the content (styles/tabbar.css).
           'has-tabbar': showTabBar(),
+          // Slides the bar out and zeroes --tabbar-space while the keyboard is
+          // open on New run (issue #97); the bar itself stays rendered.
+          'tabbar-out': tabBarOut(),
         }}
       >
         {/* The side rail: >=1024px only (CSS); the tab bar replaces it below. */}
