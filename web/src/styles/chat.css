@@ -21,15 +21,29 @@
    is not left off-screen. position:relative + top (never transform, which would
    become the containing block of fixed descendants such as the tool sheet and
    dropdowns) does that. Without visualViewport (jsdom, old browsers), or while
-   pinch-zoomed, both vars are unset and the page is 100dvh at top 0 as before. */
+   pinch-zoomed, both vars are unset and the page is 100dvh at top 0 as before.
+
+   Both values are clamped to the layout viewport (issue #99). A relative
+   offset extends the document's scrollable overflow, so a page pushed down by
+   --vv-top while taller than the room below it gives the document real scroll
+   range. The height and the offset arrive through separate visualViewport
+   events (resize, scroll) and the binding re-lays out on each, so around the
+   keyboard's open and close there are readings where the page is full height
+   but still carries the old offset; Safari then hands the visual pan to the
+   document as window.scrollY, and iOS does not always clamp it back once the
+   readings agree. The fix is to bound the page by the layout viewport, which
+   100dvh is under both keyboard models (iOS never shrinks it for the keyboard,
+   Android shrinks it together with the visual viewport): the height is at
+   most 100dvh, and the top is at most the room left below that height. In
+   every legitimate state both clamps are no-ops. */
 .chat-page {
   display: flex;
   flex-direction: row;
   height: 100vh;
   height: 100dvh;
-  height: var(--vv-height, 100dvh);
+  height: min(var(--vv-height, 100dvh), 100dvh);
   position: relative;
-  top: var(--vv-top, 0px);
+  top: min(var(--vv-top, 0px), calc(100dvh - min(var(--vv-height, 100dvh), 100dvh)));
   padding-bottom: 0;
 }
 

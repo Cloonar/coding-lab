@@ -33,7 +33,11 @@
    never transform, which would become the containing block of the portaled
    Picker and the dropdowns' fixed panels. Without visualViewport (jsdom, old
    browsers), or while pinch-zoomed, both vars are unset and the page is
-   100dvh minus the bar, at top 0.
+   100dvh minus the bar, at top 0. Both values are clamped to the layout
+   viewport, as on the Chat (issue #99, chat.css has the reasoning): the
+   height is at most 100dvh and the top at most the room left below it, so a
+   reading that pairs the full height with a stale offset, or a height a
+   fraction above 100dvh, never gives the document scroll range.
 
    The sticky dock with its gradient fade and the `.shell:has(...)` flex chain
    that once made the scrolling page fill the viewport are gone (issue #97):
@@ -151,9 +155,9 @@
     --newrun-dock-inset: env(safe-area-inset-bottom, 0px);
     height: calc(100vh - var(--tabbar-space, 0px));
     height: calc(100dvh - var(--tabbar-space, 0px));
-    height: calc(var(--vv-height, 100dvh) - var(--tabbar-space, 0px));
+    height: calc(min(var(--vv-height, 100dvh), 100dvh) - var(--tabbar-space, 0px));
     position: relative;
-    top: var(--vv-top, 0px);
+    top: min(var(--vv-top, 0px), calc(100dvh - min(var(--vv-height, 100dvh), 100dvh)));
   }
 
   /* With a tab bar the dock never pads for the home indicator: while the bar
