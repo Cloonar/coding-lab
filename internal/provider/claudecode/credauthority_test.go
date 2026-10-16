@@ -2,12 +2,15 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // The credential-authority seam (issue #222): CredentialsSig (the opaque
@@ -17,6 +20,30 @@ import (
 // isolateCreds and inject_test.go's masterCreds do, so no test touches the
 // host's real credentials; the refresh recipe runs against a stubbed `claude`
 // (fakeClaude), never the live CLI.
+
+// validCreds returns a full logged-in .credentials.json body (accessToken +
+// refreshToken + expiresAt) with the given access token — the minimum shape
+// credentialsLoggedIn accepts (issue #101). Varying the token length varies the
+// file size, which the sig lifecycle test relies on.
+func validCreds(access string) string {
+	return `{"claudeAiOauth":{"accessToken":"` + access + `","refreshToken":"refresh-` + access + `","expiresAt":1893456000000}}`
+}
+
+// loggedOutBodies are the .credentials.json bodies credentialsLoggedIn must
+// reject (issue #101): an empty object, the exact shape Claude Code leaves after
+// an invalid_grant (block kept, tokens emptied), either token alone empty or
+// missing, and non-JSON.
+var loggedOutBodies = map[string]string{
+	"empty object": `{}`,
+	"cleared block": `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,` +
+		`"scopes":["user:inference"],"subscriptionType":"max"}}`,
+	"empty refresh":   `{"claudeAiOauth":{"accessToken":"a","refreshToken":"","expiresAt":1}}`,
+	"empty access":    `{"claudeAiOauth":{"accessToken":"","refreshToken":"r","expiresAt":1}}`,
+	"missing refresh": `{"claudeAiOauth":{"accessToken":"a"}}`,
+	"null block":      `{"claudeAiOauth":null}`,
+	"non-JSON":        `not json at all`,
+	"empty file":      ``,
+}
 
 // checkSigLifecycle drives the full absent→present→stable→content-change→
 // mtime-change lifecycle of CredentialsSig for the credential file at path,
@@ -34,7 +61,7 @@ func checkSigLifecycle(t *testing.T, p *Provider, home, path string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"short"}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(validCreds("short")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig1, m1 := p.CredentialsSig(home)
@@ -55,7 +82,7 @@ func checkSigLifecycle(t *testing.T, p *Provider, home, path string) {
 	}
 
 	// A content/size change flips the sig.
-	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"a-much-longer-rotated-token-value"}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(validCreds("a-much-longer-rotated-token-value")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig3, _ := p.CredentialsSig(home)
@@ -115,7 +142,7 @@ func TestAdoptCredentials_copiesInstanceCredsToMaster(t *testing.T) {
 
 	// A stale master file must be REPLACED, not merged.
 	dst := credentialsPath()
-	if err := os.WriteFile(dst, []byte(`{"stale":"master"}`), 0o600); err != nil {
+	if err := os.WriteFile(dst, []byte(validCreds("stale-master")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,7 +151,7 @@ func TestAdoptCredentials_copiesInstanceCredsToMaster(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	want := []byte(`{"claudeAiOauth":{"accessToken":"rotated-by-instance"}}`)
+	want := []byte(validCreds("rotated-by-instance"))
 	if err := os.WriteFile(src, want, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +170,109 @@ func TestAdoptCredentials_copiesInstanceCredsToMaster(t *testing.T) {
 		t.Fatal(err)
 	} else if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("master creds mode = %o; want 0600", perm)
+	}
+}
+
+// CredentialsSig reads a logged-out file exactly like an absent one (issue
+// #101): ("", zero time), for an instance home AND the master, for every shape
+// credentialsLoggedIn rejects. A valid body beside them still yields a sig.
+func TestCredentialsSig_loggedOutReadsAsAbsent(t *testing.T) {
+	masterDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", masterDir)
+	p, _ := testProvider(t, newFakeRunner())
+	home := t.TempDir()
+	targets := map[string]struct{ home, path string }{
+		"instance": {home, instanceCredsUnder(home)},
+		"master":   {"", filepath.Join(masterDir, ".credentials.json")},
+	}
+	for tname, tgt := range targets {
+		if err := os.MkdirAll(filepath.Dir(tgt.path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range loggedOutBodies {
+			t.Run(tname+"/"+name, func(t *testing.T) {
+				if err := os.WriteFile(tgt.path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if sig, mtime := p.CredentialsSig(tgt.home); sig != "" || !mtime.IsZero() {
+					t.Errorf("CredentialsSig(%q) for %s = (%q, %v); want (\"\", zero time)", tgt.home, name, sig, mtime)
+				}
+			})
+		}
+		t.Run(tname+"/valid", func(t *testing.T) {
+			if err := os.WriteFile(tgt.path, []byte(validCreds("ok")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if sig, mtime := p.CredentialsSig(tgt.home); sig == "" || mtime.IsZero() {
+				t.Errorf("CredentialsSig(%q) for a valid block = (%q, %v); want a non-empty sig", tgt.home, sig, mtime)
+			}
+		})
+	}
+}
+
+// AdoptCredentials refuses a logged-out instance file with an error wrapping
+// provider.ErrCredentialsLoggedOut and leaves the master untouched (issue #101):
+// existing master bytes and mtime are unchanged, and an absent master (dir
+// included) is not created.
+func TestAdoptCredentials_refusesLoggedOut(t *testing.T) {
+	for name, body := range loggedOutBodies {
+		t.Run(name+"/master-present", func(t *testing.T) {
+			masterDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", masterDir)
+			p, _ := testProvider(t, newFakeRunner())
+			dst := credentialsPath()
+			want := []byte(validCreds("healthy-master"))
+			if err := os.WriteFile(dst, want, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-time.Hour).Truncate(time.Second)
+			if err := os.Chtimes(dst, old, old); err != nil {
+				t.Fatal(err)
+			}
+
+			home := t.TempDir()
+			src := instanceCredsUnder(home)
+			if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err := p.AdoptCredentials(home)
+			if !errors.Is(err, provider.ErrCredentialsLoggedOut) {
+				t.Fatalf("AdoptCredentials(%s) = %v; want errors.Is ErrCredentialsLoggedOut", name, err)
+			}
+			if body != "" && strings.Contains(err.Error(), body) {
+				t.Errorf("error %q leaks the credential file content", err)
+			}
+			got, rerr := os.ReadFile(dst)
+			if rerr != nil || string(got) != string(want) {
+				t.Errorf("master after refused adopt = %q, %v; want untouched %q", got, rerr, want)
+			}
+			if fi, serr := os.Stat(dst); serr != nil || !fi.ModTime().Equal(old) {
+				t.Errorf("master mtime after refused adopt = %v, %v; want untouched %v", fi.ModTime(), serr, old)
+			}
+		})
+		t.Run(name+"/master-absent", func(t *testing.T) {
+			masterDir := filepath.Join(t.TempDir(), "master-config") // does not exist
+			t.Setenv("CLAUDE_CONFIG_DIR", masterDir)
+			p, _ := testProvider(t, newFakeRunner())
+			home := t.TempDir()
+			src := instanceCredsUnder(home)
+			if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.AdoptCredentials(home); !errors.Is(err, provider.ErrCredentialsLoggedOut) {
+				t.Fatalf("AdoptCredentials(%s) = %v; want errors.Is ErrCredentialsLoggedOut", name, err)
+			}
+			if _, err := os.Stat(masterDir); !os.IsNotExist(err) {
+				t.Errorf("master dir after refused adopt: stat err = %v; want not-exist (master must not be created)", err)
+			}
+		})
 	}
 }
 
@@ -169,7 +299,7 @@ func TestAdoptCredentials_createsMissingMasterDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(src, []byte(`{"claudeAiOauth":{"accessToken":"x"}}`), 0o600); err != nil {
+	if err := os.WriteFile(src, []byte(validCreds("x")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,6 +413,38 @@ func TestRefreshCredentials_failureCarriesStderr(t *testing.T) {
 	}
 }
 
+// The CLI prints its login error (`Not logged in · Please run /login`) on
+// STDOUT with empty stderr (issue #101): the failure message must carry that
+// stdout tail, labelled, instead of "no stderr captured". Stderr still wins when
+// present, and a success never surfaces output.
+func TestRefreshCredentials_failureCarriesStdoutWhenStderrEmpty(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	p, _ := testProvider(t, newFakeRunner())
+	p.claudeBin = fakeClaude(t, `echo 'Not logged in · Please run /login'; exit 1`)
+
+	err := p.RefreshCredentials(context.Background())
+	if err == nil {
+		t.Fatal("RefreshCredentials with a failing poke = nil; want an error")
+	}
+	if !strings.Contains(err.Error(), "stdout: Not logged in · Please run /login") {
+		t.Errorf("RefreshCredentials error = %q; want it to carry the stub's stdout tail", err)
+	}
+	if strings.Contains(err.Error(), "no stderr captured") {
+		t.Errorf("RefreshCredentials error = %q; must not claim no output when stdout has the message", err)
+	}
+}
+
+// With neither stream populated the fixed marker remains.
+func TestRefreshCredentials_failureNoOutputMarker(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	p, _ := testProvider(t, newFakeRunner())
+	p.claudeBin = fakeClaude(t, `exit 1`)
+	err := p.RefreshCredentials(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no stderr captured") {
+		t.Errorf("RefreshCredentials error = %v; want the no-output marker", err)
+	}
+}
+
 // The detection path core relies on: when the poke rotates the master store, the
 // master sig changes across the call. The stub stands in for the real CLI's
 // in-place rotation by rewriting .credentials.json under the pinned config dir.
@@ -290,14 +452,14 @@ func TestRefreshCredentials_rotationChangesMasterSig(t *testing.T) {
 	masterDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", masterDir)
 	master := filepath.Join(masterDir, ".credentials.json")
-	if err := os.WriteFile(master, []byte(`{"claudeAiOauth":{"accessToken":"old"}}`), 0o600); err != nil {
+	if err := os.WriteFile(master, []byte(validCreds("old")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	p, _ := testProvider(t, newFakeRunner())
 	// The poke rewrites the master store in place with a fresh (longer) family,
 	// exactly as `claude -p` does when it decides the token is near expiry.
-	p.claudeBin = fakeClaude(t, `echo '{"claudeAiOauth":{"accessToken":"rotated-and-noticeably-longer"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"`)
+	p.claudeBin = fakeClaude(t, `echo '`+validCreds("rotated-and-noticeably-longer")+`' > "$CLAUDE_CONFIG_DIR/.credentials.json"`)
 
 	before, _ := p.CredentialsSig("")
 	if before == "" {
@@ -334,7 +496,7 @@ func TestCredauthority_RoundTrip(t *testing.T) {
 	}
 
 	// Simulate the instance CLI self-refreshing its own private copy.
-	rotated := []byte(`{"claudeAiOauth":{"accessToken":"rotated-inside-the-instance-run"}}`)
+	rotated := []byte(validCreds("rotated-inside-the-instance-run"))
 	if err := os.WriteFile(instanceCredsUnder(home), rotated, 0o600); err != nil {
 		t.Fatal(err)
 	}

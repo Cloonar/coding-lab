@@ -14,7 +14,7 @@ func masterCreds(t *testing.T) []byte {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	data := []byte(`{"claudeAiOauth":{"accessToken":"fake-token"}}`)
+	data := []byte(validCreds("fake-token"))
 	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}

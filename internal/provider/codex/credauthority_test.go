@@ -2,12 +2,15 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
 // --- CredentialsSig ---------------------------------------------------
@@ -25,7 +28,7 @@ func TestCredentialsSig_master(t *testing.T) {
 	}
 
 	authPath := filepath.Join(dir, "auth.json")
-	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"a"}}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"a","refresh_token":"r"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig1, mtime1 := p.CredentialsSig("")
@@ -44,7 +47,7 @@ func TestCredentialsSig_master(t *testing.T) {
 		t.Errorf("sig changed with no write: %q vs %q", sig1, sig1b)
 	}
 
-	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"a-much-longer-token-value"}}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"a-much-longer-token-value","refresh_token":"r"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig2, _ := p.CredentialsSig("")
@@ -77,7 +80,7 @@ func TestCredentialsSig_instanceHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	authPath := filepath.Join(codexHome, "auth.json")
-	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"x"}}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"x","refresh_token":"r"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig1, mtime1 := p.CredentialsSig(home)
@@ -96,7 +99,7 @@ func TestCredentialsSig_instanceHome(t *testing.T) {
 		t.Errorf("sig changed with no write: %q vs %q", sig1, sig1b)
 	}
 
-	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"x-much-longer-token-value"}}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"x-much-longer-token-value","refresh_token":"r"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sig2, _ := p.CredentialsSig(home)
@@ -129,7 +132,7 @@ func TestAdoptCredentials_happyPath(t *testing.T) {
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte(`{"tokens":{"access_token":"instance-rotated"}}`)
+	data := []byte(`{"tokens":{"access_token":"instance-rotated","refresh_token":"r"}}`)
 	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +165,7 @@ func TestAdoptCredentials_happyPath(t *testing.T) {
 func TestAdoptCredentials_replacesExisting(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("stale-master-token"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(`{"tokens":{"access_token":"stale-master","refresh_token":"r"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := testProvider(t, newFakeRunner())
@@ -172,7 +175,7 @@ func TestAdoptCredentials_replacesExisting(t *testing.T) {
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte("fresh-instance-token")
+	data := []byte(`{"tokens":{"access_token":"fresh-instance","refresh_token":"r"}}`)
 	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +209,152 @@ func TestAdoptCredentials_emptyHomeErrors(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	if err := p.AdoptCredentials(""); err == nil {
 		t.Error("AdoptCredentials(\"\") = nil error; want a programmer error")
+	}
+}
+
+// --- Logged-out guard (issue #101) ----------------------------------------
+
+const (
+	validOAuthAuth  = `{"OPENAI_API_KEY":null,"tokens":{"id_token":"i","access_token":"a","refresh_token":"r","account_id":"acct"},"last_refresh":"2026-10-16T00:00:00Z"}`
+	validAPIKeyAuth = `{"OPENAI_API_KEY":"sk-test","tokens":null}`
+)
+
+// loggedOutBodies are auth.json bodies the adapter must treat as logged out.
+var loggedOutBodies = map[string]string{
+	"empty object":       `{}`,
+	"empty tokens":       `{"tokens":{"access_token":"","refresh_token":""}}`,
+	"empty access":       `{"tokens":{"access_token":"","refresh_token":"r"}}`,
+	"empty refresh":      `{"tokens":{"access_token":"a","refresh_token":""}}`,
+	"missing refresh":    `{"tokens":{"access_token":"a"}}`,
+	"null tokens":        `{"OPENAI_API_KEY":null,"tokens":null}`,
+	"null api key":       `{"OPENAI_API_KEY":null}`,
+	"empty api key":      `{"OPENAI_API_KEY":""}`,
+	"non-string api key": `{"OPENAI_API_KEY":123}`,
+	"non-JSON":           `not json at all`,
+	"truncated JSON":     `{"tokens":{"access_token":"a","refresh_`,
+	"JSON array":         `[]`,
+	"empty file":         ``,
+}
+
+func writeAuth(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// AdoptCredentials refuses every logged-out body with ErrCredentialsLoggedOut
+// and leaves the master untouched: an existing master keeps its bytes, and a
+// not-yet-created master dir is not created.
+func TestAdoptCredentials_refusesLoggedOut(t *testing.T) {
+	for name, body := range loggedOutBodies {
+		t.Run(name, func(t *testing.T) {
+			masterDir := filepath.Join(t.TempDir(), "master")
+			t.Setenv("CODEX_HOME", masterDir)
+			p, _ := testProvider(t, newFakeRunner())
+			home := t.TempDir()
+			writeAuth(t, filepath.Join(instanceCodexHome(home), "auth.json"), body)
+
+			err := p.AdoptCredentials(home)
+			if !errors.Is(err, provider.ErrCredentialsLoggedOut) {
+				t.Fatalf("AdoptCredentials = %v; want errors.Is ErrCredentialsLoggedOut", err)
+			}
+			if _, statErr := os.Stat(masterDir); !os.IsNotExist(statErr) {
+				t.Errorf("master dir created despite the refusal (%v)", statErr)
+			}
+
+			// Now with an existing master: bytes must survive.
+			writeAuth(t, filepath.Join(masterDir, "auth.json"), validOAuthAuth)
+			if err := p.AdoptCredentials(home); !errors.Is(err, provider.ErrCredentialsLoggedOut) {
+				t.Fatalf("AdoptCredentials (existing master) = %v; want ErrCredentialsLoggedOut", err)
+			}
+			got, rerr := os.ReadFile(filepath.Join(masterDir, "auth.json"))
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if string(got) != validOAuthAuth {
+				t.Errorf("master auth.json = %q; want it untouched", got)
+			}
+			if ents, _ := os.ReadDir(masterDir); len(ents) != 1 {
+				t.Errorf("master dir has %d entries; want only auth.json (no tmp leftovers)", len(ents))
+			}
+		})
+	}
+}
+
+// The error names the path but never the file content.
+func TestAdoptCredentials_loggedOutErrorOmitsContent(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	p, _ := testProvider(t, newFakeRunner())
+	home := t.TempDir()
+	path := filepath.Join(instanceCodexHome(home), "auth.json")
+	writeAuth(t, path, `{"tokens":{"access_token":"SECRET-ACCESS","refresh_token":""}}`)
+
+	err := p.AdoptCredentials(home)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), "SECRET-ACCESS") {
+		t.Errorf("error leaks token content: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the path %q", err, path)
+	}
+}
+
+// CredentialsSig reports a logged-out file as ("", zero), master and
+// instance alike.
+func TestCredentialsSig_loggedOutReadsAbsent(t *testing.T) {
+	for name, body := range loggedOutBodies {
+		t.Run(name, func(t *testing.T) {
+			masterDir := t.TempDir()
+			t.Setenv("CODEX_HOME", masterDir)
+			p, _ := testProvider(t, newFakeRunner())
+			home := t.TempDir()
+			writeAuth(t, filepath.Join(masterDir, "auth.json"), body)
+			writeAuth(t, filepath.Join(instanceCodexHome(home), "auth.json"), body)
+
+			if sig, mt := p.CredentialsSig(""); sig != "" || !mt.IsZero() {
+				t.Errorf("master: sig=%q mtime=%v; want (\"\", zero)", sig, mt)
+			}
+			if sig, mt := p.CredentialsSig(home); sig != "" || !mt.IsZero() {
+				t.Errorf("instance: sig=%q mtime=%v; want (\"\", zero)", sig, mt)
+			}
+		})
+	}
+}
+
+// Both a ChatGPT/OAuth-tokens body and an API-key body are logged in: they
+// sign non-empty and adopt byte-for-byte.
+func TestAdoptCredentials_acceptsValidLogins(t *testing.T) {
+	for name, body := range map[string]string{"oauth tokens": validOAuthAuth, "api key": validAPIKeyAuth} {
+		t.Run(name, func(t *testing.T) {
+			masterDir := filepath.Join(t.TempDir(), "master")
+			t.Setenv("CODEX_HOME", masterDir)
+			p, _ := testProvider(t, newFakeRunner())
+			home := t.TempDir()
+			writeAuth(t, filepath.Join(instanceCodexHome(home), "auth.json"), body)
+
+			if sig, mt := p.CredentialsSig(home); sig == "" || mt.IsZero() {
+				t.Errorf("sig=%q mtime=%v; want a non-empty sig for a valid login", sig, mt)
+			}
+			if err := p.AdoptCredentials(home); err != nil {
+				t.Fatalf("AdoptCredentials: %v", err)
+			}
+			got, err := os.ReadFile(filepath.Join(masterDir, "auth.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != body {
+				t.Errorf("master auth.json = %q; want %q", got, body)
+			}
+			if sig, _ := p.CredentialsSig(""); sig == "" {
+				t.Error("master sig empty after adopting a valid login")
+			}
+		})
 	}
 }
 
@@ -297,7 +446,7 @@ func TestRefreshCredentials_rewriteChangesMasterSig(t *testing.T) {
 		t.Fatal("precondition: master sig should be non-empty before the probe")
 	}
 
-	t.Setenv("LAB_TEST_NEW_TOKEN", `{"tokens":{"access_token":"rotated-by-stub"}}`)
+	t.Setenv("LAB_TEST_NEW_TOKEN", `{"tokens":{"access_token":"rotated-by-stub","refresh_token":"r"}}`)
 	p.codexBin = fakeCodex(t, `printf '%s' "$LAB_TEST_NEW_TOKEN" > "$CODEX_HOME/auth.json"
 exit 0`)
 
@@ -344,7 +493,7 @@ func TestCredentialAuthority_roundTrip(t *testing.T) {
 	}
 
 	// Simulate the instance CLI self-refreshing its token in place.
-	rotated := []byte(`{"tokens":{"access_token":"self-refreshed"}}`)
+	rotated := []byte(`{"tokens":{"access_token":"self-refreshed","refresh_token":"r"}}`)
 	if err := os.WriteFile(homeAuth, rotated, 0o600); err != nil {
 		t.Fatal(err)
 	}

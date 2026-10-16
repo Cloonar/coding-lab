@@ -739,6 +739,16 @@ other three (today it can only be added as a manual checklist row — see
 below — because no repeatable automated probe is safe against a real
 grant).
 
+**Logged-out guard (issue #101) — shape assumed, clear-on-failure
+UNVERIFIED.** `CredentialsSig`/`AdoptCredentials` treat an `auth.json` as
+logged in only when it parses as a JSON object AND carries either a non-empty
+string `OPENAI_API_KEY` or a `tokens` object with non-empty `access_token`
+and `refresh_token` (the known codex-cli shape; no real `auth.json` is
+captured in this repo). Anything else reads as logged out (sig `""`) and is
+refused by adopt-back. This is the minimum guard: what codex actually writes
+to disk after a failed refresh has not been observed, so capture a real
+cleared file and tighten `authLoggedIn` accordingly.
+
 ## Live re-verification
 
 Three opt-in probes run against the installed binary and the real

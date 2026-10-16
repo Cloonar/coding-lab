@@ -834,9 +834,13 @@ type AgentProvider interface {
 	// EQUALITY only and never parses it. home == "" means the machine's MASTER
 	// store; a non-empty home is that instance's private credential copy. It
 	// follows the SpoolSig precedent (existence + mtime + size digest): the sig
-	// is "" exactly when no credential files exist under home, so "" doubles as
+	// is "" when no credential files exist under home, so "" doubles as
 	// "logged out / never injected" — and CredentialsSig("") == "" on a host
 	// whose master store was never populated is a pinned acceptance criterion.
+	// The sig is ALSO "" (with a zero mtime) when the file exists but is
+	// logged out by the adapter's own emptiness test — the same test
+	// AdoptCredentials refuses with ErrCredentialsLoggedOut (issue #101) — so a
+	// cleared store reads exactly like an absent one to every core gate.
 	//
 	// The sig string is adapter-PRIVATE — core learns only whether two sigs
 	// match, never the file paths behind them. That opacity is what lets core
@@ -870,6 +874,16 @@ type AgentProvider interface {
 	// InjectCredentials' tolerant missing-master case: adoption is only ever
 	// requested after a sig proved the files existed, so if they have vanished
 	// the caller must LEARN of it rather than silently adopt nothing.
+	//
+	// A credential file that is present but LOGGED OUT — unparseable, or
+	// parseable with its tokens emptied (claude clears its tokens in place on
+	// a failed refresh rather than deleting the file) — is refused with an
+	// error wrapping ErrCredentialsLoggedOut, and the master is left untouched:
+	// adopting it would fan a dead family out over every live home (issue
+	// #101). The adapter decides what "logged out" means for its own file
+	// format and applies the SAME test in CredentialsSig, which reports such a
+	// file as "" — so a cleared home never becomes an adopt candidate, and this
+	// refusal is the backstop for a file cleared between the scan and the adopt.
 	AdoptCredentials(instanceHome string) error
 
 	// --- Chat surface (issue #7 / ADR-0016, generalized in issue #51) -------
@@ -1002,6 +1016,14 @@ type AgentProvider interface {
 // no longer on disk (the provider retired it after the run ended). Callers
 // render a graceful "transcript no longer available" state.
 var ErrTranscriptGone = errors.New("provider: transcript no longer available")
+
+// ErrCredentialsLoggedOut is returned (wrapped) by AdoptCredentials when the
+// instance's credential file exists but is logged out — unparseable, or its
+// tokens emptied — so adopting it would replace the master's family with a
+// dead one (issue #101). The master store is left untouched. Core treats it
+// like any other adopt failure (falls through to the next-newest candidate)
+// but logs it as a rejected candidate.
+var ErrCredentialsLoggedOut = errors.New("provider: instance credentials are logged out")
 
 // Interaction/auth sentinels of the seam, provider-generic so httpapi maps
 // status codes without importing any concrete provider (issue #51 decision
