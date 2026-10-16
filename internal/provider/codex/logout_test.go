@@ -22,7 +22,7 @@ func isolateAuth(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
 	creds := filepath.Join(dir, "auth.json")
-	if err := os.WriteFile(creds, []byte(`{"tokens":{"access_token":"fake"}}`), 0o600); err != nil {
+	if err := os.WriteFile(creds, []byte(`{"tokens":{"access_token":"fake","refresh_token":"fake-refresh"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return creds

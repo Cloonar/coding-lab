@@ -1,9 +1,13 @@
 package credrotate
 
 import (
+	"bytes"
 	"context"
-	"io"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +34,7 @@ type fixture struct {
 	fake  *providertest.Fake
 	homes *instancehome.Manager
 	clk   time.Time
+	logs  bytes.Buffer // the service's JSON log lines (issue #101 assertions)
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -43,7 +48,7 @@ func newFixture(t *testing.T) *fixture {
 	homes := instancehome.New(t.TempDir())
 	f := &fixture{t: t, st: st, fake: fake, homes: homes, clk: baseClock}
 	svc, err := New(Options{
-		Providers: reg, Store: st, Homes: homes, Logger: logx.New(io.Discard),
+		Providers: reg, Store: st, Homes: homes, Logger: logx.New(&f.logs),
 		Now: func() time.Time { return f.clk },
 	})
 	if err != nil {
@@ -102,6 +107,29 @@ func (f *fixture) credSig(id string) string {
 func (f *fixture) tick() { f.svc.tick(context.Background()) }
 
 func (f *fixture) home(id string) string { return f.homes.HomePath(id) }
+
+// logged returns the decoded log records whose msg starts with prefix, in order.
+func (f *fixture) logged(prefix string) []map[string]any {
+	f.t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			f.t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if msg, _ := rec["msg"].(string); strings.HasPrefix(msg, prefix) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// errLoggedOut is the adapter's refusal of a cleared credential file, as a
+// real AdoptCredentials wraps it (issue #101).
+var errLoggedOut = fmt.Errorf("adopt: %w", provider.ErrCredentialsLoggedOut)
 
 // countHome returns how many times home was passed to InjectCredentials.
 func countHome(homes []string, want string) int {
@@ -248,6 +276,129 @@ func TestTick_NewestSelfRefreshWins(t *testing.T) {
 	}
 }
 
+// 5a. A home whose CLI lost the refresh race and cleared its tokens in place
+// (issue #101) is NEVER a candidate, even with the newest mtime: the
+// adapter reports it as "" (the vanished branch), so the older VALID
+// self-refresh is adopted and fanned back into the cleared home. Both
+// modellings: the fake's logged-out mark (zero mtime, as the adapter
+// reports it) and a scripted "" sig carrying the newer mtime.
+func TestTick_LoggedOutHomeNeverAdopted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		clear func(f *fixture, id string)
+	}{
+		{"logged-out mark", func(f *fixture, id string) { f.fake.SetCredentialsLoggedOut(f.home(id)) }},
+		{"empty sig newer mtime", func(f *fixture, id string) { f.setHome(id, "", t4) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.setMaster("sigA", t1)
+			f.seedRun("runA", "", true)
+			f.seedRun("runB", "", true)
+			f.tick() // settle: both baselines sigA
+			injected0 := len(f.fake.InjectHomes())
+
+			f.setHome("runA", "sigX", t2) // runA won the refresh race (older mtime)
+			tc.clear(f, "runB")           // runB lost it: invalid_grant, tokens cleared (newer)
+			f.tick()
+
+			if got := f.fake.AdoptedHomes(); len(got) != 1 || got[0] != f.home("runA") {
+				t.Fatalf("adopts = %v; want exactly [%s] (the valid family)", got, f.home("runA"))
+			}
+			master, _ := f.fake.CredentialsSig("")
+			if master != "sigX" {
+				t.Errorf("master sig = %q; want sigX (runA's family)", master)
+			}
+			if sig, _ := f.fake.CredentialsSig(f.home("runB")); sig != master {
+				t.Errorf("runB sig = %q; want the master's %q (re-injected)", sig, master)
+			}
+			for _, id := range []string{"runA", "runB"} {
+				if got := f.credSig(id); got != "sigX" {
+					t.Errorf("%s baseline = %q; want sigX", id, got)
+				}
+			}
+			if countHome(f.fake.InjectHomes()[injected0:], f.home("runB")) == 0 {
+				t.Errorf("runB was not re-injected: %v", f.fake.InjectHomes())
+			}
+			if got := f.logged("credrotate: rejected logged-out"); len(got) != 0 {
+				t.Errorf("rejection logs = %v; want none (a cleared home is never a candidate)", got)
+			}
+			if got := f.logged("credrotate: credentials vanished"); len(got) != 1 || got[0]["run"] != "runB" {
+				t.Errorf("vanished logs = %v; want one naming runB", got)
+			}
+		})
+	}
+}
+
+// 5b. The backstop (issue #101): runB's file still had a valid, newer sig at the
+// scan but the CLI cleared it before the adopt, so AdoptCredentials refuses
+// with ErrCredentialsLoggedOut. The scan falls through to runA, fans its
+// family out to both homes, and WARNs the rejection naming runB — not the
+// generic adopt-failed line.
+func TestTick_LoggedOutAdoptRejectedFallsThrough(t *testing.T) {
+	f := newFixture(t)
+	f.setMaster("sigA", t1)
+	f.seedRun("runA", "", true)
+	f.seedRun("runB", "", true)
+	f.tick() // settle
+	injected0 := len(f.fake.InjectHomes())
+
+	f.setHome("runA", "sigX", t2)
+	f.setHome("runB", "sigY", t4)                       // newest at the scan...
+	f.fake.SetAdoptErrFor(f.home("runB"), errLoggedOut) // ...cleared before the adopt
+	f.tick()
+
+	if got := f.fake.AdoptedHomes(); len(got) != 1 || got[0] != f.home("runA") {
+		t.Fatalf("adopts = %v; want exactly [%s] (fell through past the rejected runB)", got, f.home("runA"))
+	}
+	if sig, _ := f.fake.CredentialsSig(""); sig != "sigX" {
+		t.Errorf("master sig = %q; want sigX", sig)
+	}
+	post := f.fake.InjectHomes()[injected0:]
+	for _, id := range []string{"runA", "runB"} {
+		if got := f.credSig(id); got != "sigX" {
+			t.Errorf("%s baseline = %q; want sigX", id, got)
+		}
+		if countHome(post, f.home(id)) == 0 {
+			t.Errorf("%s not re-injected: %v", id, post)
+		}
+	}
+	rej := f.logged("credrotate: rejected logged-out adopt candidate")
+	if len(rej) != 1 || rej[0]["run"] != "runB" || rej[0]["level"] != "WARN" {
+		t.Fatalf("rejection logs = %v; want one WARN naming runB", rej)
+	}
+	if rej[0]["sig"] != "sigY" || rej[0]["baseline"] != "sigA" {
+		t.Errorf("rejection sig/baseline = %v/%v; want sigY/sigA", rej[0]["sig"], rej[0]["baseline"])
+	}
+	if got := f.logged("credrotate: adopt failed"); len(got) != 0 {
+		t.Errorf("generic adopt-failed logs = %v; want none for a logged-out refusal", got)
+	}
+	ok := f.logged("credrotate: adopted self-refreshed credentials")
+	if len(ok) != 1 || ok[0]["run"] != "runA" || ok[0]["sig"] != "sigX" || ok[0]["baseline"] != "sigA" {
+		t.Errorf("adopt logs = %v; want one naming runA with sig sigX, baseline sigA", ok)
+	}
+}
+
+// 5c. Any OTHER adopt error keeps the generic warn (issue #101 only singles out
+// the logged-out refusal).
+func TestTick_OtherAdoptErrorGenericWarn(t *testing.T) {
+	f := newFixture(t)
+	f.setMaster("sigA", t1)
+	f.seedRun("runA", "", true)
+	f.tick() // settle
+
+	f.setHome("runA", "sigX", t2)
+	f.fake.SetAdoptErrFor(f.home("runA"), errors.New("boom"))
+	f.tick()
+
+	if got := f.logged("credrotate: adopt failed"); len(got) != 1 || got[0]["run"] != "runA" {
+		t.Errorf("generic adopt-failed logs = %v; want one naming runA", got)
+	}
+	if got := f.logged("credrotate: rejected logged-out"); len(got) != 0 {
+		t.Errorf("rejection logs = %v; want none for a non-logged-out error", got)
+	}
+}
+
 //  6. An unstamped row (baseline "") whose home holds credentials gets its
 //     baseline stamped — no adopt, no self-refresh treatment.
 func TestTick_UnstampedRowStampsBaseline(t *testing.T) {
@@ -298,6 +449,32 @@ func TestTick_LoggedOutThenLogin(t *testing.T) {
 	}
 	if f.credSig("runA") != "sigA" || f.credSig("runB") != "sigA" {
 		t.Errorf("post-login baselines = %q/%q; want sigA/sigA", f.credSig("runA"), f.credSig("runB"))
+	}
+}
+
+// 7a. A master that goes logged out after being valid — e.g. a cleared store
+// the adapter reports as "" (issue #101) — gates off both the poke and the
+// change-driven fan-out: a dead family is never pushed into live homes.
+func TestTick_MasterLoggedOutGatesPokeAndFanOut(t *testing.T) {
+	f := newFixture(t)
+	f.setMaster("sigA", t1)
+	f.seedRun("runA", "", true)
+	f.tick() // settle (bootstrap fan-out + first poke)
+	injected0 := len(f.fake.InjectHomes())
+	refresh0 := f.fake.RefreshCalls()
+
+	f.fake.SetCredentialsLoggedOut("")
+	f.clk = f.clk.Add(pokeEvery + time.Second) // the poke gate is open
+	f.tick()
+
+	if got := f.fake.RefreshCalls(); got != refresh0 {
+		t.Errorf("RefreshCalls = %d; want %d (never poke a logged-out master)", got, refresh0)
+	}
+	if n := len(f.fake.InjectHomes()) - injected0; n != 0 {
+		t.Errorf("re-injections = %d; want 0 (never fan out a logged-out master)", n)
+	}
+	if got := f.credSig("runA"); got != "sigA" {
+		t.Errorf("baseline = %q; want unchanged sigA", got)
 	}
 }
 
@@ -354,6 +531,54 @@ func TestAdoptCheck(t *testing.T) {
 			t.Errorf("adopts = %v; want none (no such run)", got)
 		}
 	})
+
+	// A logged-out home (issue #101) is never adopted before wipe, however it is
+	// modelled, and the master is left untouched.
+	for _, tc := range []struct {
+		name    string
+		clear   func(f *fixture)
+		rejects bool // the adopt was attempted and refused (cleared after the sig read)
+	}{
+		{"logged-out mark", func(f *fixture) { f.fake.SetCredentialsLoggedOut(f.home("runA")) }, false},
+		{"empty sig", func(f *fixture) { f.setHome("runA", "", t2) }, false},
+		{"cleared after sig read", func(f *fixture) {
+			f.setHome("runA", "sigB", t2)
+			f.fake.SetAdoptErrFor(f.home("runA"), errLoggedOut)
+		}, true},
+	} {
+		t.Run("logged-out home not adopted: "+tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.setMaster("sigA", t1)
+			f.seedRun("runA", "", true)
+			f.seedRun("runB", "", true)
+			f.tick() // settle: both baselines sigA
+			injected0 := len(f.fake.InjectHomes())
+
+			tc.clear(f)
+			f.svc.AdoptCheck(ctx, "runA")
+
+			if got := f.fake.AdoptedHomes(); len(got) != 0 {
+				t.Errorf("adopts = %v; want none (logged-out home)", got)
+			}
+			if sig, _ := f.fake.CredentialsSig(""); sig != "sigA" {
+				t.Errorf("master sig = %q; want untouched sigA", sig)
+			}
+			if n := len(f.fake.InjectHomes()) - injected0; n != 0 {
+				t.Errorf("re-injections = %d; want 0 (nothing adopted, nothing to fan out)", n)
+			}
+			rej := f.logged("credrotate: adopt-check rejected logged-out credentials")
+			if tc.rejects {
+				if len(rej) != 1 || rej[0]["run"] != "runA" || rej[0]["level"] != "WARN" {
+					t.Errorf("rejection logs = %v; want one WARN naming runA", rej)
+				}
+				if got := f.logged("credrotate: adopt-check adopt failed"); len(got) != 0 {
+					t.Errorf("generic adopt-check logs = %v; want none for a logged-out refusal", got)
+				}
+			} else if len(rej) != 0 {
+				t.Errorf("rejection logs = %v; want none (\"\" sig: no adopt attempted)", rej)
+			}
+		})
+	}
 
 	t.Run("empty baseline does not adopt", func(t *testing.T) {
 		f := newFixture(t)

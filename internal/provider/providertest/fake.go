@@ -8,6 +8,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -66,13 +67,15 @@ type Fake struct {
 	// refreshHook is the optional CLI-rotation simulation (it runs WITHOUT the
 	// lock so it may call SetCredentialsSig); refreshErr scripts a poke failure;
 	// adoptedHomes records AdoptCredentials calls in order; adoptErr scripts an
-	// adopt failure.
+	// adopt failure for every home, adoptErrFor one home's (issue #101: a file
+	// cleared between the sig scan and the adopt).
 	credSigs     map[string]credSig
 	refreshCalls int
 	refreshHook  func()
 	refreshErr   error
 	adoptedHomes []string
 	adoptErr     error
+	adoptErrFor  map[string]error
 	connect      map[string]bool
 	oauthURL     string
 	loginErr     error
@@ -158,10 +161,15 @@ type RetainCall struct {
 // credSig is one home's scripted credential signature: the opaque sig string
 // core compares for equality and the newest credential-file mtime core uses
 // for the adopt tie-break (issue #222). The zero value is the "" sig + zero
-// mtime a home with no credential files reports.
+// mtime a home with no credential files reports. loggedOut marks a credential
+// file that exists but whose tokens were cleared in place (issue #101): it
+// reads as ("", zero mtime) exactly like an absent store, AdoptCredentials
+// refuses it with provider.ErrCredentialsLoggedOut, and it travels with the
+// entry on inject/adopt copies (a copied cleared file is still cleared).
 type credSig struct {
-	sig   string
-	mtime time.Time
+	sig       string
+	mtime     time.Time
+	loggedOut bool
 }
 
 var (
@@ -519,11 +527,16 @@ func (f *Fake) RefreshCredentials(context.Context) error {
 // CredentialsSig implements provider.AgentProvider (issue #222): it returns the
 // scripted (sig, mtime) for home — the "" key is the MASTER store, and an
 // unscripted home reads the zero value ("" sig, zero mtime), the "no credential
-// files" state a real adapter reports for an empty store.
+// files" state a real adapter reports for an empty store. A home marked
+// logged out (SetCredentialsLoggedOut) reads the same ("", zero mtime) — the
+// adapter's emptiness test folds a cleared file into "" (issue #101).
 func (f *Fake) CredentialsSig(home string) (string, time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cs := f.credSigs[home]
+	if cs.loggedOut {
+		return "", time.Time{}
+	}
 	return cs.sig, cs.mtime
 }
 
@@ -531,9 +544,13 @@ func (f *Fake) CredentialsSig(home string) (string, time.Time) {
 // the home in adoptedHomes and copies that home's sig+mtime back onto the
 // MASTER entry (the master adopting the instance's self-refreshed family). An
 // empty home returns an error unconditionally, matching the contract; a scripted
-// adoptErr (SetAdoptErr) otherwise makes it fail. It does NOT model the missing-
-// files error — the hermetic conformance check owns that for real adapters;
-// here a home whose sig was never scripted simply adopts the zero value.
+// adoptErr (SetAdoptErr) or a per-home one (SetAdoptErrFor) otherwise makes it
+// fail, and a home marked logged out (SetCredentialsLoggedOut) is refused with
+// an error wrapping provider.ErrCredentialsLoggedOut (issue #101). Every
+// failure leaves adoptedHomes and the MASTER entry untouched. It does NOT model
+// the missing-files error — the hermetic conformance check owns that for real
+// adapters; here a home whose sig was never scripted simply adopts the zero
+// value.
 func (f *Fake) AdoptCredentials(instanceHome string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -542,6 +559,12 @@ func (f *Fake) AdoptCredentials(instanceHome string) error {
 	}
 	if f.adoptErr != nil {
 		return f.adoptErr
+	}
+	if err := f.adoptErrFor[instanceHome]; err != nil {
+		return err
+	}
+	if f.credSigs[instanceHome].loggedOut {
+		return fmt.Errorf("providertest: adopt %s: %w", instanceHome, provider.ErrCredentialsLoggedOut)
 	}
 	f.adoptedHomes = append(f.adoptedHomes, instanceHome)
 	if f.credSigs == nil {
@@ -983,6 +1006,38 @@ func (f *Fake) SetCredentialsSig(home, sig string, mtime time.Time) {
 		f.credSigs = map[string]credSig{}
 	}
 	f.credSigs[home] = credSig{sig: sig, mtime: mtime}
+}
+
+// SetCredentialsLoggedOut marks home's credential file as present but logged
+// out — its tokens cleared in place, as claude does on an invalid_grant (issue
+// #101); use "" for the MASTER store. The home then reads ("", zero mtime) from
+// CredentialsSig and AdoptCredentials refuses it with
+// provider.ErrCredentialsLoggedOut. A later SetCredentialsSig or
+// InjectCredentials into the home overwrites the mark (a fresh file).
+func (f *Fake) SetCredentialsLoggedOut(home string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.credSigs == nil {
+		f.credSigs = map[string]credSig{}
+	}
+	f.credSigs[home] = credSig{loggedOut: true}
+}
+
+// SetAdoptErrFor scripts an AdoptCredentials failure for ONE instance home
+// (issue #101) while every other home still adopts — e.g. an error wrapping
+// provider.ErrCredentialsLoggedOut models a file whose sig was still valid at
+// the scan but that the CLI cleared before the adopt. nil clears it.
+func (f *Fake) SetAdoptErrFor(home string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		delete(f.adoptErrFor, home)
+		return
+	}
+	if f.adoptErrFor == nil {
+		f.adoptErrFor = map[string]error{}
+	}
+	f.adoptErrFor[home] = err
 }
 
 // SetRefreshHook scripts a hook RefreshCredentials runs (unlocked) on each

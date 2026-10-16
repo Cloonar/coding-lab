@@ -25,8 +25,22 @@
 //     live instance.
 //   - Adopt-back: if an instance self-refreshed anyway (its home's signature
 //     diverged from the last-injected baseline), the loop adopts that still-valid
-//     rotated family into the master store — newest self-refresh wins — and fans
-//     it back out, so a later wipe can never destroy the only live copy.
+//     rotated family into the master store — newest VALID self-refresh wins — and
+//     fans it back out, so a later wipe can never destroy the only live copy.
+//
+// "Valid" is load-bearing (issue #101): when two instance CLIs race to refresh
+// the same family, the loser gets invalid_grant and clears its tokens IN PLACE —
+// a new mtime and a smaller size, indistinguishable from a rotation by sig
+// alone. Core cannot tell them apart (it never parses tokens), so the adapter
+// does: CredentialsSig reports a logged-out file as "" (a cleared home reads as
+// vanished, never as a candidate, and a cleared master gates off the poke and
+// the fan-out), and AdoptCredentials refuses one with
+// provider.ErrCredentialsLoggedOut, after which the scan falls through to the
+// next-newest candidate. Adopt-back is a PRIMARY mechanism, not a safety net:
+// the poke runs every pokeEvery (15 min) while the CLI deems a token
+// refresh-due only inside its last 5 minutes, so the poke usually misses that
+// window and an instance's own proactive refresh rotates the family first —
+// instance self-refreshes are the common rotation path.
 package credrotate
 
 import (
@@ -53,9 +67,12 @@ const (
 
 	// pokeEvery bounds the blind CLI poke. Unlike the scan, a poke is a live
 	// subprocess making a real provider API call, so it is deliberately sparse:
-	// an OAuth access token lives ~8h, so a 15-minute cadence rotates it long
-	// before expiry while keeping the call count low. The scan (which detects the
-	// resulting rotation and fans it out) stays at the tighter scanTick.
+	// an OAuth access token lives ~8h and a 15-minute cadence keeps the call
+	// count low. The scan (which detects the resulting rotation and fans it out)
+	// stays at the tighter scanTick. The CLI only rotates inside the token's last
+	// 5 minutes, so most pokes are no-ops and the poke often misses that window:
+	// instance self-refreshes are the common rotation path and adopt-back is
+	// primary, not a safety net (issue #101; see the package doc).
 	pokeEvery = 15 * time.Minute
 
 	// refreshTimeout bounds one poke. RefreshCredentials shells out to the
@@ -161,8 +178,8 @@ func (s *Service) tick(ctx context.Context) {
 
 // tickProvider runs the load-bearing per-provider sequence:
 //
-//  1. Adopt-scan — adopt any instance that self-refreshed (newest mtime wins),
-//     and fan the adopted family out immediately.
+//  1. Adopt-scan — adopt any instance that self-refreshed (newest VALID mtime
+//     wins, issue #101), and fan the adopted family out immediately.
 //  2. Poke — the blind, sparse CLI refresh of the master store.
 //  3. Master-change detection — did the master signature change (or is this the
 //     bootstrap)?
@@ -214,10 +231,13 @@ func (s *Service) tickProvider(ctx context.Context, p provider.AgentProvider) {
 //     (NOT a self-refresh — there is nothing to diverge from).
 //   - present baseline + diverged creds: a self-refresh candidate.
 //   - present baseline + vanished creds: warn and skip (do not adopt nothing).
+//     A home whose CLI cleared its tokens after losing a refresh race lands
+//     here too — the adapter reports a logged-out file as "" (issue #101).
 func (s *Service) adoptScan(ctx context.Context, p provider.AgentProvider, live []store.Run) bool {
 	pid := p.ID()
 	type candidate struct {
 		run   store.Run
+		sig   string
 		mtime time.Time
 	}
 	var cands []candidate
@@ -232,7 +252,7 @@ func (s *Service) adoptScan(ctx context.Context, p provider.AgentProvider, live 
 				s.logStampErr(err, run.ID)
 			}
 		case run.CredSig != "" && cur != "" && cur != run.CredSig:
-			cands = append(cands, candidate{run: run, mtime: mtime})
+			cands = append(cands, candidate{run: run, sig: cur, mtime: mtime})
 		case run.CredSig != "" && cur == "":
 			s.log.Warn("credrotate: credentials vanished from live home",
 				"component", "credrotate", "provider", pid, "run", run.ID)
@@ -241,20 +261,28 @@ func (s *Service) adoptScan(ctx context.Context, p provider.AgentProvider, live 
 	if len(cands) == 0 {
 		return false
 	}
-	// The newest credential-file mtime wins: each rotation invalidates every
-	// other family, so the most recent one is the live family. On adopt error,
-	// try the next-newest — a vanished file must not strand a still-valid older
-	// candidate.
+	// The newest VALID credential-file mtime wins: each rotation invalidates
+	// every other family, so the most recent one is the live family. On adopt
+	// error, try the next-newest — a vanished file, or one the CLI cleared
+	// between this scan and the adopt (refused with ErrCredentialsLoggedOut,
+	// issue #101), must not strand a still-valid older candidate. Every attempt
+	// logs the candidate's opaque sig (it encodes mtime+size, never token
+	// content) against the run's baseline, so a bad adopt is diagnosable.
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].mtime.After(cands[j].mtime) })
 	for _, c := range cands {
 		home := s.homes.HomePath(c.run.ID)
 		if err := p.AdoptCredentials(home); err != nil {
-			s.log.Warn("credrotate: adopt failed, trying next-newest",
-				"component", "credrotate", "provider", pid, "run", c.run.ID, "err", err)
+			msg := "credrotate: adopt failed, trying next-newest"
+			if errors.Is(err, provider.ErrCredentialsLoggedOut) {
+				msg = "credrotate: rejected logged-out adopt candidate, trying next-newest"
+			}
+			s.log.Warn(msg, "component", "credrotate", "provider", pid, "run", c.run.ID,
+				"sig", c.sig, "baseline", c.run.CredSig, "mtime", c.mtime, "err", err)
 			continue
 		}
 		s.log.Info("credrotate: adopted self-refreshed credentials",
-			"component", "credrotate", "provider", pid, "run", c.run.ID)
+			"component", "credrotate", "provider", pid, "run", c.run.ID,
+			"sig", c.sig, "baseline", c.run.CredSig, "mtime", c.mtime)
 		return true
 	}
 	return false
@@ -290,8 +318,11 @@ func (s *Service) fanOut(ctx context.Context, p provider.AgentProvider, runs []s
 // family). If the run's home holds a self-refreshed family (its current
 // signature diverged from the last-injected baseline), it is adopted into the
 // master store and fanned out to the provider's OTHER live homes before the
-// caller proceeds with the wipe. Best-effort: every failure is logged and
-// swallowed. Safe to call concurrently with the loop (shares the mutex).
+// caller proceeds with the wipe. A logged-out home is never adopted: the
+// adapter reports it as "" (nothing to adopt), and a file cleared after the sig
+// read is refused with ErrCredentialsLoggedOut, logged as a rejection (issue
+// #101). Best-effort: every failure is logged and swallowed. Safe to call
+// concurrently with the loop (shares the mutex).
 func (s *Service) AdoptCheck(ctx context.Context, runID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -311,17 +342,22 @@ func (s *Service) AdoptCheck(ctx context.Context, runID string) {
 		return // provider no longer registered
 	}
 	home := s.homes.HomePath(runID)
-	cur, _ := p.CredentialsSig(home)
+	cur, mtime := p.CredentialsSig(home)
 	if cur == "" || cur == run.CredSig {
-		return // creds gone, or unchanged since last injection: nothing to adopt
+		return // creds gone or logged out, or unchanged since last injection: nothing to adopt
 	}
 	if err := p.AdoptCredentials(home); err != nil {
-		s.log.Warn("credrotate: adopt-check adopt failed",
-			"component", "credrotate", "provider", run.Provider, "run", runID, "err", err)
+		msg := "credrotate: adopt-check adopt failed"
+		if errors.Is(err, provider.ErrCredentialsLoggedOut) {
+			msg = "credrotate: adopt-check rejected logged-out credentials"
+		}
+		s.log.Warn(msg, "component", "credrotate", "provider", run.Provider, "run", runID,
+			"sig", cur, "baseline", run.CredSig, "mtime", mtime, "err", err)
 		return
 	}
 	s.log.Info("credrotate: adopted self-refreshed credentials before wipe",
-		"component", "credrotate", "provider", run.Provider, "run", runID)
+		"component", "credrotate", "provider", run.Provider, "run", runID,
+		"sig", cur, "baseline", run.CredSig, "mtime", mtime)
 	// Fan out to the OTHER live homes (the checked run is about to be wiped) and
 	// refresh lastMaster so the loop does not re-detect this as a fresh change.
 	others := s.otherLiveRuns(ctx, run.Provider, runID)
