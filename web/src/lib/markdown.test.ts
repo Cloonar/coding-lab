@@ -1,11 +1,14 @@
-// parseMarkdown/parseInline contract (issue #13): a hand-rolled, zero-dep
-// parser that emits a node tree the chat view maps to Solid JSX. Two guarantees
-// under test: (1) the supported constructs parse to the right shape, and (2)
-// the parser is TOTAL — every adversarial / partially-streamed input degrades
-// to visible text, never throws, never drops a character (decision 6).
+// parseMarkdown/parseInline contract (issues #13, #103): a hand-rolled,
+// zero-dep parser that emits a node tree the chat and issue views map to Solid
+// JSX. Two guarantees under test: (1) the supported constructs — including
+// `#N` refs and opt-in task-list items — parse to the right shape, and (2) the
+// parser is TOTAL — every adversarial / partially-streamed input degrades to
+// visible text, never throws, never drops a character (decision 6).
 
 import { describe, expect, it } from 'vitest';
 import { parseInline, parseMarkdown, type Block, type Inline } from './markdown';
+
+type List = Extract<Block, { type: 'list' }>;
 
 /** Concatenate every rendered character the tree would show (syntax aside). */
 function visibleText(blocks: Block[]): string {
@@ -18,6 +21,8 @@ function visibleText(blocks: Block[]): string {
             return n.value;
           case 'break':
             return '\n';
+          case 'ref':
+            return `#${n.number}`;
           case 'strong':
           case 'em':
           case 'link':
@@ -37,7 +42,16 @@ function visibleText(blocks: Block[]): string {
       case 'blockquote':
         return b.children.map(block).join('');
       case 'list':
-        return b.items.map((it) => it.map(block).join('')).join('');
+        // An ordered item shows its number and a task item its checkbox;
+        // render both as source markers.
+        return b.items
+          .map((it, k) => {
+            const num = b.ordered ? `${b.start + k}. ` : '';
+            const c = b.checked?.[k];
+            const box = c === true ? '[x] ' : c === false ? '[ ] ' : '';
+            return num + box + it.map(block).join('');
+          })
+          .join('');
       case 'table':
         return [b.header, ...b.rows].map((row) => row.map(inline).join('')).join('');
     }
@@ -191,6 +205,166 @@ describe('parseInline — spans', () => {
   });
 });
 
+describe('parseInline — issue references', () => {
+  const ref = (number: number): Inline => ({ type: 'ref', number });
+  const text = (value: string): Inline => ({ type: 'text', value });
+
+  it('parses #N as a ref node, at the start of the string and mid-prose', () => {
+    expect(parseInline('#5')).toEqual([ref(5)]);
+    expect(parseInline('see #5 now')).toEqual([text('see '), ref(5), text(' now')]);
+  });
+
+  it('accepts punctuation boundaries on either side', () => {
+    expect(parseInline('(#5)')).toEqual([text('('), ref(5), text(')')]);
+    expect(parseInline('#5.')).toEqual([ref(5), text('.')]);
+    expect(parseInline('#5, #6')).toEqual([ref(5), text(', '), ref(6)]);
+  });
+
+  it('takes the whole digit run (#70 is 70, never 7)', () => {
+    expect(parseInline('#70')).toEqual([ref(70)]);
+    expect(parseInline('#123456789')).toEqual([ref(123456789)]);
+  });
+
+  it('rejects a # preceded by a word char, underscore or slash', () => {
+    for (const src of ['foo#5', 'owner/repo#5', 'a_#5', '9#5']) {
+      expect(parseInline(src)).toEqual([text(src)]);
+    }
+  });
+
+  it('rejects a digit run that is not right-bounded', () => {
+    for (const src of ['#5a', '#5_', '#5x9']) {
+      expect(parseInline(src)).toEqual([text(src)]);
+    }
+  });
+
+  it('leaves leading-zero and over-long runs literal (text fidelity)', () => {
+    expect(parseInline('#05')).toEqual([text('#05')]);
+    expect(parseInline('#0')).toEqual([text('#0')]);
+    expect(parseInline('#1234567890')).toEqual([text('#1234567890')]);
+  });
+
+  it('keeps a lone # (and # before a non-digit) literal', () => {
+    expect(parseInline('#')).toEqual([text('#')]);
+    expect(parseInline('# x')).toEqual([text('# x')]);
+    expect(parseInline('#a')).toEqual([text('#a')]);
+  });
+
+  it('does not parse refs inside inline code or a fence', () => {
+    expect(parseInline('`#5`')).toEqual([{ type: 'code', value: '#5' }]);
+    expect(parseMarkdown('```\n#5\n```')).toEqual([{ type: 'code', lang: '', text: '#5' }]);
+  });
+
+  it('parses refs inside headings, list items and emphasis', () => {
+    expect(parseMarkdown('## See #5')).toEqual([
+      { type: 'heading', level: 2, children: [text('See '), ref(5)] },
+    ]);
+    // `#5 foo` has no space after `#`, so it is a paragraph, not a heading.
+    expect(parseMarkdown('#5 foo')).toEqual([
+      { type: 'paragraph', children: [ref(5), text(' foo')] },
+    ]);
+    expect(parseMarkdown('## Blocked by')[0]).toMatchObject({ type: 'heading', level: 2 });
+    const list = parseMarkdown('- #3')[0] as List;
+    expect(list.items[0]).toEqual([{ type: 'paragraph', children: [ref(3)] }]);
+    expect(parseInline('**#5**')).toEqual([{ type: 'strong', children: [ref(5)] }]);
+    expect(parseInline('*blocked by #7*')).toEqual([
+      { type: 'em', children: [text('blocked by '), ref(7)] },
+    ]);
+  });
+
+  it('degrades a ref inside a link label to text (no nested link)', () => {
+    const nodes = parseInline('[fixes #5](https://x.com)');
+    expect(nodes).toEqual([
+      {
+        type: 'link',
+        href: 'https://x.com',
+        children: [text('fixes '), text('#5')],
+      },
+    ]);
+    // ... including one nested in emphasis inside the label.
+    const em = parseInline('[*#5*](https://x.com)')[0] as Extract<Inline, { type: 'link' }>;
+    expect(em.children).toEqual([{ type: 'em', children: [text('#5')] }]);
+  });
+});
+
+describe('parseMarkdown — task lists', () => {
+  const tasks = { taskLists: true };
+  const para = (value: string): Block => ({
+    type: 'paragraph',
+    children: [{ type: 'text', value }],
+  });
+
+  it('recognises [ ], [x] and [X] items and strips the marker', () => {
+    const list = parseMarkdown('- [ ] a\n- [x] b\n- [X] c', tasks)[0] as List;
+    expect(list).toEqual({
+      type: 'list',
+      ordered: false,
+      start: 1,
+      items: [[para('a')], [para('b')], [para('c')]],
+      checked: [false, true, true],
+    });
+  });
+
+  it('records null for a plain item in a mixed list', () => {
+    const list = parseMarkdown('- [x] done\n- plain\n- [ ] todo', tasks)[0] as List;
+    expect(list.checked).toEqual([true, null, false]);
+    expect(list.items[1]).toEqual([para('plain')]);
+  });
+
+  it('accepts an empty task item ([ ] at end of line)', () => {
+    const list = parseMarkdown('- [ ]\n- [x] b', tasks)[0] as List;
+    expect(list.checked).toEqual([false, true]);
+    expect(list.items[0]).toEqual([]);
+  });
+
+  it('supports ordered task items', () => {
+    const list = parseMarkdown('1. [x] first\n2. [ ] second', tasks)[0] as List;
+    expect(list.ordered).toBe(true);
+    expect(list.checked).toEqual([true, false]);
+    expect(list.items[0]).toEqual([para('first')]);
+  });
+
+  it('threads the option into nested lists and blockquotes', () => {
+    const list = parseMarkdown('- [ ] outer\n  - [x] inner\n  - plain', tasks)[0] as List;
+    expect(list.checked).toEqual([false]);
+    const inner = list.items[0]![1] as List;
+    expect(inner.type).toBe('list');
+    expect(inner.checked).toEqual([true, null]);
+    expect(inner.items[0]).toEqual([para('inner')]);
+
+    const bq = parseMarkdown('> - [x] quoted', tasks)[0] as Extract<Block, { type: 'blockquote' }>;
+    expect((bq.children[0] as List).checked).toEqual([true]);
+  });
+
+  it('does not treat near-miss markers as tasks', () => {
+    for (const src of ['- []', '- [ x]', '- [xx]', '- [x]foo', '- [y] no']) {
+      const list = parseMarkdown(src, tasks)[0] as List;
+      expect(list).not.toHaveProperty('checked');
+      expect(visibleText([list])).toBe(src.slice(2));
+    }
+  });
+
+  it('omits checked for a list with no task items', () => {
+    expect(parseMarkdown('- a\n- b', tasks)[0]).not.toHaveProperty('checked');
+  });
+
+  it('keeps refs working inside a task item', () => {
+    const list = parseMarkdown('- [x] #3', tasks)[0] as List;
+    expect(list.checked).toEqual([true]);
+    expect(list.items[0]).toEqual([{ type: 'paragraph', children: [{ type: 'ref', number: 3 }] }]);
+  });
+
+  it('with task lists OFF (the default) leaves the tree untouched', () => {
+    const src = '- [ ] a\n- [x] b\n  - [X] c';
+    const off = parseMarkdown(src);
+    expect(off).toEqual(parseMarkdown(src, {}));
+    const list = off[0] as List;
+    expect(list).not.toHaveProperty('checked');
+    expect((list.items[1]![1] as List).checked).toBeUndefined();
+    expect(list.items[0]).toEqual([para('[ ] a')]);
+    expect(visibleText(off)).toBe('[ ] a[x] b[X] c');
+  });
+});
+
 describe('robustness — partial / malformed input degrades to visible text', () => {
   const cases: string[] = [
     '**bold with no close',
@@ -214,6 +388,49 @@ describe('robustness — partial / malformed input degrades to visible text', ()
     it(`never throws on: ${JSON.stringify(src)}`, () => {
       expect(() => parseMarkdown(src)).not.toThrow();
     });
+  }
+
+  // Ref and task-list syntax, under both option sets: never throws and every
+  // alphanumeric character reaches the reader (a ref shows as `#N`, a task
+  // item's box as its source marker — case-folded, since `[X]` shows as
+  // checked like `[x]`; a link's href is not visible text, so it is cut from
+  // the expectation).
+  const refTaskCases: string[] = [
+    '#',
+    '#12',
+    'a#1',
+    '#0',
+    '#007',
+    '#99999999999',
+    '##5',
+    '#5#6',
+    'x/#5 y_#6 (#7)',
+    '[ ]',
+    '[x]',
+    '- [ ]',
+    '- [x]',
+    '- [ ] ',
+    '- [x] #3',
+    '- [X] **#4** `#5`',
+    '1. [ ] a\n2) [x] b',
+    '- [ ] outer\n  - [x] inner #8\n    - [ ] deeper',
+    '> - [x] quoted #9',
+    '- [x\n- [',
+    '[see #5](https://x.com) #6',
+    '| #1 | [x] |\n|---|---|\n| a#2 | #3 |',
+  ];
+  const keepFolded = (s: string) => s.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+  for (const opts of [{}, { taskLists: true }]) {
+    for (const src of refTaskCases) {
+      it(`never throws, drops nothing on ${JSON.stringify(src)} with ${JSON.stringify(opts)}`, () => {
+        let blocks: Block[] = [];
+        expect(() => {
+          blocks = parseMarkdown(src, opts);
+        }).not.toThrow();
+        const shown = keepFolded(visibleText(blocks));
+        expect(shown).toBe(keepFolded(src.replace(/\]\(https:\/\/x\.com\)/, '')));
+      });
+    }
   }
 
   it('drops no alphanumeric characters for a fully-adversarial blob', () => {

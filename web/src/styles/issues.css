@@ -123,10 +123,67 @@ button.chip-toggle.on {
   color: var(--idle-text);
 }
 
+/* The "No description." fallback; a non-empty body renders as `.issue-md`. */
 .issue-body {
   margin: 0.25rem 0 0;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Rendered issue markdown (issue #103) — body, comments and the Write/Preview
+   pane. The shared .md-* rules (markdown.css) carry the chat's look; only the
+   scale differs here: headings sit UNDER the page title (the SectionHead h2
+   stays the largest element), prose reads at a comfortable measure. */
+.md.issue-md {
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+}
+.issue-md .md-p {
+  line-height: 1.6;
+  max-width: 72ch;
+}
+.issue-md .md-h {
+  margin: 0.55rem 0 0;
+}
+.issue-md > .md-h:first-child {
+  margin-top: 0;
+}
+.issue-md h1.md-h {
+  font-size: 1.2rem;
+}
+.issue-md h2.md-h {
+  font-size: 1.08rem;
+}
+.issue-md h3.md-h {
+  font-size: 1rem;
+}
+.issue-md h4.md-h,
+.issue-md h5.md-h,
+.issue-md h6.md-h {
+  font-size: 0.95rem;
+}
+.issue-md .md-list {
+  gap: 0.3rem;
+  max-width: 72ch;
+}
+.issue-md .md-list li {
+  line-height: 1.55;
+}
+
+/* Body card footer: label chips left, Copy markdown right (always visible —
+   mobile has no hover); wraps under the chips on a narrow phone. */
+.body-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+}
+.body-foot .chip-row {
+  margin-top: 0;
+}
+.body-foot .copy-btn {
+  min-height: 36px;
 }
 
 .comment-list {
@@ -143,20 +200,112 @@ button.chip-toggle.on {
 }
 
 .comment-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
   margin: 0 0 0.25rem;
   font-size: 0.82rem;
 }
 
-.comment-body {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+/* Marks a comment opening with an `Agent Brief` heading (ADR-0070). */
+.brief-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 0.45rem;
+  border-radius: 4px;
+  background: var(--run-bg);
+  color: var(--run-text);
+  font-size: 0.7rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.issue-md.comment-body {
+  margin-top: 0;
 }
 
 .comment-form {
   margin-top: 0.8rem;
   border-top: 1px solid var(--border);
   padding-top: 0.8rem;
+}
+
+/* Write / Preview (components/WritePreview, issue #103): the one tab control
+   of the title/body editor and the comment form. Two-class selectors so the
+   global `button` and `.field` rules never restyle its parts. */
+.write-preview {
+  margin-bottom: 0.9rem;
+}
+.write-preview .write-preview-label {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.write-preview .write-preview-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.write-preview-tabs button[role='tab'] {
+  min-height: 36px;
+  padding: 0 0.8rem;
+  margin-bottom: -1px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.write-preview-tabs button[role='tab']:hover {
+  color: var(--text);
+}
+.write-preview-tabs button[role='tab'][aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.write-preview .write-preview-hint {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.write-preview textarea {
+  display: block;
+  width: 100%;
+  min-height: 7rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+.write-preview .preview-pane {
+  min-height: 7rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  overflow-wrap: anywhere;
+}
+.write-preview.issue-editor textarea,
+.write-preview.issue-editor .preview-pane {
+  min-height: 220px;
+}
+.preview-empty {
+  margin: 0;
+}
+.preview-pane > .issue-md {
+  margin-top: 0;
 }
 
 button.small {

@@ -1,4 +1,5 @@
-/* --- Markdown rendering in chat messages (issue #13) --------------------- */
+/* --- Markdown rendering: chat messages (issue #13) and the issue view
+   (issue #103) share these .md-* rules ------------------------------------ */
 
 /* The rendered markdown body: block flow with comfortable spacing. Wide
    elements (tables, code fences) get their OWN horizontal scroll so the
@@ -56,6 +57,35 @@ h6.md-h {
 .md-list .md-list {
   margin-top: 0.25rem;
 }
+/* GFM task list (issue #103; the issue view parses with task lists on). Only
+   task items drop the bullet, so a mixed list keeps its plain items' bullets. */
+.md-task-item {
+  list-style: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+.md-task-item > input[type='checkbox'] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0.33rem 0 0;
+  accent-color: var(--accent);
+}
+.md-task-item.done {
+  color: var(--muted);
+}
+.md-task-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* An all-task list needs no bullet gutter. */
+.md-list.md-task:not(:has(> li:not(.md-task-item))) {
+  padding-left: 0;
+}
 .md-quote {
   margin: 0;
   padding: 0.1rem 0 0.1rem 0.75rem;
@@ -74,6 +104,21 @@ h6.md-h {
 }
 .role-user .md-link {
   color: inherit;
+  text-decoration: underline;
+}
+/* Issue reference `#N` (issue #103) — linked only when the caller resolves it;
+   an unresolved ref (the chat) is plain text and never gets this class. */
+.md-ref {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 550;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  padding: 0 0.2rem;
+  border-radius: 4px;
+  background: var(--chip-bg);
+}
+.md-ref:hover {
   text-decoration: underline;
 }
 /* Inline code — distinct from a fenced block; wraps rather than overflows. */
