@@ -310,7 +310,9 @@ func (f *fakeForge) EnsureLabel(context.Context, string, string, string) (tracke
 // newAgentFixture seeds one repo (binding + resolver as given), one issue
 // (#1, with an operator comment and the ready-for-agent label), one active
 // AFK run claiming it, and that run's token.
-func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerResolver) *agentFixture {
+// opts configure the agentapi Server before its handler is built (the
+// expose tests wire a preview registry through SetPreviews).
+func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerResolver, opts ...func(*agentapi.Server)) *agentFixture {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "lab.db")
@@ -382,7 +384,11 @@ func newAgentFixture(t *testing.T, binding string, resolver agentapi.TrackerReso
 	}
 
 	vlt := newTestVault(t)
-	handler := agentapi.New(st, vlt, resolver, nil, nil, func() time.Time { return fixedNow }, nil).Handler()
+	srv := agentapi.New(st, vlt, resolver, nil, nil, func() time.Time { return fixedNow }, nil)
+	for _, o := range opts {
+		o(srv)
+	}
+	handler := srv.Handler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

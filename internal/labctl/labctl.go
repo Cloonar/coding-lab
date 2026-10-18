@@ -14,8 +14,10 @@
 // that fails to start is 1. The `secret scan` verb deviates as well (see
 // runSecretScan): it backs the pre-push leak guard and fails CLOSED — findings
 // AND every failure (git, transport, non-2xx) exit 1; only no rev-args or
-// missing env is 2; a clean pass is a silent 0. No color, no spinner — output
-// is for agents.
+// missing env is 2; a clean pass is a silent 0. The `expose` verb keeps the
+// convention but runs in the foreground (see expose.go): 0 once stopped or
+// signalled, 1 when lab refuses or ends the exposure. No color, no spinner —
+// output is for agents.
 package labctl
 
 import (
@@ -23,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +72,11 @@ Usage:
                                         child output is redacted — injected values appear as [REDACTED:NAME]
   labctl secret scan <rev-arg>...       scan the outgoing diff (git log -p over the given revisions)
                                         for secret values; findings or ANY failure exit 1 (fail closed)
+  labctl expose <name> <port>           serve 127.0.0.1:<port> in the run at the preview URL printed as
+                                        the first stdout line; stays in the foreground (run it in the
+                                        background), reconnects on a dropped connection; exits 0 when
+                                        stopped or on SIGINT/SIGTERM, 1 when lab ends it or refuses
+  labctl expose stop <name>             end the exposure called name and release the name
   labctl --version                      print version
 
 Environment:
@@ -82,6 +90,9 @@ type Env struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Version string
+	// Signals, when non-nil, replaces `expose`'s SIGINT/SIGTERM subscription
+	// (tests send on it); nil subscribes to the process's real signals.
+	Signals <-chan os.Signal
 }
 
 // Run executes one labctl invocation and returns the process exit code:
@@ -107,6 +118,8 @@ func Run(args []string, env Env) int {
 		return runPR(args[1:], env)
 	case "secret":
 		return runSecret(args[1:], env)
+	case "expose":
+		return runExpose(args[1:], env)
 	default:
 		_, _ = fmt.Fprintf(env.Stderr, "labctl: unknown command %q\n\n%s", args[0], usage)
 		return 2
@@ -897,17 +910,27 @@ func availableContexts(available []string) string {
 // environment is a configuration error (exit 2, with usage); an fn error is
 // an API/HTTP failure (message to stderr, exit 1).
 func withClient(env Env, cmd string, fn func(*Client) error) int {
-	baseURL := env.Getenv("LAB_URL")
-	token := env.Getenv("LAB_TOKEN")
-	if baseURL == "" || token == "" {
-		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: LAB_URL and LAB_TOKEN must be set\n\n%s", cmd, usage)
-		return 2
+	c, code := clientFromEnv(env, cmd)
+	if c == nil {
+		return code
 	}
-	if err := fn(&Client{BaseURL: baseURL, Token: token}); err != nil {
+	if err := fn(c); err != nil {
 		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: %v\n", cmd, err)
 		return 1
 	}
 	return 0
+}
+
+// clientFromEnv builds the Client from LAB_URL/LAB_TOKEN, or prints the
+// missing-env usage error and returns (nil, 2).
+func clientFromEnv(env Env, cmd string) (*Client, int) {
+	baseURL := env.Getenv("LAB_URL")
+	token := env.Getenv("LAB_TOKEN")
+	if baseURL == "" || token == "" {
+		_, _ = fmt.Fprintf(env.Stderr, "labctl %s: LAB_URL and LAB_TOKEN must be set\n\n%s", cmd, usage)
+		return nil, 2
+	}
+	return &Client{BaseURL: baseURL, Token: token}, 0
 }
 
 // mergeHeadField renders the fourth, tab-separated field of the `pr merge`
