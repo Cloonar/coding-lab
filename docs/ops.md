@@ -44,8 +44,11 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `warpgate.adminTokenFile` | `null` | Passed as `--warpgate-admin-token-file`. File holding Warpgate's admin token — 0600 or stricter (startup refuses otherwise); never auto-generated, the token is minted when you deploy Warpgate. |
 | `warpgate.sshAddr` | `null` | Passed as `--warpgate-ssh-addr`. `host:port` runs dial for Warpgate's SSH listener — usually a container-reachable address such as `"10.88.0.1:2222"`, not loopback. Independent of the other `warpgate.*` options. |
 | `warpgate.caFile` | `null` | Passed as `--warpgate-ca-file`. PEM file lab trusts — exclusively — for the admin API: Warpgate's generated self-signed certificate. `null` uses the system roots. |
-| `preview.listenAddr` | `null` | Passed as `--preview-addr`. Listen address of the [preview listener](#previews), e.g. `":8081"`. `null` keeps previews off: nothing listens and `labctl expose` refuses. Plain HTTP with no authentication — bind it to an interface you trust. |
-| `preview.domain` | `"lab.internal"` | Passed as `--preview-domain`, only together with `preview.listenAddr`. Parent domain previews are served under (`http://<name>.<domain>`); you provide the wildcard DNS record. |
+| `preview.enable` | `false` | Turns [previews](#previews) on. `false` keeps them off: nothing listens, `labctl expose` refuses, and the unit carries no `--preview-*` flag. Setting any other `preview.*` option while this is `false` fails eval (it used to be that a non-null `preview.listenAddr` was the switch — [migrating](#turning-previews-on)). With a port below 1024 in play, the unit gets `AmbientCapabilities=CAP_NET_BIND_SERVICE`. |
+| `preview.listenAddr` | `":443"` | Passed as `--preview-addr`, only while `preview.enable` is on. Listen address of the HTTPS [preview listener](#previews); lab terminates TLS on it itself. No authentication — bind it to an interface you trust. |
+| `preview.redirectAddr` | `":80"` | Passed as `--preview-redirect-addr`, only while `preview.enable` is on. Plain-HTTP listener that only 308-redirects to HTTPS ([The redirect listener](#the-redirect-listener)). `null` disables it. |
+| `preview.domain` | `"lab.internal"` | Passed as `--preview-domain`, only while `preview.enable` is on. Parent domain previews are served under (`https://<name>.<domain>`); you provide the wildcard DNS record. Changing it makes lab re-mint its own leaf certificate. |
+| `preview.certFile` / `preview.keyFile` | `null` | Passed as `--preview-cert-file` / `--preview-key-file`, only while `preview.enable` is on. Your own PEM certificate and key for the preview listener (for example an ACME wildcard), runtime paths the lab user can read. Set both or neither (eval fails otherwise). Both `null` = lab mints its own CA and leaf ([TLS](#tls)). |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps the sqlite default **and** lets `LAB_DB` from `environmentFile` take effect (flag > env > default). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (e.g. `LAB_DB` with a password-bearing DSN). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. Auto-generated 0600 when absent; loose permissions or malformed content refuse startup. |
@@ -58,7 +61,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `proxyAuth.enable` | `false` | Trust a reverse-proxy auth header as the authenticated username — only from `trustedProxies` peers (asserted non-empty). |
 | `proxyAuth.header` | `"Remote-User"` | Passed as `--proxy-auth-header`. |
 | `proxyAuth.trustedProxies` | `[ ]` | CIDRs, passed as `--trusted-proxies` whenever non-empty — also without `proxyAuth.enable` (gates `X-Forwarded-Proto` trust for Secure cookies behind TLS proxies). |
-| `openFirewall` | `false` | Open the firewall for `listenAddr`'s port and, when previews are on, `preview.listenAddr`'s port. |
+| `openFirewall` | `false` | Open the firewall for `listenAddr`'s port and, while `preview.enable` is on, the ports of `preview.listenAddr` and `preview.redirectAddr` (unless `null`). |
 | `extraFlags` | `[ ]` | Extra flags appended to `ExecStart`; rendered after the container flags, so a hand-rolled container flag here wins during a migration. |
 | `container.enable` | `true` | Master switch for container-runner host provisioning ([Container runner](#container-runner)): rootless podman + passt on the unit PATH, lingering for the service user, subuid/subgid ranges. **On by default** (ADR-0054) — enabling lab makes the host container-ready. Set `false` for a host-only deployment (the unit reverts to the byte-identical pre-container output). Forcing `virtualisation.podman.enable = false` while this is on conflicts at eval. |
 | `container.toolsImageRepo` | `"ghcr.io/cloonar/agent-tools"` | OCI repository the default `toolsImages` refs point into; pulled **anonymously** (the package must stay publicly readable — [Agent-tools images](#agent-tools-images)). |
@@ -217,8 +220,11 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--warpgate-admin-token-file` | `LAB_WARPGATE_ADMIN_TOKEN_FILE` | (empty) | File with Warpgate's admin token, 0600 or stricter, one line. Never auto-generated; read at startup. |
 | `--warpgate-ssh-addr` | `LAB_WARPGATE_SSH_ADDR` | (empty) | `host:port` runs dial for Warpgate's SSH listener, e.g. `10.88.0.1:2222` — a container-reachable address, independent of `--warpgate-url`. |
 | `--warpgate-ca-file` | `LAB_WARPGATE_CA_FILE` | (empty) | PEM file lab trusts — and only it — for the admin API, e.g. Warpgate's generated `tls.certificate.pem`. Unset = the system roots. |
-| `--preview-addr` | `LAB_PREVIEW_ADDR` | (empty) | Listen address of the [preview listener](#previews), `host:port` with a port in 1–65535, e.g. `:8081`. Unset = previews off: nothing listens and `labctl expose` refuses. Plain HTTP, no authentication. |
-| `--preview-domain` | `LAB_PREVIEW_DOMAIN` | `lab.internal` | Parent domain previews are served under, `<name>.<domain>`. Lowercase dot-separated DNS labels, no trailing dot; checked at boot even while previews are off. Needs a wildcard DNS record you provide. |
+| `--preview-addr` | `LAB_PREVIEW_ADDR` | (empty) | Listen address of the HTTPS [preview listener](#previews), `host:port` with a port in 1–65535, e.g. `:443` or `:8443`. Unset = previews off: nothing listens and `labctl expose` refuses. Lab terminates TLS on it ([TLS](#tls)); no authentication. Binding a port below 1024 needs `CAP_NET_BIND_SERVICE` ([Turning previews on](#turning-previews-on)). |
+| `--preview-redirect-addr` | `LAB_PREVIEW_REDIRECT_ADDR` | (empty) | Listen address of a plain-HTTP listener that only 308-redirects to the preview listener, e.g. `:80` ([The redirect listener](#the-redirect-listener)). Unset = none. Requires `--preview-addr`, and must differ from it. |
+| `--preview-cert-file` | `LAB_PREVIEW_CERT_FILE` | (empty) | PEM certificate (chain) the preview listener serves, e.g. an ACME wildcard for `*.<preview-domain>`. Must be set together with `--preview-key-file` (startup refuses one without the other) and needs `--preview-addr`. Both unset = lab mints its own CA and wildcard leaf ([TLS](#tls)). Re-read when the file changes. |
+| `--preview-key-file` | `LAB_PREVIEW_KEY_FILE` | (empty) | PEM private key for `--preview-cert-file`; see there. |
+| `--preview-domain` | `LAB_PREVIEW_DOMAIN` | `lab.internal` | Parent domain previews are served under, `<name>.<domain>`. Lowercase dot-separated DNS labels, no trailing dot; checked at boot even while previews are off. Needs a wildcard DNS record you provide. A changed domain makes lab re-mint its own leaf certificate. |
 
 Per-provider host settings resolve per provider entry, highest wins: **generic flag > generic env > alias flag > alias env** (ADR-0034).
 
@@ -918,31 +924,39 @@ Reading the failures:
 
 ## Previews
 
-A preview lets you open what an agent is serving — a Vite or Next dev server, a built docs site, a Storybook — in your own browser. The agent runs `labctl expose web 5173 &` in its run. labctl opens a tunnel from the run to lab over the agent API, and lab serves that port at `http://web.lab.internal:8081` on a separate **preview listener**. This works the same for `host` and `container` runs: the run connects out to lab the way labctl always does, so no port is published and nothing about the run's network changes. Each preview has its own hostname, so two previews never share cookies or storage with each other or with lab.
+A preview lets you open what an agent is serving — a Vite or Next dev server, a built docs site, a Storybook — in your own browser. The agent runs `labctl expose web 5173 &` in its run. labctl opens a tunnel from the run to lab over the agent API, and lab serves that port at `https://web.lab.internal` on a separate **preview listener**. This works the same for `host` and `container` runs: the run connects out to lab the way labctl always does, so no port is published and nothing about the run's network changes. Each preview has its own hostname, so two previews never share cookies or storage with each other or with lab.
 
-Previews are off until you turn them on. The listener is **plain HTTP with no authentication**: anyone who can reach it can open every live preview ([ADR-0084](adr/0084-previews-reverse-tunnel.md)).
+Previews are off until you turn them on. Lab terminates TLS on the preview listener itself, so previews are real HTTPS origins (service workers, secure cookies and `crypto.subtle` work); [TLS](#tls) covers the certificate and trusting it on your devices. The listener has **no authentication**: anyone who can reach it can open every live preview ([ADR-0084](adr/0084-previews-reverse-tunnel.md), [ADR-0085](adr/0085-preview-tls-front-door.md)).
 
 ### Turning previews on
 
-1. **Pick a listen address** and pass it to lab:
-
-    ```sh
-    lab ... --preview-addr :8081                      # or LAB_PREVIEW_ADDR=:8081
-    lab ... --preview-addr 10.0.0.15:8081             # bind one trusted interface only
-    lab ... --preview-domain previews.example.internal  # optional; default lab.internal
-    ```
-
-    On NixOS:
+1. **Switch previews on.** On NixOS one option does it, with the clean defaults — HTTPS on `:443`, a plain-HTTP redirect on `:80`, domain `lab.internal`:
 
     ```nix
-    services.lab.preview = {
-      listenAddr = "10.0.0.15:8081";   # null (the default) = previews off
-      # domain = "lab.internal";       # the default
-    };
-    services.lab.openFirewall = true;  # also opens the preview port
+    services.lab.preview.enable = true;
+    services.lab.openFirewall = true;  # also opens 443 and 80
+    # services.lab.preview = {
+    #   listenAddr = ":443";           # the default; ":8443" to keep 443 free
+    #   redirectAddr = ":80";          # the default; null = no redirect listener
+    #   domain = "lab.internal";       # the default
+    #   certFile = null; keyFile = null;  # your own certificate, see "TLS" below
+    # };
     ```
 
-    Bind the listener to an interface only trusted devices reach: a LAN or VPN address, not a public one. `--preview-addr` must be `host:port` with a port in 1–65535; `--preview-domain` must be lowercase dot-separated DNS labels with no trailing dot. Lab checks the domain at startup even while previews are off, so a typo fails the boot rather than the day you enable them.
+    Without the module, pass the flags (or the matching `LAB_PREVIEW_*` env vars):
+
+    ```sh
+    lab ... --preview-addr :443 --preview-redirect-addr :80   # LAB_PREVIEW_ADDR, LAB_PREVIEW_REDIRECT_ADDR
+    lab ... --preview-addr 10.0.0.15:8443                     # one trusted interface, no redirect
+    lab ... --preview-domain previews.example.internal        # optional; default lab.internal
+    lab ... --preview-cert-file F --preview-key-file K        # optional: your own certificate
+    ```
+
+    Bind the listener to an interface only trusted devices reach: a LAN or VPN address, not a public one. `--preview-addr` and `--preview-redirect-addr` must be `host:port` with a port in 1–65535 and must differ; `--preview-domain` must be lowercase dot-separated DNS labels with no trailing dot. Lab checks the domain at startup even while previews are off, so a typo fails the boot rather than the day you enable them. `--preview-redirect-addr`, `--preview-cert-file` and `--preview-key-file` are errors without `--preview-addr`, and the cert and key flags must be given together.
+
+    **Ports below 1024.** Binding `:443` or `:80` as the unprivileged lab user needs `CAP_NET_BIND_SERVICE`. The NixOS module adds `AmbientCapabilities=CAP_NET_BIND_SERVICE` to the unit whenever either configured port is below 1024, and adds nothing for higher ports. Lab drops the capability again as soon as the listeners are bound, so the tmux server and the agent sessions it starts never inherit it. Outside the module, grant the capability in your unit the same way, or use ports of 1024 and up (for example `:8443`) and the URLs carry the port. The module adds no `CapabilityBoundingSet` on purpose: rootless podman's setuid `newuidmap`/`newgidmap` helpers need capabilities a bounding set would strip.
+
+    **Migrating from `listenAddr` as the switch.** Before HTTPS, setting `services.lab.preview.listenAddr` turned previews on. Now `services.lab.preview.enable` is the switch, and setting any other `services.lab.preview.*` option while `enable` is `false` fails evaluation with a message naming the option. To migrate, add `enable = true`. A `listenAddr` of `":8081"` still works, but it is now HTTPS, so existing `http://…:8081` URLs and bookmarks stop working; also set `redirectAddr = null` if you do not want the new default redirect on `:80`, or drop `listenAddr` to take the `:443` default.
 
 2. **Add a wildcard DNS record** for every name under the preview domain, pointing at the lab host. Lab cannot do this for you, and without it the URLs an agent prints resolve nowhere. With dnsmasq it is one line, the same shape as a `*.ddev.site` wildcard for ddev projects:
 
@@ -958,14 +972,18 @@ Previews are off until you turn them on. The listener is **plain HTTP with no au
 
     A client that reaches that DNS server only over a VPN with split DNS (systemd-resolved, NetworkManager) also needs `~lab.internal` as a routing domain on the VPN link, the way `~ddev.site` is routed. Don't use `.local` as the preview domain: Apple devices resolve `.local` by mDNS first, and systemd-resolved never sends it to unicast DNS, so the wildcard would not be consulted. The default `lab.internal` sits under `.internal`, the TLD reserved for private use.
 
-3. **Restart lab.** New runs get a `## Previews` section in their worktree notes (`CLAUDE.local.md`) telling the agent how to expose a port. A run already live when you enabled previews can still use `labctl expose`; its notes just don't mention it.
+3. **Restart lab.** New runs get a `## Previews` section in their worktree notes (`CLAUDE.local.md`) telling the agent how to expose a port. A run already live when you enabled previews can still use `labctl expose`; its notes just don't mention it. On the first start with no certificate of your own, lab mints its CA and leaf (below).
 
-The printed URL is `http://<name>.<domain>`, with the listener's port appended unless it is 80.
+4. **Trust lab's CA on your devices** — once per device, from **Settings → Previews** ([TLS](#tls)). Until a device trusts it, its browser warns on every preview. Skip this if you bring a publicly trusted certificate of your own.
+
+The printed URL is `https://<name>.<domain>`, with the listener's port appended unless it is 443. labctl and the UI both print it that way.
+
+**Check it.** `GET /api/v1/preview` (with your session or a `lab_pat_…` token) is the previews' status. It always answers 200: `{"enabled": false}` while previews are off, otherwise the domain, the listener port, whether the redirect listener is on, and the certificate (`source` `lab-ca` or `operator`, `not_after`, `dns_names`, and an `error` when the last renewal or reload failed). **Settings → Previews** shows the same. At startup lab logs which certificate source is active and when the leaf expires.
 
 ### What the agent does
 
 ```sh
-labctl expose web 5173 &      # prints http://web.lab.internal:8081 as its first line, then keeps forwarding
+labctl expose web 5173 &      # prints https://web.lab.internal as its first line, then keeps forwarding
 labctl expose stop web        # ends the exposure and frees the name
 ```
 
@@ -1010,11 +1028,113 @@ When the preview listener cannot serve a request, it answers with a short page t
 - **A dropped connection** keeps the name held; the preview answers 503 while labctl reconnects on its own, retrying with backoff.
 - **A lab restart** drops every tunnel, but the runs survive it. Lab keeps no record of exposures across a restart, so each preview answers 404 until its labctl reconnects and re-registers, and then works again with no agent action. labctl gives up, exiting 1, only when lab answers that the run or the name is gone.
 
-### Security and TLS
+### Security
 
 - **There is no authentication on the preview listener.** Reachable means allowed: anyone who can reach `--preview-addr` and resolve the names can open every live preview, with no login. A preview is whatever the agent happens to be running. Bind the listener to a trusted interface, and serve the wildcard DNS name only on the network that should see previews. A host run shares the host's network, so it can reach the preview listener too, including other runs' previews.
-- **Plain HTTP only.** Lab terminates no TLS on the preview listener; HTTPS previews are a planned follow-up. Until then, browser features that require a secure context (service workers, `crypto.subtle`, clipboard writes) don't work on a preview page.
-- Upstream, the dev server sees the browser's own `Host` header plus `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto: http`.
+- TLS protects the connection, not access: it stops eavesdropping and gives the page a secure context, but anyone who reaches the listener still gets in. The CA download is the exception: it is behind lab's own login and is never served from the preview or redirect listener ([TLS](#tls)).
+- Upstream, the dev server sees the browser's own `Host` header plus `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto: https`.
+
+### TLS
+
+The preview listener serves `https://<name>.<domain>` with one of two certificate sources. Lab picks by configuration, in this order:
+
+1. **Your own certificate**, when both `--preview-cert-file` and `--preview-key-file` are set (NixOS: `preview.certFile` and `preview.keyFile`). Lab serves that PEM pair; the certificate file may carry the chain. Setting only one of the two refuses startup with a message naming both flags. If the certificate does not cover `*.<domain>`, lab starts anyway and logs a warning.
+2. **Lab's own CA**, when neither is set. Lab mints a private certificate authority and, under it, a wildcard certificate for `*.<domain>` and `<domain>`. You trust the CA once per device; nothing else to configure.
+
+Settings → Previews and `GET /api/v1/preview` report which source is active and when the served certificate expires.
+
+#### Lab-minted CA
+
+The files live in `<state>/preview/` (the directory is `0700`):
+
+| File | Holds | Mode |
+| --- | --- | --- |
+| `ca.crt` | the CA certificate — the file you download and trust | `0644` |
+| `ca.key` | the CA's private key | `0600` |
+| `leaf.crt` | the wildcard certificate lab serves | `0644` |
+| `leaf.key` | the wildcard certificate's key | `0600` |
+
+- **Lifetimes.** The CA is valid for 10 years, the wildcard leaf for 1 year. Both use P-256 keys.
+- **Renewal.** Lab re-mints the leaf when it has under 30 days left. It checks at every startup and once a day while running, and a renewed leaf is served on the next connection with no restart. The CA is never re-minted: it is reused, so devices that trust it keep trusting.
+- **A changed domain.** If `--preview-domain` changes, the stored leaf no longer covers the domain, so lab mints a new leaf at startup (CA reused, no re-trust).
+- **Restarts** with the same domain reuse all four files.
+- **Damaged CA files.** Lab never replaces a CA behind your back, because devices may already trust it. If only one of `ca.crt` and `ca.key` exists, or they do not parse, do not match, are not a CA or have expired, lab refuses to start and the error names the files. To get a new CA, delete **both** `ca.crt` and `ca.key` (a lone surviving file counts too) and restart. **You then have to trust the new CA on every device again**, and the old one can be removed from them. A damaged `leaf.crt` or `leaf.key` is not an error: lab mints a fresh leaf.
+- **Backup.** `ca.crt` and `ca.key` are worth including in your backups ([Backup & restore](#backup-restore)). Without them a restored lab mints a new CA, and every device needs the trust step again. The leaf is disposable.
+
+#### Trusting the CA on a device
+
+Do this once per device. Open **Settings → Previews** on lab (over your normal, already-trusted lab URL) and use **Download CA certificate**. The file is `lab-preview-ca.crt`. It is only available to a logged-in operator, and only while lab uses its own CA.
+
+- **iPhone / iPad.** Open Settings → Previews in **Safari** and tap Download CA certificate; Safari asks whether to allow a configuration profile download — allow it. Then open **Settings › General › VPN & Device Management**, tap the downloaded profile and **Install** it. Installing is not enough: go to **Settings › General › About › Certificate Trust Settings** and switch on full trust for the lab preview CA. Without that last step Safari still warns.
+- **macOS.** Download the file, open it (Keychain Access opens), and add it to the **login** keychain. Find it under Certificates, open it, expand **Trust**, and set *When using this certificate* to **Always Trust**.
+- **Linux.** On Debian/Ubuntu, copy the file to `/usr/local/share/ca-certificates/lab-preview-ca.crt` and run `sudo update-ca-certificates`. On NixOS, add it to the system store:
+
+    ```nix
+    security.pki.certificateFiles = [ ./lab-preview-ca.crt ];
+    ```
+
+    curl and most Linux tools use the system store; Chrome uses the NSS database (chrome://settings/certificates → Authorities → Import). **Firefox has its own store**: import the file under Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import, and tick "Trust this CA to identify websites".
+- **Other tools.** Node and many CLIs ignore the system store: point them at the file with `NODE_EXTRA_CA_CERTS=/path/to/lab-preview-ca.crt` or `curl --cacert`.
+
+Why this works on Apple devices, and what it relies on: iOS only offers full trust for a certificate that is itself a CA (`basicConstraints` CA:true), which is why lab mints a CA and not a self-signed server certificate; and Apple rejects a TLS server certificate valid for more than 825 days even when its root is user-trusted, which is why the leaf is valid for 1 year. These limits were checked against Apple's documentation for the iOS 18 / macOS 15 era: [Requirements for trusted certificates in iOS 13 and macOS 10.15](https://support.apple.com/en-us/HT210176) (HT210176) and [Trust manually installed certificate profiles in iOS](https://support.apple.com/en-us/HT204477) (HT204477). Apple revises these rules; if a future OS version stops trusting previews after a clean install, re-check those pages first.
+
+#### Your own certificate
+
+With `--preview-cert-file` and `--preview-key-file`, lab serves your pair and does not mint or touch anything under `<state>/preview/`. Settings → Previews hides the CA download, and `GET /api/v1/preview/ca` answers 404.
+
+- **Reload.** Lab checks the two files about once a minute and re-reads the pair when either one's modification time changed, so an ACME renewal that rewrites the files in place is picked up without a restart. The new certificate is served on the next connection.
+- **A bad reload is not fatal.** If the new files do not parse, do not match each other or are half-written, lab keeps serving the previous pair, logs the problem, and shows it as `cert.error` in `GET /api/v1/preview` and as a "Certificate problem" line in Settings → Previews. It retries on the next tick and the error clears once a reload succeeds. A bad pair **at startup** is fatal instead.
+- **Your own certificate is yours to renew.** Lab does not watch its expiry for you beyond showing it in Settings → Previews.
+
+**A real wildcard with Hetzner DNS-01.** If you own a domain, a publicly trusted wildcard certificate means no per-device trust step at all. The previews must then live under that domain, for example `lab.example.com` (`services.lab.preview.domain`), with the wildcard DNS record pointing at the lab host (an internal address is fine; DNS-01 only needs the TXT record in your public zone). On NixOS, with the zone at Hetzner DNS:
+
+```nix
+security.acme = {
+  acceptTerms = true;
+  defaults.email = "ops@example.com";
+  certs."lab.example.com" = {
+    domain = "*.lab.example.com";          # the wildcard
+    extraDomainNames = [ "lab.example.com" ]; # optional: the bare domain too
+    dnsProvider = "hetzner";
+    environmentFile = "/run/secrets/hetzner-dns.env";  # HETZNER_API_KEY=… (mode 0400)
+    group = config.services.lab.group;     # lets the lab user read the key
+  };
+};
+
+services.lab.preview = {
+  enable = true;
+  domain = "lab.example.com";
+  certFile = "/var/lib/acme/lab.example.com/fullchain.pem";
+  keyFile  = "/var/lib/acme/lab.example.com/key.pem";
+};
+```
+
+No `reloadServices` is needed: ACME rewrites the files in place on renewal and lab's modification-time reload picks them up within about a minute. The lab user must be able to read both files: `group = …` on the ACME cert makes the files group-readable by lab's group (the `lab` group by default); check with `sudo -u lab head -c0 /var/lib/acme/lab.example.com/key.pem`. Without NixOS, any ACME client works the same way as long as it writes the pair somewhere the lab user can read and rewrites it in place on renewal. See your ACME client's documentation for the Hetzner DNS API token; lab never sees it.
+
+#### The redirect listener
+
+`--preview-redirect-addr` (NixOS `preview.redirectAddr`, default `:80`) opens a plain-HTTP listener so that someone typing `http://web.lab.internal/some/path?q=1` lands on `https://web.lab.internal/some/path?q=1` (port appended when the preview listener is not on 443). It answers a request for the preview domain or any name under it with a **308** (method and body kept) and `Cache-Control: no-store`, and everything else — another host, a bare IP, a missing `Host` — with a plain 404. It serves nothing else, ever: no CA download, no status page, no previews. It is unauthenticated plain HTTP, and the trust anchor is only ever handed out behind lab's login. Leave it unset (NixOS: `redirectAddr = null`) to run no plain-HTTP listener at all; the URLs lab prints are `https://` either way.
+
+#### Security note: the CA key
+
+Whoever holds `<state>/preview/ca.key` can mint a certificate for **any** hostname, not only your previews, and every device that installed the CA will trust it. Treat the key like a root credential:
+
+- Keep the state directory private (it is `0700` and lab-owned) and keep `ca.key` out of shared backups and out of anything an agent can read.
+- **Host-runner runs execute as the lab user, unsandboxed** ([Container runner](#container-runner)), so an agent in a `host` run can read `<state>/preview/ca.key`. A container run does not mount the state directory. If you trust the CA on devices you use for anything sensitive, run previews' repos on the container runner, or use your own certificate and never enable lab's CA.
+- If you suspect the key leaked, delete `ca.crt` and `ca.key`, restart, trust the new CA, and remove the old one from every device.
+- An operator-supplied certificate has no such blast radius: nothing is trusted beyond what your CA already vouches for. That is the other reason to prefer the DNS-01 route when you own a domain.
+
+#### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| Lab refuses to start: `lab CA is incomplete` or `lab CA is unusable` | Damaged files in `<state>/preview/`; see Damaged CA files under [Lab-minted CA](#lab-minted-ca). |
+| Lab refuses to start: `--preview-cert-file and --preview-key-file must be set together` | One of the pair is missing from the flags or NixOS options. |
+| Lab refuses to start: `--preview-redirect-addr is set but --preview-addr is not`, or `… is the same as --preview-addr` | The redirect listener needs a preview listener and its own address. |
+| The listener fails to bind `:443` / `:80`: `permission denied` | The lab user lacks `CAP_NET_BIND_SERVICE` ([Turning previews on](#turning-previews-on)), or something else already holds the port. |
+| Safari still warns after installing the profile (iPhone) | Full trust is a separate step: Settings › General › About › Certificate Trust Settings. |
+| Browser warns about a name mismatch | The URL is not under the configured domain, or your own certificate does not cover `*.<domain>`. Lab logs a warning for the latter at startup. |
+| Settings → Previews shows "Certificate problem" | The last renewal or reload failed. Lab keeps serving the last good certificate; the message names the cause. |
 
 ## State directory layout
 
@@ -1058,6 +1178,11 @@ When the preview listener cannot serve a request, it answers with a short page t
                              spawn, each with a sibling <name>.commit file;
                              same lifecycle as home/, bind-mounted read-only
                              into the run's container at its host-identical path
+  preview/                   0700 — (previews on, no operator certificate only)
+                             lab's own preview CA and wildcard leaf: ca.crt,
+                             ca.key, leaf.crt, leaf.key (keys 0600). Lose the CA
+                             and every device must trust a new one; see
+                             Previews → TLS
   logins/                    0700 — per-attempt scratch HOMEs for containerized
                              provider login (ADR-0057); wiped at login teardown
   transcripts/<runID>/       0700 — an ended run's retained transcript (issue
@@ -1087,6 +1212,7 @@ Back up, **consistently together** (one snapshot set):
 - `<state>/lab.db` (or the Postgres database) — config, credentials (encrypted), built-in tracker, run history; with the [SSH bastion](#warpgate-ssh-bastion) wired, also Warpgate's pinned host key and each repo's SSH-target cache. (Warpgate's own `/data` volume is backed up separately — [Bastion operational notes](#bastion-operational-notes).)
 - `<state>/master.key` (or the sops-managed key file) — without it, credential payloads are unrecoverable.
 - `<state>/repos/` — the bare reference clones (claims and parked branches live here as git refs).
+- `<state>/preview/ca.crt` and `ca.key`, when previews use [lab's own CA](#lab-minted-ca) — optional, but without them a restored lab mints a new CA and every device must trust it again. `ca.key` can mint a certificate for any name those devices trust: back it up as you would `master.key`. (`leaf.*` is reconstructible.)
 
 Explicitly **excluded** (reconstructible or ephemeral): `<state>/runtime/`, `<state>/instances/`, `<state>/logins/` (all regenerated per operation/run and swept at boot), `<state>/worktrees/` (recreated from branches — resolve parked/dirty worktrees *before* decommissioning a host; a backup cannot carry uncommitted changes safely), `<state>/agent/` and the `agent.sock` symlink (recreated on boot), `<state>/.local/share/containers/` (digest-pinned images, re-pulled on demand), and `<state>/transcripts/` (disposable: losing it loses only old runs' chat history, which ends with the [retention window](#retained-transcripts) anyway).
 

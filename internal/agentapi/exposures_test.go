@@ -289,7 +289,7 @@ func TestExposureTunnelEndToEnd(t *testing.T) {
 				body, _ := io.ReadAll(resp.Body)
 				t.Fatalf("status = %d, want 101 (body %s)", resp.StatusCode, body)
 			}
-			if got := resp.Header.Get("Lab-Preview-URL"); got != "http://web.lab.internal:8081" {
+			if got := resp.Header.Get("Lab-Preview-URL"); got != "https://web.lab.internal:8081" {
 				t.Fatalf("Lab-Preview-URL = %q", got)
 			}
 			if got := resp.Header.Get("Upgrade"); got != "lab-tunnel" {

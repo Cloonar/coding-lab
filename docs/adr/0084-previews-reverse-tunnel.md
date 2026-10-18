@@ -28,6 +28,8 @@ Decisions, pinned:
 
 Accepted 2026-10-18. Resolves issue #105. Decided with the maintainer in a grill session on 2026-10-18; the issue's agent brief is the contract.
 
+Amended by ADR-0085 (issue #106, 2026-10-18): the "Plain HTTP for now" decision no longer holds. The preview listener terminates TLS and previews are served at `https://<name>.<preview-domain>` (port appended unless 443), with an optional `--preview-redirect-addr`, `--preview-cert-file`/`--preview-key-file`, a lab-minted CA, and in the NixOS module `preview.enable` as the switch in place of `listenAddr`. The tunnel, routing and no-authentication decisions stand.
+
 - **[ADR-0052](0052-container-runner.md):** unchanged. The network pins and the podman argv are untouched, and a container run still reaches lab only through the mounted agent socket, which the tunnel uses.
 - **[ADR-0067](0067-onecli-credential-gateway.md):** the OneCLI dashboard's `port` mode is the precedent for an opt-in second listener. The preview listener differs on purpose: the dashboard's listener sits behind lab's session gate, and the preview listener has no authentication.
 - **[ADR-0068](0068-warpgate-ssh-bastion.md):** unchanged. Warpgate stays the SSH bastion. Its HTTP targets were considered for previews and rejected (below).

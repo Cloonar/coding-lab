@@ -1046,17 +1046,18 @@ func TestSeedWorkspace_emptyExcludesStillFailsLoudOnMissingGit(t *testing.T) {
 	}
 }
 
-// PreviewRef.URL renders the exposure URL: the listener's port is appended
-// unless it is the HTTP default (0 or 80).
+// PreviewRef.URL renders the exposure URL: always https since the listener
+// terminates TLS (issue #106), the listener's port appended unless it is the
+// HTTPS default (0 or 443). 80 is an ordinary port now and keeps its suffix.
 func TestPreviewRef_URL(t *testing.T) {
 	for _, tc := range []struct {
 		ref  PreviewRef
 		want string
 	}{
-		{PreviewRef{Domain: "lab.internal"}, "http://web.lab.internal"},
-		{PreviewRef{Domain: "lab.internal", Port: 80}, "http://web.lab.internal"},
-		{PreviewRef{Domain: "lab.internal", Port: 8081}, "http://web.lab.internal:8081"},
-		{PreviewRef{Domain: "example.org", Port: 443}, "http://web.example.org:443"},
+		{PreviewRef{Domain: "lab.internal"}, "https://web.lab.internal"},
+		{PreviewRef{Domain: "lab.internal", Port: 443}, "https://web.lab.internal"},
+		{PreviewRef{Domain: "lab.internal", Port: 8081}, "https://web.lab.internal:8081"},
+		{PreviewRef{Domain: "example.org", Port: 80}, "https://web.example.org:80"},
 	} {
 		if got := tc.ref.URL("web"); got != tc.want {
 			t.Errorf("%+v URL = %q, want %q", tc.ref, got, tc.want)
@@ -1103,12 +1104,14 @@ func TestRenderContextFile_withPreview(t *testing.T) {
 		"## Previews",
 		"labctl expose <name> <port> &",
 		"labctl expose stop <name>",
-		"`http://<name>.lab.internal:8081`",
+		"`https://<name>.lab.internal:8081`",
+		"HTTPS, served with lab's\ncertificate",
 		"single DNS label",
 		"at most 8",
 		"`127.0.0.1:<port>`",
 		"`[::1]:<port>`",
-		"server.hmr.clientPort",
+		"over `wss` to the URL's port",
+		"`server.hmr.clientPort` to\n8081;",
 		"server.allowedHosts",
 		"`.lab.internal`",
 	} {
@@ -1116,13 +1119,19 @@ func TestRenderContextFile_withPreview(t *testing.T) {
 			t.Errorf("Previews section missing %q", want)
 		}
 	}
-	// Default port: no suffix.
-	got, err = renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: 80})
-	if err != nil {
-		t.Fatalf("renderContextFile: %v", err)
-	}
-	if !bytes.Contains(got, []byte("`http://<name>.lab.internal`")) {
-		t.Error("port 80 URL carries a port suffix")
+	// Default HTTPS port: no suffix in the URL, and the Vite line still names
+	// the port HMR must use — 443, which the bare URL leaves implicit.
+	for _, port := range []int{443, 0} {
+		got, err = renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: port})
+		if err != nil {
+			t.Fatalf("renderContextFile: %v", err)
+		}
+		if !bytes.Contains(got, []byte("`https://<name>.lab.internal` (HTTPS")) {
+			t.Errorf("port %d URL carries a port suffix", port)
+		}
+		if !bytes.Contains(got, []byte("`server.hmr.clientPort` to\n443;")) {
+			t.Errorf("port %d: the Vite line does not name 443 as HMR's client port", port)
+		}
 	}
 }
 

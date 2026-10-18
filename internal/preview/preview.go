@@ -1,7 +1,10 @@
 // Package preview owns lab's previews (issue #105): an agent in a run calls
 // `labctl expose <name> <port>`, labctl opens a reverse tunnel to lab over the
 // agent API, and lab serves that port to the operator's browser at
-// http://<name>.<preview-domain> on the opt-in preview listener.
+// https://<name>.<preview-domain> on the opt-in preview listener. The
+// listener terminates TLS itself (issue #106): CertManager serves either the
+// operator's own certificate pair or a wildcard leaf minted under a private
+// lab CA, and RedirectHandler sends plain-HTTP requests on to it.
 //
 // Both ends of the tunnel protocol live here so they are tested together:
 // the lab side (Registry.Attach, the stream dialer behind Registry.Handler)
@@ -167,8 +170,8 @@ type Registry struct {
 
 // NewRegistry builds an empty Registry. domain is the preview domain (e.g.
 // "lab.internal", already validated and lowercase); listenPort is the
-// preview listener's port, used only to build URLs (80 — or 0, unknown — gives
-// a URL without a port suffix). onChange(repoID, runID) is called on every
+// preview listener's port, used only to build URLs (443 — or 0, unknown —
+// gives a URL without a port suffix). onChange(repoID, runID) is called on every
 // reserve, attach, detach, stop and CloseRun so lab can publish run.changed;
 // it is always called outside the Registry's lock, so it may call back into
 // the Registry, and it may be nil.
@@ -189,15 +192,18 @@ func NewRegistry(domain string, listenPort int, onChange func(repoID, runID stri
 }
 
 // URL returns the browser-facing URL of the preview called name:
-// "http://<name>.<domain>", with ":<port>" appended when the listener is not
-// on 80. It does not check that name is reserved — the agent API uses it to
-// answer a registration, before and independent of any lookup.
+// "https://<name>.<domain>", with ":<port>" appended when the listener is not
+// on 443. Always https: the preview listener speaks only TLS (issue #106),
+// and a plain-http URL would at best bounce through the redirect listener —
+// which may not be configured at all. It does not check that name is
+// reserved — the agent API uses it to answer a registration, before and
+// independent of any lookup.
 func (r *Registry) URL(name string) string {
 	host := name + "." + r.domain
-	if r.listenPort != 0 && r.listenPort != 80 {
+	if r.listenPort != 0 && r.listenPort != 443 {
 		host = net.JoinHostPort(host, strconv.Itoa(r.listenPort))
 	}
-	return "http://" + host
+	return "https://" + host
 }
 
 // Reserve claims name for runID, or re-claims it for the same run — a

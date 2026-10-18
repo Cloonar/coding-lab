@@ -238,7 +238,7 @@ func TestExposeServesAndStops(t *testing.T) {
 
 			p := startExpose(t, env, "web", strconv.Itoa(port))
 			waitFor(t, "the URL line", func() bool { return strings.Contains(p.stdout.String(), "\n") })
-			if got := p.stdout.String(); got != "http://web.lab.internal:8081\n" {
+			if got := p.stdout.String(); got != "https://web.lab.internal:8081\n" {
 				t.Fatalf("stdout = %q, want exactly the URL line", got)
 			}
 			waitLive(t, reg, f.runID, "web")
@@ -354,7 +354,7 @@ func TestExposeReconnects(t *testing.T) {
 	if gotPosts != 3 {
 		t.Errorf("registration attempts = %d, want 3 (first, the 503, the reattach)", gotPosts)
 	}
-	if got := p.stdout.String(); got != "http://web.lab.internal:8081\n" {
+	if got := p.stdout.String(); got != "https://web.lab.internal:8081\n" {
 		t.Errorf("stdout = %q, want the URL line once", got)
 	}
 	stderr := p.stderr.String()
@@ -444,7 +444,7 @@ func TestExposeStopDuringReconnect(t *testing.T) {
 	// A NEW `labctl expose web` is the agent asking again, and gets it.
 	again := startExpose(t, f.env(), "web", strconv.Itoa(upstreamPort(t)))
 	waitLive(t, reg, f.runID, "web")
-	waitFor(t, "the new URL line", func() bool { return again.stdout.String() == "http://web.lab.internal:8081\n" })
+	waitFor(t, "the new URL line", func() bool { return again.stdout.String() == "https://web.lab.internal:8081\n" })
 }
 
 // TestExposeOpenReleasesFailedConnections: each ExposeOpen builds its own
@@ -541,7 +541,7 @@ func TestExposeLabEnds(t *testing.T) {
 		if !strings.Contains(older.stderr.String(), `exposure "web" was taken over`) {
 			t.Errorf("older stderr = %q", older.stderr.String())
 		}
-		waitFor(t, "the newer URL line", func() bool { return newer.stdout.String() == "http://web.lab.internal:8081\n" })
+		waitFor(t, "the newer URL line", func() bool { return newer.stdout.String() == "https://web.lab.internal:8081\n" })
 		waitLive(t, reg, f.runID, "web")
 	})
 }

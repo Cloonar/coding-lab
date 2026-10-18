@@ -94,9 +94,10 @@ func TestURL(t *testing.T) {
 		port int
 		want string
 	}{
-		{80, "http://web.lab.internal"},
-		{0, "http://web.lab.internal"},
-		{8081, "http://web.lab.internal:8081"},
+		{443, "https://web.lab.internal"},
+		{0, "https://web.lab.internal"},
+		{80, "https://web.lab.internal:80"},
+		{8081, "https://web.lab.internal:8081"},
 	} {
 		r := NewRegistry("lab.internal", tc.port, nil)
 		if got := r.URL("web"); got != tc.want {
@@ -142,7 +143,7 @@ func TestReserveConflictAndReclaim(t *testing.T) {
 	// The holding run re-reserves (a reconnect) and may move the port.
 	mustReserve(t, r, "repo", "run1", "web", 5174)
 	got := r.Exposures("run1")
-	want := []Exposure{{Name: "web", URL: "http://web.lab.internal:8081", Port: 5174, Live: false}}
+	want := []Exposure{{Name: "web", URL: "https://web.lab.internal:8081", Port: 5174, Live: false}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("Exposures = %+v, want %+v", got, want)
 	}

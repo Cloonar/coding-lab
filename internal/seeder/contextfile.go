@@ -331,7 +331,9 @@ func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
 //     forwarding until stopped and reconnects by itself if lab restarts;
 //     `labctl expose stop <name>` ends it and frees the name;
 //   - the URL shape with the REAL domain (and port, when the listener is not
-//     on 80) rendered in, so the agent can announce a link without guessing;
+//     on 443) rendered in, so the agent can announce a link without guessing,
+//     and that it is HTTPS with lab's certificate (issue #106: the listener
+//     terminates TLS itself), so a secure-origin-only API is not a mystery;
 //   - the limits that surface as errors: a name is a single DNS label, a name
 //     held by another run is refused, eight exposures per run;
 //   - where traffic goes: 127.0.0.1:<port> inside the run, or [::1]:<port>
@@ -339,7 +341,10 @@ func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
 //     so the dev server must listen on loopback, where its default
 //     "localhost" binding already puts it;
 //   - one Vite line, because HMR and the host check are the two things that
-//     reliably break a dev server behind a public name and port.
+//     reliably break a dev server behind a public name and port. Since issue
+//     #106 the page is https, so Vite's HMR client opens wss:// — to its own
+//     dev-server port (5173) unless server.hmr.clientPort names the URL's
+//     port, which the line renders as a number (443 for a suffix-less URL).
 //
 // Appended in Go for the same structural reason as its neighbours: with
 // Opts.Preview nil — the preview listener unconfigured — renderContextFile
@@ -357,15 +362,26 @@ func appendPreviewsSection(buf *bytes.Buffer, p *PreviewRef) {
 	buf.WriteString("    labctl expose stop <name>        # ends the exposure and frees the name\n\n")
 	buf.WriteString("`expose` runs in the foreground: start it in the background (`&`). It keeps\n")
 	buf.WriteString("forwarding until stopped and reconnects by itself if lab restarts.\n\n")
-	fmt.Fprintf(buf, "The URL is `%s`.\n", p.URL("<name>"))
-	buf.WriteString("The name is a single DNS label (a-z, 0-9, `-`); a name held by another run\n")
-	buf.WriteString("is refused, and a run holds at most 8.\n\n")
+	fmt.Fprintf(buf, "The URL is `%s` (HTTPS, served with lab's\n", p.URL("<name>"))
+	buf.WriteString("certificate). The name is a single DNS label (a-z, 0-9, `-`); a name held\n")
+	buf.WriteString("by another run is refused, and a run holds at most 8.\n\n")
 	buf.WriteString("Traffic goes to `127.0.0.1:<port>` inside this run, or `[::1]:<port>` when\n")
 	buf.WriteString("nothing listens there — your own loopback, nothing else is reachable — so a\n")
-	buf.WriteString("dev server's default `localhost` binding works. Vite: behind a public port\n")
-	buf.WriteString("other than 5173, HMR may need `server.hmr.clientPort` set to the URL's port,\n")
-	buf.WriteString("and its host check may need `server.allowedHosts` to include\n")
-	fmt.Fprintf(buf, "`.%s`.\n", p.Domain)
+	buf.WriteString("dev server's default `localhost` binding works. Vite: HMR's browser client\n")
+	buf.WriteString("connects over `wss` to the URL's port, so set `server.hmr.clientPort` to\n")
+	fmt.Fprintf(buf, "%d; its host check may need `server.allowedHosts` to include\n`.%s`.\n", p.publicPort(), p.Domain)
+}
+
+// publicPort is the port the browser actually reaches the preview listener
+// on: Port, or 443 when the URL carries none (0 is "unknown", which URL also
+// renders without a suffix, so the two agree by construction). The Vite line
+// renders it as a number rather than "the URL's port" because that is the
+// one value an agent cannot read off a suffix-less URL (issue #106).
+func (p *PreviewRef) publicPort() int {
+	if p.Port == 0 {
+		return 443
+	}
+	return p.Port
 }
 
 // appendImportsSection writes the "## Read-only imports" section onto buf,

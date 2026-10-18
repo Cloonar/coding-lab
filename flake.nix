@@ -365,38 +365,78 @@
                 };
               };
 
-              # Eval-only preview dummies (issue #105) — only ExecStart and
-              # the firewall list are read, so nothing is realized. `common`
-              # sets openFirewall = true, so the port lists below are the
-              # openFirewall behavior. previewDummy: listener on + a custom
-              # domain; previewDomainOnlyDummy: a domain with no listener must
-              # render nothing at all (the domain is meaningless while off).
+              # Eval-only preview dummies (issues #105/#106) — only ExecStart,
+              # serviceConfig, the firewall list and the assertion list are
+              # read, so nothing is realized. `common` sets openFirewall =
+              # true, so the port lists below are the openFirewall behavior.
+              # previewDummy: enable with every default (:443 + :80 redirect +
+              # lab.internal); previewHighPortDummy: ports >= 1024 and no
+              # redirect (no capability); previewLowRedirectDummy: only the
+              # redirect port is privileged, with a bracketed IPv6 listen
+              # address; previewCertDummy: operator cert pair;
+              # previewCertNoKeyDummy / previewListenNoEnableDummy /
+              # previewDomainNoEnableDummy must each fail eval.
               previewDummy = mkDummy {
                 services.lab = {
                   agentPackages."claude-code" = null;
                   agentPackages.codex = null;
+                  preview.enable = true;
+                };
+              };
+              previewHighPortDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
                   preview = {
-                    listenAddr = "0.0.0.0:8081";
+                    enable = true;
+                    listenAddr = "0.0.0.0:8443";
+                    redirectAddr = null;
                     domain = "previews.example.org";
                   };
                 };
               };
-              previewDefaultDomainDummy = mkDummy {
+              previewLowRedirectDummy = mkDummy {
                 services.lab = {
                   agentPackages."claude-code" = null;
                   agentPackages.codex = null;
-                  preview.listenAddr = ":8081";
+                  preview = {
+                    enable = true;
+                    listenAddr = "[::]:8443";
+                  };
                 };
               };
-              previewDomainOnlyDummy = mkDummy {
+              previewCertDummy = mkDummy {
                 services.lab = {
                   agentPackages."claude-code" = null;
                   agentPackages.codex = null;
-                  preview.domain = "previews.example.org";
+                  preview = {
+                    enable = true;
+                    certFile = "/var/lib/acme/lab.example.com/fullchain.pem";
+                    keyFile = "/var/lib/acme/lab.example.com/key.pem";
+                  };
                 };
               };
+              previewCertNoKeyDummy = mkDummy {
+                services.lab.preview = {
+                  enable = true;
+                  certFile = "/var/lib/acme/lab.example.com/fullchain.pem";
+                };
+              }; # certFile without keyFile must fail eval
+              previewListenNoEnableDummy = mkDummy {
+                services.lab.preview.listenAddr = ":8081";
+              }; # a #105-era config (listenAddr as the switch) must fail eval
+              previewDomainNoEnableDummy = mkDummy {
+                services.lab.preview.domain = "previews.example.org";
+              }; # any other preview option without enable must fail eval too
               execStart = d: d.config.systemd.services.lab.serviceConfig.ExecStart;
+              # The firewall module canonicalizes this list (apply = sort +
+              # unique), so expectations are ascending, not insertion order.
               firewallPorts = d: d.config.networking.firewall.allowedTCPPorts;
+              # An absent AmbientCapabilities (mkIf false drops the attr) reads
+              # as the empty list.
+              ambientCaps = d: d.config.systemd.services.lab.serviceConfig.AmbientCapabilities or [ ];
+              hasBindCap = d: lib.elem "CAP_NET_BIND_SERVICE" (ambientCaps d);
+              previewFailures = d: lib.filter (lib.hasInfix "services.lab.preview") (failedAssertionMessages d);
 
               unitPathNames = d: map lib.getName d.config.systemd.services.lab.path;
               baselineNames = [
@@ -456,39 +496,72 @@
             assert lib.assertMsg
               (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.onecli.dashboardUrl" m) (failedAssertionMessages dashboardSubdomainNoUrlDummy))
               "nixos-module check: onecli.dashboard = \"subdomain\" with no dashboardUrl must fail eval with a message naming both options";
-            # Previews (issue #105): unset renders no --preview-* flag and
-            # opens only the main port; set renders both flags (domain
-            # defaulting to lab.internal) and openFirewall also opens the
-            # port derived from preview.listenAddr; a domain without a
-            # listener renders nothing.
+            # Previews (issues #105/#106): enable = false renders no
+            # --preview-* flag, no capability, and opens only the main port;
+            # enable with the defaults renders :443 + the :80 redirect +
+            # lab.internal, grants CAP_NET_BIND_SERVICE and opens both ports;
+            # ports >= 1024 grant nothing; the cert/key pair renders together
+            # and fails eval apart; a #105-era config (preview options set
+            # without enable) fails eval.
             assert lib.assertMsg
               (
                 !lib.hasInfix "--preview-" (execStart defaultsDummy)
                 && firewallPorts defaultsDummy == [ 8080 ]
+                && ambientCaps defaultsDummy == [ ]
+                && previewFailures defaultsDummy == [ ]
               )
-              "nixos-module check: with preview.listenAddr unset the unit must carry no --preview-* flag and openFirewall must open only the main listen port";
+              "nixos-module check: with preview.enable = false (the default) the unit must carry no --preview-* flag and no ambient capability, and openFirewall must open only the main listen port";
             assert lib.assertMsg
               (
-                lib.hasInfix "\"--preview-addr\" \"0.0.0.0:8081\"" (execStart previewDummy)
-                && lib.hasInfix "\"--preview-domain\" \"previews.example.org\"" (execStart previewDummy)
+                lib.hasInfix "\"--preview-addr\" \":443\"" (execStart previewDummy)
+                && lib.hasInfix "\"--preview-redirect-addr\" \":80\"" (execStart previewDummy)
+                && lib.hasInfix "\"--preview-domain\" \"lab.internal\"" (execStart previewDummy)
+                && !lib.hasInfix "--preview-cert-file" (execStart previewDummy)
+                && !lib.hasInfix "--preview-key-file" (execStart previewDummy)
+                && previewFailures previewDummy == [ ]
               )
-              "nixos-module check: preview.listenAddr + preview.domain must render --preview-addr and --preview-domain";
+              "nixos-module check: preview.enable = true with defaults must render --preview-addr :443, --preview-redirect-addr :80 and --preview-domain lab.internal, and no cert/key flags";
             assert lib.assertMsg
               (
-                lib.hasInfix "\"--preview-addr\" \":8081\"" (execStart previewDefaultDomainDummy)
-                && lib.hasInfix "\"--preview-domain\" \"lab.internal\"" (execStart previewDefaultDomainDummy)
+                hasBindCap previewDummy
+                && !(previewDummy.config.systemd.services.lab.serviceConfig ? CapabilityBoundingSet)
               )
-              "nixos-module check: preview.domain must default to lab.internal when preview.listenAddr is set";
-            assert lib.assertMsg
-              (!lib.hasInfix "--preview-" (execStart previewDomainOnlyDummy))
-              "nixos-module check: preview.domain without preview.listenAddr must render no --preview-* flag";
+              "nixos-module check: preview ports below 1024 must add AmbientCapabilities=CAP_NET_BIND_SERVICE and never a CapabilityBoundingSet (rootless podman's setuid newuidmap/newgidmap need the full set)";
+            assert lib.assertMsg (firewallPorts previewDummy == [ 80 443 8080 ])
+              "nixos-module check: openFirewall with preview.enable must open the main port, the preview port and the redirect port";
             assert lib.assertMsg
               (
-                firewallPorts previewDummy == [ 8080 8081 ]
-                && firewallPorts previewDefaultDomainDummy == [ 8080 8081 ]
-                && firewallPorts previewDomainOnlyDummy == [ 8080 ]
+                lib.hasInfix "\"--preview-addr\" \"0.0.0.0:8443\"" (execStart previewHighPortDummy)
+                && lib.hasInfix "\"--preview-domain\" \"previews.example.org\"" (execStart previewHighPortDummy)
+                && !lib.hasInfix "--preview-redirect-addr" (execStart previewHighPortDummy)
+                && ambientCaps previewHighPortDummy == [ ]
+                && firewallPorts previewHighPortDummy == [ 8080 8443 ]
               )
-              "nixos-module check: openFirewall must open the preview port (derived from preview.listenAddr) alongside the main port, and only while previews are on";
+              "nixos-module check: preview ports >= 1024 with redirectAddr = null must render no --preview-redirect-addr, add no ambient capability, and open only the main and preview ports";
+            assert lib.assertMsg
+              (
+                lib.hasInfix "\"--preview-addr\" \"[::]:8443\"" (execStart previewLowRedirectDummy)
+                && lib.hasInfix "\"--preview-redirect-addr\" \":80\"" (execStart previewLowRedirectDummy)
+                && hasBindCap previewLowRedirectDummy
+                && firewallPorts previewLowRedirectDummy == [ 80 8080 8443 ]
+              )
+              "nixos-module check: a privileged redirect port alone must add CAP_NET_BIND_SERVICE, and a bracketed IPv6 preview.listenAddr must yield its port for openFirewall";
+            assert lib.assertMsg
+              (
+                lib.hasInfix "\"--preview-cert-file\" \"/var/lib/acme/lab.example.com/fullchain.pem\"" (execStart previewCertDummy)
+                && lib.hasInfix "\"--preview-key-file\" \"/var/lib/acme/lab.example.com/key.pem\"" (execStart previewCertDummy)
+                && previewFailures previewCertDummy == [ ]
+              )
+              "nixos-module check: preview.certFile + preview.keyFile with preview.enable must render --preview-cert-file and --preview-key-file";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasInfix "services.lab.preview.certFile" m && lib.hasInfix "services.lab.preview.keyFile" m) (failedAssertionMessages previewCertNoKeyDummy))
+              "nixos-module check: preview.certFile without preview.keyFile must fail eval with a message naming both options";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasPrefix "services.lab.preview.listenAddr set while services.lab.preview.enable is false" m) (failedAssertionMessages previewListenNoEnableDummy))
+              "nixos-module check: preview.listenAddr without preview.enable must fail eval with a message naming both options (#106 moved the switch to enable)";
+            assert lib.assertMsg
+              (lib.any (m: lib.hasPrefix "services.lab.preview.domain set while services.lab.preview.enable is false" m) (failedAssertionMessages previewDomainNoEnableDummy))
+              "nixos-module check: preview.domain without preview.enable must fail eval with a message naming both options";
             assert lib.assertMsg (lib.any (lib.hasInfix "claudePackage") dummy.config.warnings)
               "nixos-module check: setting the deprecated claudePackage must emit a deprecation warning";
             assert lib.assertMsg (!lib.any (lib.hasInfix "claudePackage") defaultsDummy.config.warnings)

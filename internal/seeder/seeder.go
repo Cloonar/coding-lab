@@ -91,18 +91,21 @@ type BastionRef struct {
 // listener's bind address or the run's tunnels.
 type PreviewRef struct {
 	// Domain is the preview domain (e.g. "lab.internal"): exposures are served
-	// at http://<name>.<Domain>. Never empty for a non-nil ref.
+	// at https://<name>.<Domain>. Never empty for a non-nil ref.
 	Domain string
-	// Port is the preview listener's public port. 0 and 80 mean "default HTTP
-	// port": the URL carries no ":port" suffix.
+	// Port is the preview listener's public port. 0 and 443 mean "default
+	// HTTPS port": the URL carries no ":port" suffix. The listener speaks only
+	// TLS since issue #106, so 443 — not 80 — is the port a URL may leave out.
 	Port int
 }
 
 // URL returns the URL an exposure called name is served at:
-// "http://<name>.<Domain>", with ":<Port>" appended unless Port is 0 or 80.
+// "https://<name>.<Domain>", with ":<Port>" appended unless Port is 0 or 443
+// — the same rule as preview.Registry.URL, which labctl prints, so the
+// worktree notes and the printed URL never disagree (issue #106).
 func (p *PreviewRef) URL(name string) string {
-	u := "http://" + name + "." + p.Domain
-	if p.Port != 0 && p.Port != 80 {
+	u := "https://" + name + "." + p.Domain
+	if p.Port != 0 && p.Port != 443 {
 		u += ":" + strconv.Itoa(p.Port)
 	}
 	return u
