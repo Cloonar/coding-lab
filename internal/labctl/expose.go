@@ -1,11 +1,12 @@
 package labctl
 
-// `labctl expose` (issue #105): serve the run's 127.0.0.1:<port> to the
-// operator's browser at http://<name>.<preview-domain>. The command is the
-// exposure's lifetime — the agent runs it in the background — so it holds the
-// tunnel in the foreground, reconnects across dropped connections (a lab
-// restart drops every tunnel while the run survives), and leaves on a final
-// answer from lab, an `expose stop`, or a signal.
+// `labctl expose` (issue #105): serve the run's loopback <port> (127.0.0.1,
+// else [::1]) to the operator's browser at http://<name>.<preview-domain>.
+// The command is the exposure's lifetime — the agent runs it in the
+// background — so it holds the tunnel in the foreground, reconnects across
+// dropped connections (a lab restart drops every tunnel while the run
+// survives), and leaves on a final answer from lab, an `expose stop`, or a
+// signal.
 //
 // Exit codes follow the binary-wide convention: 0 when the exposure was
 // stopped (by `expose stop`, the operator, or a SIGINT/SIGTERM to this

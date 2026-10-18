@@ -137,20 +137,40 @@ func isLive(r *Registry, runID, name string) bool {
 	return false
 }
 
-// newUpstream starts an HTTP server on 127.0.0.1 (tcp4 — the only address
-// labctl dials) and returns it with its port.
+// newUpstream starts an HTTP server on 127.0.0.1 (tcp4 — the address labctl
+// dials first) and returns it with its port.
 func newUpstream(t *testing.T, h http.Handler) (*httptest.Server, int) {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	return serveUpstream(t, ln, h), ln.Addr().(*net.TCPAddr).Port
+}
+
+// newUpstream6 starts an HTTP server on [::1]:port only — port 0 picks one —
+// the shape of a dev server on its default "localhost" binding where
+// localhost resolves to ::1 first. It skips the test when the address cannot
+// be bound (no IPv6 loopback here, or the port is taken).
+func newUpstream6(t *testing.T, port int, h http.Handler) int {
+	t.Helper()
+	ln, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("cannot listen on [::1]:%d: %v", port, err)
+	}
+	serveUpstream(t, ln, h)
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// serveUpstream serves h on ln until the test ends.
+func serveUpstream(t *testing.T, ln net.Listener, h http.Handler) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewUnstartedServer(h)
 	_ = srv.Listener.Close()
 	srv.Listener = ln
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return srv, ln.Addr().(*net.TCPAddr).Port
+	return srv
 }
 
 // freePort returns a 127.0.0.1 port that nothing listens on.
@@ -256,6 +276,37 @@ func TestProxyReachesUpstream(t *testing.T) {
 		if up.Header.Get(h) != "" {
 			t.Errorf("hop-by-hop request header %s reached the upstream", h)
 		}
+	}
+}
+
+func TestProxyReachesIPv6LoopbackUpstream(t *testing.T) {
+	port := newUpstream6(t, 0, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "hello over ::1")
+	}))
+	r, _ := newTestRegistry(t)
+	startTunnel(t, r, "run1", "web", port)
+	srv := newPreviewListener(t, r)
+
+	resp, body := previewGet(t, srv, "web.lab.internal", nil)
+	if resp.StatusCode != http.StatusOK || body != "hello over ::1" {
+		t.Fatalf("response = %d %q, want 200 from the [::1]-only upstream", resp.StatusCode, body)
+	}
+}
+
+func TestProxyPrefersIPv4Loopback(t *testing.T) {
+	_, port := newUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "v4")
+	}))
+	newUpstream6(t, port, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "v6")
+	}))
+	r, _ := newTestRegistry(t)
+	startTunnel(t, r, "run1", "web", port)
+	srv := newPreviewListener(t, r)
+
+	resp, body := previewGet(t, srv, "web.lab.internal", nil)
+	if resp.StatusCode != http.StatusOK || body != "v4" {
+		t.Fatalf("response = %d %q, want 200 from the 127.0.0.1 upstream", resp.StatusCode, body)
 	}
 }
 

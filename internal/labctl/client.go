@@ -740,8 +740,8 @@ func (c *Client) tunnelClient() *http.Client {
 	return &http.Client{Transport: tr, CheckRedirect: noRedirect}
 }
 
-// ExposeOpen registers the exposure name → 127.0.0.1:port with lab and
-// switches the request into the tunnel: POST /agent/v1/exposures with
+// ExposeOpen registers the exposure name → the run's loopback port with lab
+// and switches the request into the tunnel: POST /agent/v1/exposures with
 // `Upgrade: lab-tunnel`. session is the calling `labctl expose` process's id,
 // the same on every attempt (see exposeLoop); "" omits it. On the 101 it
 // returns the preview's URL and the switched connection, which the caller

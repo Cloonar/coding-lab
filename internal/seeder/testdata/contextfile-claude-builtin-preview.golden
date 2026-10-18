@@ -71,8 +71,9 @@ The URL is `http://<name>.lab.internal:8081`.
 The name is a single DNS label (a-z, 0-9, `-`); a name held by another run
 is refused, and a run holds at most 8.
 
-Traffic goes to `127.0.0.1:<port>` inside this run — your own loopback,
-nothing else is reachable — so bind your dev server to it. Vite: behind a
-public port other than 5173, HMR may need `server.hmr.clientPort` set to the
-URL's port, and its host check may need `server.allowedHosts` to include
+Traffic goes to `127.0.0.1:<port>` inside this run, or `[::1]:<port>` when
+nothing listens there — your own loopback, nothing else is reachable — so a
+dev server's default `localhost` binding works. Vite: behind a public port
+other than 5173, HMR may need `server.hmr.clientPort` set to the URL's port,
+and its host check may need `server.allowedHosts` to include
 `.lab.internal`.

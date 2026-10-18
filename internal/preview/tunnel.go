@@ -24,10 +24,11 @@ import (
 // stream, opened before the exposure is marked live; lab writes at most one
 // newline-terminated Control message on it and then ends the session (once
 // labctl has closed its side, or after a short bound — see tunnel.end).
-// Every later stream is a data stream: labctl dials 127.0.0.1:<port>, writes
-// one status byte (statusOK / statusRefused), and on success copies bytes
-// both ways. Inside a data stream lab speaks plain HTTP/1.1, which is what
-// lets WebSocket upgrades through without special casing.
+// Every later stream is a data stream: labctl dials the run's loopback port
+// (see dialLoopback), writes one status byte (statusOK / statusRefused), and
+// on success copies bytes both ways. Inside a data stream lab speaks plain
+// HTTP/1.1, which is what lets WebSocket upgrades through without special
+// casing.
 
 // Control is a message lab sends labctl on the control stream. Every Control
 // is final: labctl must not reconnect after one. A session that ends WITHOUT
@@ -49,7 +50,7 @@ const (
 
 // The status byte labctl writes first on every data stream.
 const (
-	statusOK      byte = 0x00 // dial to 127.0.0.1:<port> succeeded; bytes follow
+	statusOK      byte = 0x00 // dial to the run's port succeeded; bytes follow
 	statusRefused byte = 0x01 // dial failed — nothing is listening on the port
 )
 
@@ -59,9 +60,9 @@ const (
 var ErrTunnelDropped = errors.New("preview: tunnel connection dropped")
 
 const (
-	// upstreamDialTimeout bounds labctl's dial to the run's port. Loopback
-	// either answers at once or refuses at once; the timeout is only for a
-	// pathological local stack.
+	// upstreamDialTimeout bounds labctl's dial to the run's port, every
+	// loopback address together. Loopback either answers at once or refuses
+	// at once; the timeout is only for a pathological local stack.
 	upstreamDialTimeout = 5 * time.Second
 	// statusTimeout bounds lab's wait for a data stream's status byte. It is
 	// comfortably above upstreamDialTimeout so a slow-but-successful dial is
@@ -272,10 +273,10 @@ func (t *tunnel) dial(ctx context.Context, port int) (net.Conn, error) {
 }
 
 // ServeTunnel runs labctl's side of one tunnel on conn — the body of the
-// agent API's 101 response — forwarding every data stream lab opens to
-// 127.0.0.1:<port> over tcp4. Only that address is ever dialled: labctl takes
-// a port, never a host, so a preview can never become a door to anything but
-// the run's own loopback.
+// agent API's 101 response — forwarding every data stream lab opens to the
+// run's own loopback <port> (dialLoopback). Only loopback is ever dialled:
+// labctl takes a port, never a host, so a preview can never become a door to
+// anything but the run itself.
 //
 // It returns when the session ends, having waited for every forwarded
 // connection to wind down:
@@ -349,6 +350,33 @@ func ServeTunnel(ctx context.Context, conn io.ReadWriteCloser, port int) (Contro
 	return "", fmt.Errorf("%w: %w", ErrTunnelDropped, acceptErr)
 }
 
+// loopbacks are the only addresses a data stream is ever dialled to, in the
+// order dialLoopback tries them. IPv6 is there for a dev server that kept its
+// default "localhost" binding: Node ≥17 listens on the first address localhost
+// resolves to, so where that is ::1 a default Vite server listens on [::1]
+// only. Both are the run's own loopback.
+var loopbacks = [...]struct{ network, host string }{
+	{"tcp4", "127.0.0.1"},
+	{"tcp6", "::1"},
+}
+
+// dialLoopback connects to port on the first loopback address that accepts.
+// One deadline covers every attempt, so a refusal still reaches lab well
+// inside its statusTimeout.
+func dialLoopback(port int) (net.Conn, error) {
+	d := net.Dialer{Deadline: time.Now().Add(upstreamDialTimeout)}
+	p := strconv.Itoa(port)
+	var errs []error
+	for _, lb := range loopbacks {
+		conn, err := d.Dial(lb.network, net.JoinHostPort(lb.host, p))
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(errs...)
+}
+
 // forward serves one data stream: dial the run's port, report the result in
 // the status byte, then copy both ways until both directions are done. EOF
 // in one direction is passed on as a half-close (an HTTP client may finish
@@ -357,8 +385,7 @@ func ServeTunnel(ctx context.Context, conn io.ReadWriteCloser, port int) (Contro
 func forward(sess *yamux.Session, st *yamux.Stream, port int) {
 	defer func() { _ = st.Close() }()
 
-	d := net.Dialer{Timeout: upstreamDialTimeout}
-	up, err := d.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	up, err := dialLoopback(port)
 	if err != nil {
 		_ = st.SetWriteDeadline(time.Now().Add(defaultControlWriteTimeout))
 		_, _ = st.Write([]byte{statusRefused})

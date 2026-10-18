@@ -72,7 +72,7 @@ Usage:
                                         child output is redacted — injected values appear as [REDACTED:NAME]
   labctl secret scan <rev-arg>...       scan the outgoing diff (git log -p over the given revisions)
                                         for secret values; findings or ANY failure exit 1 (fail closed)
-  labctl expose <name> <port>           serve 127.0.0.1:<port> in the run at the preview URL printed as
+  labctl expose <name> <port>           serve the run's loopback <port> at the preview URL printed as
                                         the first stdout line; stays in the foreground (run it in the
                                         background), reconnects on a dropped connection; exits 0 when
                                         stopped or on SIGINT/SIGTERM, 1 when lab ends it or refuses

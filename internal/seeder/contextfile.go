@@ -334,8 +334,10 @@ func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
 //     on 80) rendered in, so the agent can announce a link without guessing;
 //   - the limits that surface as errors: a name is a single DNS label, a name
 //     held by another run is refused, eight exposures per run;
-//   - where traffic goes: 127.0.0.1:<port> inside the run — the run's own
-//     loopback and nothing else — so the dev server must listen there;
+//   - where traffic goes: 127.0.0.1:<port> inside the run, or [::1]:<port>
+//     when nothing listens there — the run's own loopback and nothing else —
+//     so the dev server must listen on loopback, where its default
+//     "localhost" binding already puts it;
 //   - one Vite line, because HMR and the host check are the two things that
 //     reliably break a dev server behind a public name and port.
 //
@@ -358,10 +360,11 @@ func appendPreviewsSection(buf *bytes.Buffer, p *PreviewRef) {
 	fmt.Fprintf(buf, "The URL is `%s`.\n", p.URL("<name>"))
 	buf.WriteString("The name is a single DNS label (a-z, 0-9, `-`); a name held by another run\n")
 	buf.WriteString("is refused, and a run holds at most 8.\n\n")
-	buf.WriteString("Traffic goes to `127.0.0.1:<port>` inside this run — your own loopback,\n")
-	buf.WriteString("nothing else is reachable — so bind your dev server to it. Vite: behind a\n")
-	buf.WriteString("public port other than 5173, HMR may need `server.hmr.clientPort` set to the\n")
-	buf.WriteString("URL's port, and its host check may need `server.allowedHosts` to include\n")
+	buf.WriteString("Traffic goes to `127.0.0.1:<port>` inside this run, or `[::1]:<port>` when\n")
+	buf.WriteString("nothing listens there — your own loopback, nothing else is reachable — so a\n")
+	buf.WriteString("dev server's default `localhost` binding works. Vite: behind a public port\n")
+	buf.WriteString("other than 5173, HMR may need `server.hmr.clientPort` set to the URL's port,\n")
+	buf.WriteString("and its host check may need `server.allowedHosts` to include\n")
 	fmt.Fprintf(buf, "`.%s`.\n", p.Domain)
 }
 

@@ -1107,6 +1107,7 @@ func TestRenderContextFile_withPreview(t *testing.T) {
 		"single DNS label",
 		"at most 8",
 		"`127.0.0.1:<port>`",
+		"`[::1]:<port>`",
 		"server.hmr.clientPort",
 		"server.allowedHosts",
 		"`.lab.internal`",
