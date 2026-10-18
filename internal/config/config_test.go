@@ -30,6 +30,8 @@ func TestParse(t *testing.T) {
 		OneCLIDashboard:        "off",
 		OneCLIDashboardAddr:    "",
 		OneCLIDashboardURL:     "",
+		PreviewAddr:            "",
+		PreviewDomain:          "lab.internal",
 		WarpgateURL:            "",
 		WarpgateAdminTokenFile: "",
 		WarpgateSSHAddr:        "",
@@ -1267,6 +1269,164 @@ func TestParse(t *testing.T) {
 			wantErr: "bogus",
 		},
 		{
+			name: "preview flags set",
+			args: []string{"--preview-addr", ":8081", "--preview-domain", "dev.example.org"},
+			want: with(func(c *Config) { c.PreviewAddr = ":8081"; c.PreviewDomain = "dev.example.org" }),
+		},
+		{
+			name: "preview env sets addr and domain",
+			env:  map[string]string{"LAB_PREVIEW_ADDR": "0.0.0.0:80", "LAB_PREVIEW_DOMAIN": "previews.example.org"},
+			want: with(func(c *Config) { c.PreviewAddr = "0.0.0.0:80"; c.PreviewDomain = "previews.example.org" }),
+		},
+		{
+			name: "preview flag beats env",
+			args: []string{"--preview-addr", ":9000", "--preview-domain", "a.test"},
+			env:  map[string]string{"LAB_PREVIEW_ADDR": ":8081", "LAB_PREVIEW_DOMAIN": "b.test"},
+			want: with(func(c *Config) { c.PreviewAddr = ":9000"; c.PreviewDomain = "a.test" }),
+		},
+		{
+			name: "preview-addr accepts a bracketed IPv6 host",
+			args: []string{"--preview-addr", "[::]:8081"},
+			want: with(func(c *Config) { c.PreviewAddr = "[::]:8081" }),
+		},
+		{
+			name: "empty preview-domain env falls back to the default",
+			env:  map[string]string{"LAB_PREVIEW_DOMAIN": ""},
+			want: with(func(c *Config) {}),
+		},
+		{
+			name: "explicit empty preview-domain flag falls back to the default",
+			args: []string{"--preview-domain="},
+			want: with(func(c *Config) {}),
+		},
+		{
+			name: "single-label preview domain is a hostname",
+			args: []string{"--preview-domain", "previews"},
+			want: with(func(c *Config) { c.PreviewDomain = "previews" }),
+		},
+		{
+			name:    "preview-addr no port",
+			args:    []string{"--preview-addr", "localhost"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr empty port",
+			args:    []string{"--preview-addr", "localhost:"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr port zero",
+			args:    []string{"--preview-addr", ":0"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr port above 65535",
+			args:    []string{"--preview-addr", ":70000"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr non-numeric port",
+			args:    []string{"--preview-addr", ":http"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr negative port",
+			args:    []string{"--preview-addr", ":-1"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr bare number",
+			args:    []string{"--preview-addr", "8081"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-addr from env is validated too",
+			env:     map[string]string{"LAB_PREVIEW_ADDR": "nope"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview-domain uppercase",
+			args:    []string{"--preview-domain", "Lab.Internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain trailing dot",
+			args:    []string{"--preview-domain", "lab.internal."},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain underscore label",
+			args:    []string{"--preview-domain", "my_app.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain leading hyphen",
+			args:    []string{"--preview-domain", "-lab.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain trailing hyphen label",
+			args:    []string{"--preview-domain", "lab-.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain empty label",
+			args:    []string{"--preview-domain", "lab..internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain leading dot",
+			args:    []string{"--preview-domain", ".lab.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain label of 64 chars",
+			args:    []string{"--preview-domain", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain space",
+			args:    []string{"--preview-domain", "lab internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain non-ascii",
+			args:    []string{"--preview-domain", "läb.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain with port",
+			args:    []string{"--preview-domain", "lab.internal:8081"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain with scheme",
+			args:    []string{"--preview-domain", "http://lab.internal"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain too long",
+			args:    []string{"--preview-domain", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain from env is validated too",
+			env:     map[string]string{"LAB_PREVIEW_DOMAIN": "Bad"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name:    "preview-domain is validated while previews are off",
+			args:    []string{"--preview-domain", "BAD"},
+			wantErr: "--preview-domain",
+		},
+		{
+			name: "preview domain of 253 characters is accepted",
+			args: []string{"--preview-domain", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			want: with(func(c *Config) {
+				c.PreviewDomain = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}),
+		},
+		{
 			name:    "positional arguments rejected",
 			args:    []string{"stray"},
 			wantErr: "unexpected arguments",
@@ -1325,3 +1485,37 @@ const (
 	testHostKeyED = "AAAAC3NzaC1lZDI1NTE5AAAAINhI8LKOopxh0yiaTvHmYEtFqXKyVqyASU7v7RkXh/yl"
 	testHostKeyEC = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGVg884+4njEpmyVTUchAmlrWQJt+rMYzszg1PpBGI+4mN6g7FWG65w/4YzsRPJ54Oa5WpmpsePFIXSwfBZV3Bw="
 )
+
+func TestPreviewPort(t *testing.T) {
+	tests := []struct {
+		addr string
+		want int
+	}{
+		{"", 0},
+		{":8081", 8081},
+		{"0.0.0.0:80", 80},
+		{"127.0.0.1:443", 443},
+		{"[::]:9000", 9000},
+	}
+	for _, tt := range tests {
+		if got := (Config{PreviewAddr: tt.addr}).PreviewPort(); got != tt.want {
+			t.Errorf("PreviewPort(%q) = %d, want %d", tt.addr, got, tt.want)
+		}
+	}
+
+	// End to end through Parse: unset is 0, set is the listener's port.
+	cfg, err := Parse(nil, genv(baseEnv()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewPort() != 0 {
+		t.Errorf("default PreviewPort() = %d, want 0 (previews off)", cfg.PreviewPort())
+	}
+	cfg, err = Parse([]string{"--preview-addr", ":8081"}, genv(baseEnv()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewPort() != 8081 {
+		t.Errorf("PreviewPort() = %d, want 8081", cfg.PreviewPort())
+	}
+}

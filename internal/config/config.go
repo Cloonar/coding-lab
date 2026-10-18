@@ -27,6 +27,12 @@ const (
 	DefaultMaxInstances    = 6
 	DefaultSessionNofile   = 16384
 	DefaultOneCLIDashboard = OneCLIDashboardOff
+	// DefaultPreviewDomain is the parent domain run previews are served
+	// under (<name>.lab.internal, issue #105). lab.internal sits under
+	// ICANN's reserved private-use TLD; .local is deliberately not used
+	// (Apple resolves it by mDNS first and systemd-resolved never sends it to
+	// unicast DNS).
+	DefaultPreviewDomain = "lab.internal"
 )
 
 // OneCLI dashboard exposure modes (issue #26 / ADR-0067). The dashboard is
@@ -143,6 +149,22 @@ type Config struct {
 	// setting — ADR-0067 pins the OneCLI client/address surface closed, so
 	// there is nothing here for a new setting to pair with.
 	OneCLIDashboardURL string
+
+	// PreviewAddr is the listen address of lab's preview listener (issue
+	// #105): the opt-in HTTP listener that serves a run's exposed ports at
+	// http://<name>.<PreviewDomain>[:port], routed by Host. "" (the default)
+	// means previews are off — nothing listens and `labctl expose` refuses.
+	// When set it is validated by Parse as host:port with a numeric port in
+	// 1–65535 (an empty host, e.g. ":8081", means every interface).
+	PreviewAddr string
+	// PreviewDomain is the parent domain previews are served under:
+	// <name>.<PreviewDomain>. Always a valid hostname after Parse — dot-
+	// separated lowercase DNS labels, no trailing dot — and never "" (an
+	// empty flag or env falls back to DefaultPreviewDomain). It is resolved
+	// and validated even while PreviewAddr is "" so a typo surfaces at boot
+	// rather than the day previews are switched on. The operator supplies the
+	// wildcard DNS record for it; lab does not.
+	PreviewDomain string
 
 	// WarpgateURL is the base URL of the Warpgate sidecar's admin API/HTTP
 	// listener that lab itself dials, typically loopback (e.g.
@@ -329,6 +351,7 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
 // LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE,
 // LAB_ONECLI_DASHBOARD, LAB_ONECLI_DASHBOARD_ADDR, LAB_ONECLI_DASHBOARD_URL,
+// LAB_PREVIEW_ADDR, LAB_PREVIEW_DOMAIN,
 // LAB_WARPGATE_URL, LAB_WARPGATE_ADMIN_TOKEN_FILE, LAB_WARPGATE_SSH_ADDR,
 // LAB_WARPGATE_CA_FILE, LAB_SESSION_COOKIE_DOMAIN. providerIDs is the
 // caller's list of registered provider ids: the generic per-provider
@@ -353,6 +376,9 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		oneCLIDashboard     = fs.String("onecli-dashboard", "", "OneCLI dashboard exposure: off (default, nothing exposed), port (lab reverse-proxies it on its own authenticated listener) or subdomain (your reverse proxy fronts it and delegates auth to lab) (env LAB_ONECLI_DASHBOARD)")
 		oneCLIDashboardAddr = fs.String("onecli-dashboard-addr", "", "listen address for --onecli-dashboard=port, e.g. :8443 (env LAB_ONECLI_DASHBOARD_ADDR)")
 		oneCLIDashboardURL  = fs.String("onecli-dashboard-url", "", "browser-facing dashboard origin, e.g. https://onecli.example.com; required for --onecli-dashboard=subdomain, an optional override in port mode (env LAB_ONECLI_DASHBOARD_URL)")
+
+		previewAddr   = fs.String("preview-addr", "", "listen address of the opt-in preview listener serving runs' exposed ports at http://<name>.<preview-domain>, e.g. :8081; empty (default) turns previews off (env LAB_PREVIEW_ADDR)")
+		previewDomain = fs.String("preview-domain", DefaultPreviewDomain, "parent domain previews are served under, <name>.<domain>; needs a wildcard DNS record you provide (default \""+DefaultPreviewDomain+"\"; env LAB_PREVIEW_DOMAIN)")
 
 		warpgateURL            = fs.String("warpgate-url", "", "Warpgate sidecar admin API base URL, e.g. https://localhost:8888; empty disables the Warpgate integration; must be set with --warpgate-admin-token-file (env LAB_WARPGATE_URL)")
 		warpgateAdminTokenFile = fs.String("warpgate-admin-token-file", "", "path to a 0600 file holding Warpgate's admin API token; must be set with --warpgate-url (env LAB_WARPGATE_ADMIN_TOKEN_FILE)")
@@ -629,6 +655,27 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		}
 	}
 
+	// --- Previews (issue #105) ----------------------------------------------
+	// Independent of the OneCLI block above: no pairing with any other
+	// setting. The domain is validated even while the listener is off, so a
+	// typo surfaces at boot, not the day previews are enabled.
+	cfg.PreviewAddr = pick("preview-addr", *previewAddr, "LAB_PREVIEW_ADDR", "")
+	if cfg.PreviewAddr != "" {
+		if err := validatePreviewAddr(cfg.PreviewAddr); err != nil {
+			return Config{}, fmt.Errorf("--preview-addr %q: %w", cfg.PreviewAddr, err)
+		}
+	}
+	cfg.PreviewDomain = pick("preview-domain", *previewDomain, "LAB_PREVIEW_DOMAIN", DefaultPreviewDomain)
+	if cfg.PreviewDomain == "" {
+		// Same as --onecli-dashboard: pick's fallback only fires when the flag
+		// was never set, so an explicit --preview-domain="" would otherwise
+		// arrive here as "" — the same intent as leaving it unset.
+		cfg.PreviewDomain = DefaultPreviewDomain
+	}
+	if err := validatePreviewDomain(cfg.PreviewDomain); err != nil {
+		return Config{}, fmt.Errorf("--preview-domain %q: %w", cfg.PreviewDomain, err)
+	}
+
 	// --- Warpgate SSH bastion (issue #39) -----------------------------------
 	// The non-HTTP sibling of the OneCLI block above (ADR-0068, the SSH
 	// counterpart of ADR-0067): url/adminTokenFile mirror OneCLIURL/OneCLIAPIKeyFile
@@ -710,6 +757,69 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 	}
 
 	return cfg, nil
+}
+
+// PreviewPort returns the port of PreviewAddr, or 0 when previews are off. It
+// is the port the printed preview URL carries (the caller omits it for 80).
+func (c Config) PreviewPort() int {
+	if c.PreviewAddr == "" {
+		return 0
+	}
+	_, port, err := net.SplitHostPort(c.PreviewAddr)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// validatePreviewAddr checks addr is host:port with a numeric port in 1–65535.
+// The host is not resolved or checked (":8081" binds every interface).
+func validatePreviewAddr(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("want host:port, e.g. :8081 (%v)", err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port %q: want a number in 1–65535", port)
+	}
+	return nil
+}
+
+// validatePreviewDomain checks d is a hostname fit to be the parent of
+// per-exposure labels: dot-separated DNS labels (1–63 characters of a-z, 0-9
+// and '-', no leading or trailing '-'), lowercase, no trailing dot, at most
+// 253 characters in all. Uppercase is rejected rather than folded: Host
+// routing compares lowercase, and silently rewriting an operator's value
+// would hide the mismatch.
+func validatePreviewDomain(d string) error {
+	if len(d) > 253 {
+		return fmt.Errorf("longer than 253 characters")
+	}
+	if strings.HasSuffix(d, ".") {
+		return fmt.Errorf("must not end with a dot")
+	}
+	for _, label := range strings.Split(d, ".") {
+		switch {
+		case label == "":
+			return fmt.Errorf("empty label: want dot-separated DNS labels like lab.internal")
+		case len(label) > 63:
+			return fmt.Errorf("label %q is longer than 63 characters", label)
+		case label[0] == '-' || label[len(label)-1] == '-':
+			return fmt.Errorf("label %q must not start or end with '-'", label)
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return fmt.Errorf("label %q: only lowercase a-z, 0-9 and '-' are allowed", label)
+			}
+		}
+	}
+	return nil
 }
 
 // resolveProviderMap builds a per-provider override map: for each registered

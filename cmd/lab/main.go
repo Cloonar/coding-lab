@@ -130,6 +130,13 @@ Flags (env overrides in parentheses; flag > env > default):
                            https://onecli.example.com; required for
                            -onecli-dashboard=subdomain, an optional override
                            in port mode (LAB_ONECLI_DASHBOARD_URL)
+  -preview-addr string     listen address of the opt-in preview listener that
+                           serves runs' exposed ports at
+                           http://<name>.<preview-domain>, e.g. :8081; empty
+                           (default) turns previews off (LAB_PREVIEW_ADDR)
+  -preview-domain string   parent domain previews are served under,
+                           <name>.<domain>; needs a wildcard DNS record you
+                           provide (default "lab.internal"; LAB_PREVIEW_DOMAIN)
   -warpgate-url string     Warpgate admin API base URL, e.g. https://localhost:8888;
                            set together with -warpgate-admin-token-file; unset leaves
                            the integration off (LAB_WARPGATE_URL)
