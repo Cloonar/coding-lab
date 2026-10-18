@@ -151,12 +151,34 @@ type Config struct {
 	OneCLIDashboardURL string
 
 	// PreviewAddr is the listen address of lab's preview listener (issue
-	// #105): the opt-in HTTP listener that serves a run's exposed ports at
-	// http://<name>.<PreviewDomain>[:port], routed by Host. "" (the default)
-	// means previews are off — nothing listens and `labctl expose` refuses.
-	// When set it is validated by Parse as host:port with a numeric port in
-	// 1–65535 (an empty host, e.g. ":8081", means every interface).
+	// #105): the opt-in listener that serves a run's exposed ports at
+	// https://<name>.<PreviewDomain>[:port], routed by Host. Since issue #106
+	// it terminates TLS itself (an operator-supplied pair or a lab-minted
+	// wildcard leaf), so the port is appended to the URL unless it is 443.
+	// "" (the default) means previews are off — nothing listens and
+	// `labctl expose` refuses. When set it is validated by Parse as host:port
+	// with a numeric port in 1–65535 (an empty host, e.g. ":443" or ":8443",
+	// means every interface).
 	PreviewAddr string
+	// PreviewRedirectAddr is the listen address of the plain-HTTP redirect
+	// listener (issue #106): it answers every request with a 308 to
+	// https://<same host>[:PreviewPort unless 443]<same path and query> and
+	// serves nothing else — it is the only unauthenticated plain-HTTP surface
+	// lab exposes. "" (the default) means no redirect listener. Same shape
+	// rule as PreviewAddr. Requires PreviewAddr (a redirect to a listener
+	// that is not there is a dead end) and must differ from it (two
+	// listeners cannot share one address).
+	PreviewRedirectAddr string
+	// PreviewCertFile and PreviewKeyFile are the PEM pair of an
+	// operator-supplied certificate for the preview listener, e.g. an ACME
+	// wildcard for *.<PreviewDomain> (issue #106). Set together or not at all
+	// — a certificate with no key cannot serve, a key with no certificate has
+	// nothing to sign — and only with PreviewAddr. Both "" (the default) means
+	// lab mints its own CA and wildcard leaf under <state>/preview/. Paths
+	// only, like OneCLICAFile: the certificate manager loads (and re-reads on
+	// change) them, Parse does not touch the filesystem.
+	PreviewCertFile string
+	PreviewKeyFile  string
 	// PreviewDomain is the parent domain previews are served under:
 	// <name>.<PreviewDomain>. Always a valid hostname after Parse — dot-
 	// separated lowercase DNS labels, no trailing dot — and never "" (an
@@ -351,7 +373,8 @@ func (p *providerMapFlag) Set(value string) error {
 // LAB_SEED_PASSWORD_HASH, LAB_SEED_PASSWORD_HASH_FILE, LAB_ONECLI_URL,
 // LAB_ONECLI_API_KEY_FILE, LAB_ONECLI_GATEWAY_URL, LAB_ONECLI_CA_FILE,
 // LAB_ONECLI_DASHBOARD, LAB_ONECLI_DASHBOARD_ADDR, LAB_ONECLI_DASHBOARD_URL,
-// LAB_PREVIEW_ADDR, LAB_PREVIEW_DOMAIN,
+// LAB_PREVIEW_ADDR, LAB_PREVIEW_DOMAIN, LAB_PREVIEW_REDIRECT_ADDR,
+// LAB_PREVIEW_CERT_FILE, LAB_PREVIEW_KEY_FILE,
 // LAB_WARPGATE_URL, LAB_WARPGATE_ADMIN_TOKEN_FILE, LAB_WARPGATE_SSH_ADDR,
 // LAB_WARPGATE_CA_FILE, LAB_SESSION_COOKIE_DOMAIN. providerIDs is the
 // caller's list of registered provider ids: the generic per-provider
@@ -377,8 +400,11 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		oneCLIDashboardAddr = fs.String("onecli-dashboard-addr", "", "listen address for --onecli-dashboard=port, e.g. :8443 (env LAB_ONECLI_DASHBOARD_ADDR)")
 		oneCLIDashboardURL  = fs.String("onecli-dashboard-url", "", "browser-facing dashboard origin, e.g. https://onecli.example.com; required for --onecli-dashboard=subdomain, an optional override in port mode (env LAB_ONECLI_DASHBOARD_URL)")
 
-		previewAddr   = fs.String("preview-addr", "", "listen address of the opt-in preview listener serving runs' exposed ports at http://<name>.<preview-domain>, e.g. :8081; empty (default) turns previews off (env LAB_PREVIEW_ADDR)")
-		previewDomain = fs.String("preview-domain", DefaultPreviewDomain, "parent domain previews are served under, <name>.<domain>; needs a wildcard DNS record you provide (default \""+DefaultPreviewDomain+"\"; env LAB_PREVIEW_DOMAIN)")
+		previewAddr         = fs.String("preview-addr", "", "listen address of the opt-in preview listener serving runs' exposed ports over HTTPS at https://<name>.<preview-domain> (port appended unless 443), e.g. :443 or :8443; empty (default) turns previews off (env LAB_PREVIEW_ADDR)")
+		previewRedirectAddr = fs.String("preview-redirect-addr", "", "listen address of a plain-HTTP listener that only 308-redirects to the HTTPS preview listener, e.g. :80; empty (default) runs none; requires --preview-addr (env LAB_PREVIEW_REDIRECT_ADDR)")
+		previewCertFile     = fs.String("preview-cert-file", "", "path to the PEM certificate (chain) served by the preview listener, e.g. an ACME wildcard for *.<preview-domain>; must be set with --preview-key-file; unset makes lab mint its own CA and wildcard leaf (env LAB_PREVIEW_CERT_FILE)")
+		previewKeyFile      = fs.String("preview-key-file", "", "path to the PEM private key matching --preview-cert-file; must be set with it (env LAB_PREVIEW_KEY_FILE)")
+		previewDomain       = fs.String("preview-domain", DefaultPreviewDomain, "parent domain previews are served under, <name>.<domain>; needs a wildcard DNS record you provide (default \""+DefaultPreviewDomain+"\"; env LAB_PREVIEW_DOMAIN)")
 
 		warpgateURL            = fs.String("warpgate-url", "", "Warpgate sidecar admin API base URL, e.g. https://localhost:8888; empty disables the Warpgate integration; must be set with --warpgate-admin-token-file (env LAB_WARPGATE_URL)")
 		warpgateAdminTokenFile = fs.String("warpgate-admin-token-file", "", "path to a 0600 file holding Warpgate's admin API token; must be set with --warpgate-url (env LAB_WARPGATE_ADMIN_TOKEN_FILE)")
@@ -676,6 +702,37 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 		return Config{}, fmt.Errorf("--preview-domain %q: %w", cfg.PreviewDomain, err)
 	}
 
+	// --- Preview TLS front door (issue #106) --------------------------------
+	// The redirect listener and the operator certificate both hang off the
+	// preview listener: without --preview-addr there is nothing to redirect
+	// to and nothing to serve a certificate on, so setting either is an error
+	// rather than silently dead config (the Warpgate SSH host key does the
+	// same with its listener).
+	cfg.PreviewRedirectAddr = pick("preview-redirect-addr", *previewRedirectAddr, "LAB_PREVIEW_REDIRECT_ADDR", "")
+	if cfg.PreviewRedirectAddr != "" {
+		if err := validatePreviewAddr(cfg.PreviewRedirectAddr); err != nil {
+			return Config{}, fmt.Errorf("--preview-redirect-addr %q: %w", cfg.PreviewRedirectAddr, err)
+		}
+		if cfg.PreviewAddr == "" {
+			return Config{}, fmt.Errorf("--preview-redirect-addr is set but --preview-addr is not: there is no preview listener to redirect to")
+		}
+		if cfg.PreviewRedirectAddr == cfg.PreviewAddr {
+			return Config{}, fmt.Errorf("--preview-redirect-addr %q is the same as --preview-addr: the redirect listener needs its own address", cfg.PreviewRedirectAddr)
+		}
+	}
+	cfg.PreviewCertFile = pick("preview-cert-file", *previewCertFile, "LAB_PREVIEW_CERT_FILE", "")
+	cfg.PreviewKeyFile = pick("preview-key-file", *previewKeyFile, "LAB_PREVIEW_KEY_FILE", "")
+	// Half a keypair = dead config, the same rule as the Warpgate url/token
+	// pair. Both unset (the default) hands the listener to lab's own CA; both
+	// set is valid. A path is a path — no existence check here (the cert
+	// manager loads them at startup), like --onecli-ca-file.
+	if (cfg.PreviewCertFile != "") != (cfg.PreviewKeyFile != "") {
+		return Config{}, fmt.Errorf("--preview-cert-file and --preview-key-file must be set together or not at all")
+	}
+	if cfg.PreviewCertFile != "" && cfg.PreviewAddr == "" {
+		return Config{}, fmt.Errorf("--preview-cert-file and --preview-key-file are set but --preview-addr is not: there is no preview listener to serve the certificate on")
+	}
+
 	// --- Warpgate SSH bastion (issue #39) -----------------------------------
 	// The non-HTTP sibling of the OneCLI block above (ADR-0068, the SSH
 	// counterpart of ADR-0067): url/adminTokenFile mirror OneCLIURL/OneCLIAPIKeyFile
@@ -760,7 +817,8 @@ func Parse(args []string, getenv func(string) string, providerIDs []string) (Con
 }
 
 // PreviewPort returns the port of PreviewAddr, or 0 when previews are off. It
-// is the port the printed preview URL carries (the caller omits it for 80).
+// is the port the printed preview URL carries (the caller omits it for 443,
+// issue #106).
 func (c Config) PreviewPort() int {
 	if c.PreviewAddr == "" {
 		return 0

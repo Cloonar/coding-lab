@@ -32,6 +32,9 @@ func TestParse(t *testing.T) {
 		OneCLIDashboardURL:     "",
 		PreviewAddr:            "",
 		PreviewDomain:          "lab.internal",
+		PreviewRedirectAddr:    "",
+		PreviewCertFile:        "",
+		PreviewKeyFile:         "",
 		WarpgateURL:            "",
 		WarpgateAdminTokenFile: "",
 		WarpgateSSHAddr:        "",
@@ -1424,6 +1427,148 @@ func TestParse(t *testing.T) {
 			args: []string{"--preview-domain", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 			want: with(func(c *Config) {
 				c.PreviewDomain = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}),
+		},
+		// --- Preview TLS front door (issue #106) ---
+		{
+			name: "preview TLS settings default to empty",
+			args: []string{"--preview-addr", ":443"},
+			want: with(func(c *Config) { c.PreviewAddr = ":443" }),
+		},
+		{
+			name: "preview redirect addr flag",
+			args: []string{"--preview-addr", ":443", "--preview-redirect-addr", ":80"},
+			want: with(func(c *Config) { c.PreviewAddr = ":443"; c.PreviewRedirectAddr = ":80" }),
+		},
+		{
+			name: "preview redirect addr env",
+			env:  map[string]string{"LAB_PREVIEW_ADDR": ":8443", "LAB_PREVIEW_REDIRECT_ADDR": "0.0.0.0:8080"},
+			want: with(func(c *Config) { c.PreviewAddr = ":8443"; c.PreviewRedirectAddr = "0.0.0.0:8080" }),
+		},
+		{
+			name: "preview redirect addr flag beats env",
+			args: []string{"--preview-addr", ":443", "--preview-redirect-addr", ":80"},
+			env:  map[string]string{"LAB_PREVIEW_REDIRECT_ADDR": ":8080"},
+			want: with(func(c *Config) { c.PreviewAddr = ":443"; c.PreviewRedirectAddr = ":80" }),
+		},
+		{
+			name:    "preview redirect addr without preview-addr",
+			args:    []string{"--preview-redirect-addr", ":80"},
+			wantErr: "--preview-redirect-addr is set but --preview-addr is not",
+		},
+		{
+			name:    "preview redirect addr from env without preview-addr",
+			env:     map[string]string{"LAB_PREVIEW_REDIRECT_ADDR": ":80"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name:    "preview redirect addr equal to preview-addr",
+			args:    []string{"--preview-addr", ":443", "--preview-redirect-addr", ":443"},
+			wantErr: "same as --preview-addr",
+		},
+		{
+			name:    "preview redirect addr no port",
+			args:    []string{"--preview-addr", ":443", "--preview-redirect-addr", "localhost"},
+			wantErr: "--preview-redirect-addr",
+		},
+		{
+			name:    "preview redirect addr port zero",
+			args:    []string{"--preview-addr", ":443", "--preview-redirect-addr", ":0"},
+			wantErr: "--preview-redirect-addr",
+		},
+		{
+			name:    "preview redirect addr port above 65535",
+			args:    []string{"--preview-addr", ":443", "--preview-redirect-addr", ":70000"},
+			wantErr: "--preview-redirect-addr",
+		},
+		{
+			name:    "preview redirect addr bare number",
+			args:    []string{"--preview-addr", ":443", "--preview-redirect-addr", "80"},
+			wantErr: "--preview-redirect-addr",
+		},
+		{
+			name:    "preview redirect addr from env is validated too",
+			env:     map[string]string{"LAB_PREVIEW_ADDR": ":443", "LAB_PREVIEW_REDIRECT_ADDR": "nope"},
+			wantErr: "--preview-redirect-addr",
+		},
+		{
+			name: "preview cert and key flags",
+			args: []string{"--preview-addr", ":443", "--preview-cert-file", "/etc/ssl/wild.crt", "--preview-key-file", "/etc/ssl/wild.key"},
+			want: with(func(c *Config) {
+				c.PreviewAddr = ":443"
+				c.PreviewCertFile = "/etc/ssl/wild.crt"
+				c.PreviewKeyFile = "/etc/ssl/wild.key"
+			}),
+		},
+		{
+			name: "preview cert and key env",
+			env: map[string]string{
+				"LAB_PREVIEW_ADDR":      ":443",
+				"LAB_PREVIEW_CERT_FILE": "/env/wild.crt",
+				"LAB_PREVIEW_KEY_FILE":  "/env/wild.key",
+			},
+			want: with(func(c *Config) {
+				c.PreviewAddr = ":443"
+				c.PreviewCertFile = "/env/wild.crt"
+				c.PreviewKeyFile = "/env/wild.key"
+			}),
+		},
+		{
+			name: "preview cert and key flags beat env",
+			args: []string{"--preview-addr", ":443", "--preview-cert-file", "/flag/wild.crt", "--preview-key-file", "/flag/wild.key"},
+			env:  map[string]string{"LAB_PREVIEW_CERT_FILE": "/env/wild.crt", "LAB_PREVIEW_KEY_FILE": "/env/wild.key"},
+			want: with(func(c *Config) {
+				c.PreviewAddr = ":443"
+				c.PreviewCertFile = "/flag/wild.crt"
+				c.PreviewKeyFile = "/flag/wild.key"
+			}),
+		},
+		{
+			name: "preview cert and key paths are not checked for existence",
+			args: []string{"--preview-addr", ":443", "--preview-cert-file", "/definitely/not/here.crt", "--preview-key-file", "/definitely/not/here.key"},
+			want: with(func(c *Config) {
+				c.PreviewAddr = ":443"
+				c.PreviewCertFile = "/definitely/not/here.crt"
+				c.PreviewKeyFile = "/definitely/not/here.key"
+			}),
+		},
+		{
+			name:    "preview cert without key",
+			args:    []string{"--preview-addr", ":443", "--preview-cert-file", "/etc/ssl/wild.crt"},
+			wantErr: "--preview-cert-file and --preview-key-file must be set together or not at all",
+		},
+		{
+			name:    "preview key without cert",
+			args:    []string{"--preview-addr", ":443", "--preview-key-file", "/etc/ssl/wild.key"},
+			wantErr: "--preview-cert-file and --preview-key-file must be set together or not at all",
+		},
+		{
+			name:    "preview cert without key from env",
+			env:     map[string]string{"LAB_PREVIEW_ADDR": ":443", "LAB_PREVIEW_CERT_FILE": "/env/wild.crt"},
+			wantErr: "--preview-cert-file and --preview-key-file must be set together or not at all",
+		},
+		{
+			name:    "preview key without cert from env",
+			env:     map[string]string{"LAB_PREVIEW_ADDR": ":443", "LAB_PREVIEW_KEY_FILE": "/env/wild.key"},
+			wantErr: "--preview-cert-file and --preview-key-file must be set together or not at all",
+		},
+		{
+			name:    "preview cert and key without preview-addr",
+			args:    []string{"--preview-cert-file", "/etc/ssl/wild.crt", "--preview-key-file", "/etc/ssl/wild.key"},
+			wantErr: "--preview-addr",
+		},
+		{
+			name: "full preview TLS combination",
+			args: []string{
+				"--preview-addr", ":443", "--preview-redirect-addr", ":80", "--preview-domain", "lab.example.org",
+				"--preview-cert-file", "/etc/ssl/wild.crt", "--preview-key-file", "/etc/ssl/wild.key",
+			},
+			want: with(func(c *Config) {
+				c.PreviewAddr = ":443"
+				c.PreviewRedirectAddr = ":80"
+				c.PreviewDomain = "lab.example.org"
+				c.PreviewCertFile = "/etc/ssl/wild.crt"
+				c.PreviewKeyFile = "/etc/ssl/wild.key"
 			}),
 		},
 		{
