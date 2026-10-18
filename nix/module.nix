@@ -7,6 +7,11 @@
 #     agent session under it) lives in this unit's cgroup. KillMode=process
 #     makes a restart/deploy kill only the lab process; lab re-adopts the
 #     surviving tmux server on start. A config switch never drops a session.
+#   - No CapabilityBoundingSet, ever: the unit's process tree runs rootless
+#     podman, whose setuid newuidmap/newgidmap wrappers need capabilities a
+#     bounding set would strip. Previews on a port below 1024 (issue #106)
+#     get AmbientCapabilities=CAP_NET_BIND_SERVICE instead — see
+#     serviceConfig below.
 #   - openssh on the unit PATH is load-bearing: origins are SSH remotes and
 #     git forks `ssh` off PATH — without it every fetch dies with
 #     "cannot run ssh: No such file or directory".
@@ -81,13 +86,33 @@ let
   # "[::]:8080" all work — the port is the piece after the last colon).
   listenPort = lib.toInt (lib.last (lib.splitString ":" cfg.listenAddr));
 
-  # Same derivation for the preview listener's port (null = previews off, no
-  # port to open).
-  previewPort =
-    if cfg.preview.listenAddr == null then
-      null
-    else
-      lib.toInt (lib.last (lib.splitString ":" cfg.preview.listenAddr));
+  # Same derivation for the preview listener's port and the HTTP→HTTPS
+  # redirect listener's port ("[::]:443" works too: the piece after the last
+  # colon). Lazy — only forced while preview.enable is on. redirectPort is
+  # null when the redirect listener is disabled (redirectAddr = null).
+  addrPort = addr: lib.toInt (lib.last (lib.splitString ":" addr));
+  previewPort = addrPort cfg.preview.listenAddr;
+  redirectPort = if cfg.preview.redirectAddr == null then null else addrPort cfg.preview.redirectAddr;
+
+  # Binding a port below 1024 as the unprivileged service user needs
+  # CAP_NET_BIND_SERVICE (issue #106: the defaults are :443 and :80).
+  previewNeedsBindCap =
+    cfg.preview.enable && (previewPort < 1024 || (redirectPort != null && redirectPort < 1024));
+
+  # Preview options DEFINED by the operator (above mkOptionDefault priority,
+  # i.e. more than the option's own default) — what the "set without
+  # preview.enable" assertion keys on. Reads only priorities, never values.
+  # Before issue #106 a non-null listenAddr was the previews switch; a
+  # leftover #105-style config must fail eval, not silently turn previews off.
+  previewExplicitlySet = lib.filter (
+    name: options.services.lab.preview.${name}.highestPrio < (lib.mkOptionDefault null).priority
+  ) [
+    "listenAddr"
+    "redirectAddr"
+    "domain"
+    "certFile"
+    "keyFile"
+  ];
 
   args = [
     "--addr"
@@ -150,15 +175,32 @@ let
     "--onecli-dashboard-url"
     cfg.onecli.dashboardUrl
   ]
-  # Previews (issue #105): off — and no flag at all — while listenAddr is
-  # null. The domain only means something alongside a listener, so it is
-  # emitted with it and never on its own.
-  ++ lib.optionals (cfg.preview.listenAddr != null) [
-    "--preview-addr"
-    cfg.preview.listenAddr
-    "--preview-domain"
-    cfg.preview.domain
-  ]
+  # Previews (issues #105/#106): off — and no --preview-* flag at all —
+  # while preview.enable is false. Every preview flag only means something
+  # alongside the listener (lab rejects the redirect/cert flags without
+  # --preview-addr), so all of them gate on enable and never render alone.
+  # The cert/key pair renders when set; the assertion below keeps the two
+  # together.
+  ++ lib.optionals cfg.preview.enable (
+    [
+      "--preview-addr"
+      cfg.preview.listenAddr
+      "--preview-domain"
+      cfg.preview.domain
+    ]
+    ++ lib.optionals (cfg.preview.redirectAddr != null) [
+      "--preview-redirect-addr"
+      cfg.preview.redirectAddr
+    ]
+    ++ lib.optionals (cfg.preview.certFile != null) [
+      "--preview-cert-file"
+      cfg.preview.certFile
+    ]
+    ++ lib.optionals (cfg.preview.keyFile != null) [
+      "--preview-key-file"
+      cfg.preview.keyFile
+    ]
+  )
   ++ lib.optionals (cfg.warpgate.url != null) [
     "--warpgate-url"
     cfg.warpgate.url
@@ -632,23 +674,60 @@ in
     };
 
     preview = {
-      listenAddr = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = ":8081";
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
         description = ''
-          Listen address of lab's preview listener (--preview-addr), the
-          opt-in HTTP listener that serves ports an agent exposes with
-          `labctl expose <name> <port>` at `http://<name>.<domain>`, routed by
-          the `Host` header. `null` (the default) keeps previews off: nothing
-          listens and `labctl expose` refuses. Distinct from
-          {option}`services.lab.listenAddr` (lab's main listener). The
-          listener is plain HTTP and has no authentication of its own —
-          reachable means allowed — so bind it to an interface you trust.
-          You must also provide a wildcard DNS record covering every
-          subdomain of {option}`domain` and pointing at this host. With
-          {option}`services.lab.openFirewall` the port in this address is
+          Previews (issues #105/#106): lab's opt-in HTTPS listener that
+          serves ports an agent exposes with `labctl expose <name> <port>`
+          at `https://<name>.<domain>`, routed by the `Host` header. `false`
+          (the default) keeps previews off: nothing listens, `labctl expose`
+          refuses, and the unit carries no `--preview-*` flag at all. Setting
+          any other `preview.*` option while this is `false` fails eval —
+          before #106 a non-null {option}`listenAddr` was the switch; it is
+          this option now.
+
+          When either {option}`listenAddr` or {option}`redirectAddr` names a
+          port below 1024 (the defaults, `:443` and `:80`), the unit gets
+          `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the unprivileged
+          service user can bind it; lab drops the ambient capability once its
+          preview listeners are bound, so tmux and agent sessions never
+          inherit it. With {option}`services.lab.openFirewall` both ports are
           opened too.
+        '';
+      };
+
+      listenAddr = lib.mkOption {
+        type = lib.types.str;
+        default = ":443";
+        example = "0.0.0.0:8443";
+        description = ''
+          Listen address of lab's preview listener (--preview-addr). Lab
+          terminates TLS on it itself — no reverse proxy in the path — with
+          the certificate from {option}`certFile` / {option}`keyFile`, or a
+          lab-minted one when those are unset. Distinct from
+          {option}`services.lab.listenAddr` (lab's main listener). The
+          listener has no authentication of its own — reachable means
+          allowed — so bind it to an interface you trust. You must also
+          provide a wildcard DNS record covering every subdomain of
+          {option}`domain` and pointing at this host. Printed and displayed
+          preview URLs carry the port unless it is 443. Only passed to lab
+          while {option}`enable` is on.
+        '';
+      };
+
+      redirectAddr = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = ":80";
+        example = "0.0.0.0:8080";
+        description = ''
+          Listen address of the plain-HTTP redirect listener
+          (--preview-redirect-addr). It answers every request with a 308 to
+          the same host, path and query on `https://` (with the
+          {option}`listenAddr` port unless 443) and serves nothing else — it
+          is unauthenticated plain HTTP, so it never hosts a download or a
+          status page. `null` disables the redirect listener. Only passed to
+          lab while {option}`enable` is on.
         '';
       };
 
@@ -658,11 +737,47 @@ in
         example = "previews.example.com";
         description = ''
           Parent domain previews are served under (--preview-domain): each
-          exposure `<name>` is reachable at `http://<name>.<domain>`. A
+          exposure `<name>` is reachable at `https://<name>.<domain>`. A
           hostname — lowercase dot-separated DNS labels, no trailing dot; lab
           refuses to start otherwise. The default sits under ICANN's reserved
-          private-use TLD. Only passed to lab together with
-          {option}`listenAddr`; meaningless while previews are off.
+          private-use TLD. Changing it makes lab re-mint its own leaf
+          certificate (the CA is kept). Only passed to lab while
+          {option}`enable` is on.
+        '';
+      };
+
+      certFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/acme/lab.example.com/fullchain.pem";
+        description = ''
+          PEM certificate (chain) the preview listener serves
+          (--preview-cert-file) — a runtime path, not copied into the store.
+          Must be set together with {option}`keyFile`; lab refuses to start
+          with only one of the two set, and so does this module's eval. Lab
+          re-reads the pair whenever either file's mtime changes, so an ACME
+          renewal (e.g. a DNS-01 wildcard for `*.<domain>`) that rewrites
+          the files in place is picked up without a restart; a bad reload
+          keeps the previous pair. `null` (the default, with
+          {option}`keyFile` also `null`) has lab mint its own private CA and
+          a wildcard leaf for `*.<domain>` and `<domain>` under
+          `<stateDir>/preview/`, re-minting the leaf before it expires and
+          whenever {option}`domain` changes; download the CA from lab's
+          Settings page and trust it once per device.
+        '';
+      };
+
+      keyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/var/lib/acme/lab.example.com/key.pem";
+        description = ''
+          PEM private key for {option}`certFile` (--preview-key-file) — a
+          runtime path, not copied into the store; the service user must be
+          able to read it. Must be set together with {option}`certFile`;
+          lab refuses to start with only one of the two set, and so does
+          this module's eval. `null` (the default) uses lab's own minted
+          CA and leaf — see {option}`certFile`.
         '';
       };
     };
@@ -981,8 +1096,10 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Open the firewall for the port in {option}`listenAddr` and, when
-        previews are on, the port in {option}`preview.listenAddr`.
+        Open the firewall for the port in {option}`listenAddr` and, while
+        {option}`preview.enable` is on, the ports in
+        {option}`preview.listenAddr` and (unless `null`)
+        {option}`preview.redirectAddr`.
       '';
     };
 
@@ -1033,6 +1150,20 @@ in
       {
         assertion = cfg.onecli.dashboard == "subdomain" -> cfg.onecli.dashboardUrl != null;
         message = "services.lab.onecli.dashboard is \"subdomain\" but services.lab.onecli.dashboardUrl is unset — subdomain mode has no listener of its own to derive a browser-facing origin from, so it must be told the origin explicitly. lab itself refuses to start on this mismatch.";
+      }
+      # Previews (issue #106). The cert/key pairing mirrors lab's own startup
+      # refusal; the explicit-set check catches a #105-era config (where a
+      # non-null listenAddr was the switch) that would otherwise silently
+      # render no preview flag at all now that enable is the switch.
+      {
+        assertion = (cfg.preview.certFile == null) == (cfg.preview.keyFile == null);
+        message = "services.lab.preview.certFile and services.lab.preview.keyFile must be set together or not at all — leave both unset to have lab mint its own CA and wildcard leaf. lab itself refuses to start on this mismatch.";
+      }
+      {
+        assertion = cfg.preview.enable || previewExplicitlySet == [ ];
+        message = "${
+          lib.concatMapStringsSep ", " (name: "services.lab.preview.${name}") previewExplicitlySet
+        } set while services.lab.preview.enable is false — previews are now switched on by services.lab.preview.enable (issue #106), no longer by setting services.lab.preview.listenAddr. Set services.lab.preview.enable = true, or drop the preview settings.";
       }
       # Deliberately no assertion on container.defaultImage (null + per-repo
       # image refs is a valid deployment, ADR-0053), no key validation, no
@@ -1107,7 +1238,10 @@ in
     environment.systemPackages = [ pkgs.tmux ];
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
-      [ listenPort ] ++ lib.optional (previewPort != null) previewPort
+      [ listenPort ]
+      ++ lib.optionals cfg.preview.enable (
+        [ previewPort ] ++ lib.optional (redirectPort != null) redirectPort
+      )
     );
 
     systemd.services.lab = {
@@ -1229,6 +1363,19 @@ in
         ExecStart = utils.escapeSystemdExecArgs ([ (lib.getExe cfg.package) ] ++ args);
 
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) [ cfg.environmentFile ];
+
+        # Previews on a port below 1024 (issue #106; the defaults are :443
+        # and :80): the unprivileged service user needs CAP_NET_BIND_SERVICE
+        # to bind them. The unit sets no CapabilityBoundingSet and no
+        # NoNewPrivileges, so there is nothing to widen — and a bounding set
+        # must NOT be added: the unit's process tree runs rootless podman,
+        # whose setuid newuidmap/newgidmap wrappers (/run/wrappers, issue
+        # #228) rely on setuid/file capabilities a bounding set would strip.
+        # Ambient capabilities survive execve into children, so lab drops
+        # the ambient capability once its preview listeners are bound — the
+        # tmux server and every agent session spawned later never inherit
+        # it. Ports >= 1024 (or previews off) add nothing to the unit.
+        AmbientCapabilities = lib.mkIf previewNeedsBindCap [ "CAP_NET_BIND_SERVICE" ];
       }
       // lib.optionalAttrs (cfg.stateDir == "/var/lib/lab") {
         StateDirectory = "lab";
