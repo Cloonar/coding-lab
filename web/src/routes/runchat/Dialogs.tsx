@@ -14,7 +14,7 @@ import {
   type DialogOption,
   type QuestionResult,
 } from '../../api';
-import { Markdown } from './Markdown';
+import { Markdown } from '../../components/Markdown';
 
 // The pending dialog as a full-width stream card (issue #56 decision 1): the
 // interactive DialogPanel wrapped in house card chrome, rendered inside
@@ -77,7 +77,7 @@ export function AnsweredDialog(props: { dialog: Dialog }) {
             operator quote. */}
         <Match when={props.dialog.dialog_kind === 'plan'}>
           <div class="chat-dialog-plan">
-            <Markdown source={props.dialog.prompt} />
+            <Markdown source={props.dialog.prompt} class="chat-msg-text md" />
           </div>
           <p class="chat-dialog-outcome">{planMarker()}</p>
           <Show when={outcome().dismissed !== true && outcome().approved !== true}>
@@ -209,7 +209,7 @@ function DialogPanel(props: {
         fallback={<p class="chat-dialog-prompt">{props.dialog.prompt}</p>}
       >
         <div class="chat-dialog-plan">
-          <Markdown source={props.dialog.prompt} />
+          <Markdown source={props.dialog.prompt} class="chat-msg-text md" />
         </div>
       </Show>
       <Show

@@ -1,9 +1,11 @@
-// Hand-rolled markdown → node tree for the embedded chat (issue #13). No
-// library, no new npm dep: the parser emits a plain data tree the view maps to
-// Solid JSX nodes (never an HTML string, never innerHTML), so rendering is
-// XSS-safe by construction and needs no sanitizer. This matches the repo's
-// twice-documented "no markdown engine — no heavy deps" ethos
-// (web/src/routes/IssueDetail.tsx).
+// Hand-rolled markdown → node tree. No library, no new npm dep: the parser
+// emits a plain data tree that the shared node-tree renderer maps to Solid JSX
+// (never an HTML string, never innerHTML), so rendering is XSS-safe by
+// construction and needs no sanitizer. One parser, two consumers: the embedded
+// chat (issue #13) and the issue view (issue #103). Beyond the CommonMark/GFM
+// subset it recognises issue references `#N` (an inline `ref` node, same
+// grammar as the scheduler's blocked-by matcher) and — opt-in, issue view only
+// — GFM task-list items (`[ ]` / `[x]`, recorded as the list's `checked`).
 //
 // Hard requirement (decision 6): transcript text arrives PARTIALLY during live
 // streaming — an unclosed fence, a dangling `**`, `[text](` with no closing
@@ -21,6 +23,9 @@ export type Inline =
   | { type: 'em'; children: Inline[] }
   | { type: 'code'; value: string }
   | { type: 'link'; href: string; children: Inline[] }
+  // An issue reference `#N` (issue #103). The parser knows only the number;
+  // the view decides whether and where it links (the chat renders it as text).
+  | { type: 'ref'; number: number }
   | { type: 'break' };
 
 export type Align = 'left' | 'center' | 'right' | 'none';
@@ -30,7 +35,16 @@ export type Block =
   | { type: 'heading'; level: number; children: Inline[] }
   | { type: 'paragraph'; children: Inline[] }
   | { type: 'code'; lang: string; text: string }
-  | { type: 'list'; ordered: boolean; start: number; items: Block[][] }
+  | {
+      type: 'list';
+      ordered: boolean;
+      start: number;
+      items: Block[][];
+      // GFM task-list state, index-aligned with `items`: true/false for a
+      // `[x]`/`[ ]` item, null for a plain item. Present only when task lists
+      // are enabled (ParseOptions.taskLists) and at least one item is a task.
+      checked?: (boolean | null)[];
+    }
   | { type: 'blockquote'; children: Block[] }
   | { type: 'table'; header: Inline[][]; align: Align[]; rows: Inline[][][] }
   | { type: 'hr' };
@@ -40,15 +54,21 @@ export type Block =
 // a paragraph rather than risk a stack blow-up.
 const MAX_DEPTH = 12;
 
+export interface ParseOptions {
+  /** Recognise GFM task-list items (`[ ]` / `[x]` / `[X]`). Off by default so
+   *  the chat's tree stays exactly as it was; the issue view turns it on. */
+  taskLists?: boolean;
+}
+
 /** Parse markdown source into a block tree. Total: never throws. */
-export function parseMarkdown(src: string): Block[] {
+export function parseMarkdown(src: string, opts: ParseOptions = {}): Block[] {
   if (src === '') return [];
   // Normalise line endings; tabs → 4 spaces so indentation math is uniform.
   const lines = src.replace(/\r\n?/g, '\n').replace(/\t/g, '    ').split('\n');
-  return parseBlocks(lines, 0);
+  return parseBlocks(lines, 0, opts);
 }
 
-function parseBlocks(lines: string[], depth: number): Block[] {
+function parseBlocks(lines: string[], depth: number, opts: ParseOptions): Block[] {
   const blocks: Block[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -112,7 +132,7 @@ function parseBlocks(lines: string[], depth: number): Block[] {
         if (!/^ {0,3}>/.test(l)) break;
         inner.push(l.replace(/^ {0,3}>( ?)/, ''));
       }
-      blocks.push({ type: 'blockquote', children: parseBlocks(inner, depth + 1) });
+      blocks.push({ type: 'blockquote', children: parseBlocks(inner, depth + 1, opts) });
       i = j;
       continue;
     }
@@ -129,7 +149,7 @@ function parseBlocks(lines: string[], depth: number): Block[] {
 
     // List: a bullet (-, *, +) or ordered (1. / 1)) marker.
     if (matchMarker(line) !== null) {
-      const list = parseList(lines, i, depth);
+      const list = parseList(lines, i, depth, opts);
       blocks.push(list.node);
       i = list.next;
       continue;
@@ -296,7 +316,12 @@ function parseTable(lines: string[], start: number): { node: Block; next: number
   };
 }
 
-function parseList(lines: string[], start: number, depth: number): { node: Block; next: number } {
+function parseList(
+  lines: string[],
+  start: number,
+  depth: number,
+  opts: ParseOptions,
+): { node: Block; next: number } {
   const first = matchMarker(lines[start] ?? '');
   // `first` is guaranteed non-null by the caller's guard.
   const base = first as Marker;
@@ -346,15 +371,33 @@ function parseList(lines: string[], start: number, depth: number): { node: Block
   }
   flush();
 
-  return {
-    node: {
-      type: 'list',
-      ordered,
-      start: base.start,
-      items: items.map((itemLines) => parseBlocks(itemLines, depth + 1)),
-    },
-    next: i,
+  // GFM task items: strip the `[ ]`/`[x]` prefix from the item's first line
+  // before parsing its blocks, keeping the state alongside. Opt-in only, so
+  // the chat's tree is untouched.
+  const checked: (boolean | null)[] = [];
+  if (opts.taskLists === true) {
+    for (const itemLines of items) {
+      const task = matchTask(itemLines[0] ?? '');
+      checked.push(task === null ? null : task.checked);
+      if (task !== null) itemLines[0] = task.rest;
+    }
+  }
+  const node: Extract<Block, { type: 'list' }> = {
+    type: 'list',
+    ordered,
+    start: base.start,
+    items: items.map((itemLines) => parseBlocks(itemLines, depth + 1, opts)),
   };
+  if (checked.some((c) => c !== null)) node.checked = checked;
+  return { node, next: i };
+}
+
+/** A GFM task marker opening an item's content: `[ ]`, `[x]` or `[X]`, then a
+ *  space or end of line (`[]`, `[ x]`, `[x]foo` are not tasks). */
+function matchTask(content: string): { checked: boolean; rest: string } | null {
+  const m = /^\[([ xX])\](?: |$)/.exec(content);
+  if (m === null) return null;
+  return { checked: m[1] !== ' ', rest: content.slice(m[0].length) };
 }
 
 function leadingSpaces(line: string): number {
@@ -421,6 +464,17 @@ export function parseInline(text: string): Inline[] {
         flush();
         nodes.push(auto.node);
         i = auto.next;
+        continue;
+      }
+    }
+
+    // Issue reference `#N` (after code spans, so `` `#5` `` stays literal).
+    if (ch === '#') {
+      const ref = matchRef(text, i);
+      if (ref !== null) {
+        flush();
+        nodes.push(ref.node);
+        i = ref.next;
         continue;
       }
     }
@@ -535,6 +589,22 @@ function matchAutolink(text: string, start: number): { node: Inline; next: numbe
   };
 }
 
+// Issue-reference grammar, kept identical to the scheduler's blockedByRefRe
+// `(?:^|[^\w/])#(\d+)\b` (internal/afk/blocked.go, ADR-0042): `#` not preceded
+// by a word char or `/` (so `foo#5`, `owner/repo#5` stay text), a digit run
+// that is right-bounded (`#70` is never `#7`; `#5a` is no ref).
+function matchRef(text: string, start: number): { node: Inline; next: number } | null {
+  if (start > 0 && /[\w/]/.test(text[start - 1] ?? '')) return null;
+  let end = start + 1;
+  while (end < text.length && /[0-9]/.test(text[end] ?? '')) end += 1;
+  const digits = text.slice(start + 1, end);
+  if (digits === '' || /\w/.test(text[end] ?? '')) return null;
+  // The view renders `#${number}`, so only emit a ref that round-trips exactly:
+  // no leading zero, and short enough to stay a safe integer.
+  if (digits.startsWith('0') || digits.length > 9) return null;
+  return { node: { type: 'ref', number: Number(digits) }, next: end };
+}
+
 function matchEmphasis(text: string, start: number): { node: Inline; next: number } | null {
   const marker = text[start] as string;
   // Underscore emphasis is intraword-safe: `foo_bar_baz` stays literal.
@@ -599,6 +669,8 @@ function stripLinks(node: Inline): Inline {
     const label = flattenText(node.children);
     return { type: 'text', value: label === node.href ? label : `[${label}](${node.href})` };
   }
+  // A ref is a link in the issue view; inside a label it stays plain text.
+  if (node.type === 'ref') return { type: 'text', value: `#${node.number}` };
   if (node.type === 'strong' || node.type === 'em') {
     return { ...node, children: node.children.map(stripLinks) };
   }
@@ -610,6 +682,7 @@ function flattenText(nodes: Inline[]): string {
   for (const n of nodes) {
     if (n.type === 'text' || n.type === 'code') out += n.value;
     else if (n.type === 'break') out += '\n';
+    else if (n.type === 'ref') out += `#${n.number}`;
     else if (n.type === 'strong' || n.type === 'em') out += flattenText(n.children);
     else if (n.type === 'link') out += flattenText(n.children);
   }

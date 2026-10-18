@@ -11,7 +11,7 @@ import { toolStatusMark } from '../../components/ToolPanel';
 import ToolViewBody, { isFileView } from '../../components/ToolViews';
 import { toolGroupSummary, type ToolGroup } from '../../lib/toolGroups';
 import { AnsweredDialog } from './Dialogs';
-import { CopyButton, Markdown } from './Markdown';
+import { CopyButton, Markdown } from '../../components/Markdown';
 
 export function MessageView(props: {
   message: ChatMessage;
@@ -47,7 +47,7 @@ export function MessageView(props: {
             <span class="chat-msg-tag">thinking</span>
           </Show>
           {/* Markdown render (decision 3): every text/thinking message, any role. */}
-          <Markdown source={m().text ?? ''} />
+          <Markdown source={m().text ?? ''} class="chat-msg-text md" />
           <Show when={copyable()}>
             <div class="chat-msg-actions">
               <CopyButton text={m().text ?? ''} label="Copy" title="Copy the raw markdown" />
