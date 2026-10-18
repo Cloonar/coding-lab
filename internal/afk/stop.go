@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -55,6 +56,9 @@ func (s *Service) StopAFK(ctx context.Context, session string) error {
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("afk stop: delete run tokens", "component", "afk", "run", run.ID, "err", err)
 	}
+	// The run-end chokepoint's preview half (issue #105): the run's names
+	// are released and its tunnels told "run-ended".
+	preview.CloseRunExposures(s.exposures, run.ID)
 	if err := s.runner.Stop(ctx, session); err != nil {
 		s.log.Warn("afk stop: stop session", "component", "afk", "session", session, "err", err)
 	}

@@ -252,6 +252,38 @@ func (r *Registry) CloseRun(runID string) {
 	r.changed(repoID, runID)
 }
 
+// RunCloser is the run-end chokepoint's view of the Registry: the one method
+// the stop / reap / discard / AFK-stop paths need. instance, reconcile and afk
+// carry it in their Options (nil = no preview listener on this lab), so none
+// of them depends on the Registry's tunnel surface — and their tests can hand
+// in a fake that records the run id.
+type RunCloser interface {
+	CloseRun(runID string)
+}
+
+// CloseRunExposures is the single call every run-end site makes right after
+// deleting the run's tokens (issue #105): the run's names are released and
+// its live tunnels told "run-ended". Keeping the nil handling in ONE helper,
+// instead of an `if s.previews != nil` at each of the sites, is what makes a
+// lab without a preview listener safe at all of them by construction.
+//
+// It also absorbs Go's nil-interface trap: a nil *Registry stored in a
+// RunCloser is a NON-nil interface, and calling CloseRun through it would
+// dereference the nil Registry. cmd/lab never builds one (it assigns the
+// interface only when the listener is configured), but the Options fields are
+// public, so the helper treats that typed nil exactly like the nil interface
+// it was meant to be — the same belt instance.normalizeBastion is to the
+// Warpgate wiring's braces.
+func CloseRunExposures(c RunCloser, runID string) {
+	if c == nil {
+		return
+	}
+	if r, ok := c.(*Registry); ok && r == nil {
+		return
+	}
+	c.CloseRun(runID)
+}
+
 // Exposures lists runID's exposures sorted by name. Never nil: a run with
 // none gets an empty slice, so the run API always renders "exposures": [].
 func (r *Registry) Exposures(runID string) []Exposure {

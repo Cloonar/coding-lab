@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -137,6 +138,12 @@ func (s *Service) sweepDeadSessions(ctx context.Context) {
 			s.log.Warn("dead-session sweep: end run", "component", "reconcile", "run", run.ID, "err", err)
 			continue
 		}
+		// Not a token-delete site, but a run end all the same (issue #105):
+		// the run's labctl died with its session, so without this its
+		// preview names would stay reserved — answering 503 and refused to
+		// every other run — until lab restarts. Startup readopt needs no
+		// twin: the registry is in memory, so it is empty at boot.
+		preview.CloseRunExposures(s.exposures, run.ID)
 		s.publishRunChanged(run.RepoID, run.ID)
 	}
 }

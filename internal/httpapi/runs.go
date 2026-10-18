@@ -16,6 +16,7 @@ import (
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/events"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
@@ -87,6 +88,58 @@ type runResponse struct {
 	// uncomputable (an ended run, a broken/not-yet-cloned repo). base is the
 	// repo's default branch until per-run bases (issue #130) exist.
 	CommitsBehind int `json:"commits_behind,omitempty"`
+
+	// Exposures lists what this run serves through `labctl expose` (issue
+	// #105) — name, browser URL, the run-local port, and whether its tunnel
+	// is attached right now (live=false: labctl reconnecting, the preview
+	// answers 503) — sorted by name, from the in-memory preview registry.
+	// Always present and never null: runJSON starts it as [], and the
+	// handlers that render a run the operator is looking at (the runs list,
+	// the run detail, the title PATCH echo, the instances rows) fill it via
+	// Server.runExposures — a map scan under one lock, no I/O, so unlike
+	// exposed_secrets and commits_behind it is cheap enough for every row. A
+	// lab without a preview listener renders [] everywhere, as does an ended
+	// run (the run-end chokepoint released its names).
+	Exposures []preview.Exposure `json:"exposures"`
+}
+
+// ExposureSource is the preview registry's read side as the run API sees it
+// (issue #105): runID's exposures, sorted by name. Satisfied by
+// *preview.Registry; nil (Options.Exposures unset) means no preview listener.
+type ExposureSource interface {
+	Exposures(runID string) []preview.Exposure
+}
+
+// normalizeExposures folds a nil *preview.Registry stored in the interface —
+// a NON-nil ExposureSource that would panic on its first lookup — back to the
+// nil interface it was meant to be (normalizeWarpgate's belt, same braces).
+func normalizeExposures(src ExposureSource) ExposureSource {
+	if r, ok := src.(*preview.Registry); ok && r == nil {
+		return nil
+	}
+	return src
+}
+
+// runExposures is the "exposures" value for runID: the registry's list, or
+// [] when there is no registry (or it answered nil) — never null on the wire.
+func (s *Server) runExposures(runID string) []preview.Exposure {
+	if s.exposures == nil {
+		return []preview.Exposure{}
+	}
+	if out := s.exposures.Exposures(runID); out != nil {
+		return out
+	}
+	return []preview.Exposure{}
+}
+
+// runView is runJSON plus the run's live preview exposures (issue #105) —
+// what every handler rendering an existing run uses. runJSON alone (with
+// "exposures": []) stays for the responses to a run that was just created,
+// which cannot hold an exposure yet.
+func (s *Server) runView(r store.Run) runResponse {
+	resp := runJSON(r)
+	resp.Exposures = s.runExposures(r.ID)
+	return resp
 }
 
 func runJSON(r store.Run) runResponse {
@@ -109,6 +162,7 @@ func runJSON(r store.Run) runResponse {
 		StartedAt:     store.FormatTime(r.StartedAt),
 		Outcome:       r.Outcome,
 		FailureReason: r.FailureReason,
+		Exposures:     []preview.Exposure{},
 	}
 	if r.BudgetDeadline != nil {
 		t := store.FormatTime(*r.BudgetDeadline)
@@ -171,7 +225,7 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]runResponse, 0, len(runs))
 	for _, run := range runs {
-		items = append(items, runJSON(run))
+		items = append(items, s.runView(run))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": items})
 }
@@ -243,5 +297,5 @@ func (s *Server) handleRunUpdate(w http.ResponseWriter, r *http.Request) {
 		s.bus.Publish(events.Event{Type: instance.EventRunChanged,
 			Payload: runChangedPayload{Type: instance.EventRunChanged, RepoID: run.RepoID, RunID: run.ID}})
 	}
-	writeJSON(w, http.StatusOK, runJSON(run))
+	writeJSON(w, http.StatusOK, s.runView(run))
 }

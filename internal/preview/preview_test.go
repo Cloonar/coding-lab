@@ -221,6 +221,35 @@ func TestCloseRun(t *testing.T) {
 	}
 }
 
+// recordingCloser is a RunCloser fake recording every CloseRun.
+type recordingCloser struct{ runs []string }
+
+func (c *recordingCloser) CloseRun(runID string) { c.runs = append(c.runs, runID) }
+
+// CloseRunExposures is the run-end sites' one call (issue #105): it forwards
+// to a real closer, and is a silent no-op for the nil interface AND for a
+// typed-nil *Registry smuggled into the interface — the nil-interface trap a
+// lab without a preview listener must never fall into.
+func TestCloseRunExposures(t *testing.T) {
+	rec := &recordingCloser{}
+	CloseRunExposures(rec, "run1")
+	if len(rec.runs) != 1 || rec.runs[0] != "run1" {
+		t.Errorf("CloseRunExposures forwarded %v, want [run1]", rec.runs)
+	}
+
+	r, _ := newTestRegistry(t)
+	mustReserve(t, r, "repo", "run1", "web", 5173)
+	CloseRunExposures(r, "run1")
+	if got := r.Exposures("run1"); len(got) != 0 {
+		t.Errorf("Exposures after CloseRunExposures(registry) = %v, want none", got)
+	}
+
+	CloseRunExposures(nil, "run1") // must not panic
+	var typedNil *Registry
+	var c RunCloser = typedNil
+	CloseRunExposures(c, "run1") // must not panic either
+}
+
 func TestExposuresSortedNeverNil(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	if got := r.Exposures("run1"); got == nil || len(got) != 0 {

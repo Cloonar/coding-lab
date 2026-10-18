@@ -37,6 +37,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/claudecode"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/codex"
@@ -47,6 +48,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/reconcile"
 	"git.cloonar.com/Cloonar/coding-lab/internal/reposvc"
 	"git.cloonar.com/Cloonar/coding-lab/internal/secrets"
+	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -601,6 +603,33 @@ func run() int {
 		}()
 	}
 
+	// Previews (issue #105): `labctl expose <name> <port>` in a run tunnels
+	// the run's loopback port to lab, and lab serves it at
+	// http://<name>.<preview-domain> on the opt-in preview listener. ONE
+	// in-memory registry holds every name → run, shared by the agent API
+	// (register/attach/stop), the preview listener (routing), the run API
+	// (the "exposures" key) and the run-end chokepoint (CloseRun). Its
+	// onChange publishes run.changed so the SPA's rails and the open chat
+	// refetch when a preview appears, goes live, drops or ends.
+	//
+	// With --preview-addr unset there is NO registry, and the consumers below
+	// get the nil INTERFACE, never a nil *preview.Registry wrapped in one —
+	// that typed nil would read as "configured" and panic on first use. So
+	// previewReg stays the concrete pointer (nil when off), and each
+	// interface-typed consumer variable is assigned only inside the branch.
+	var (
+		previewReg       *preview.Registry      // nil = previews off
+		previewCloser    preview.RunCloser      // run-end sites (instance/reconcile/afk)
+		previewExposures httpapi.ExposureSource // the run API's exposures key
+		previewSeed      *seeder.PreviewRef     // the worktree notes' Previews section
+	)
+	if cfg.PreviewAddr != "" {
+		previewReg = preview.NewRegistry(cfg.PreviewDomain, cfg.PreviewPort(), previewRunChanged(bus))
+		previewCloser = previewReg
+		previewExposures = previewReg
+		previewSeed = &seeder.PreviewRef{Domain: cfg.PreviewDomain, Port: cfg.PreviewPort()}
+	}
+
 	// M3 instance/AFK stack. The claude-code adapter derives its default global
 	// config path from HOME (issue #78 / ADR-0034), so with HOME unset AND no
 	// explicit -provider-config claude-code=… entry there is nothing to hand it:
@@ -723,6 +752,11 @@ func run() int {
 			Warpgate:         warpgateBastion,
 			WarpgateSSHAddr:  cfg.WarpgateSSHAddr,
 			WarpgateHostKeys: warpgateSpawnHostKeys,
+			// Previews (issue #105): the Previews section in every run's
+			// notes, and the manual Stop's half of the run-end chokepoint.
+			// Both nil without --preview-addr.
+			Preview:   previewSeed,
+			Exposures: previewCloser,
 		})
 		if err != nil {
 			logger.Error("building instance service", "component", "main", "err", err)
@@ -747,6 +781,10 @@ func run() int {
 			// and the startup orphaned-container sweep.
 			PodmanBin:          cfg.PodmanBin,
 			ContainerPreflight: containerPreflight,
+			// The Discard kill's and the dead-session sweep's half of the
+			// preview run-end chokepoint (issue #105); nil without
+			// --preview-addr.
+			Exposures: previewCloser,
 		})
 		if err != nil {
 			logger.Error("building reconcile service", "component", "main", "err", err)
@@ -784,6 +822,9 @@ func run() int {
 			Notify: func(n afk.Notification) {
 				pushSender.Broadcast(push.Payload{Title: n.Title, Body: n.Body, Tag: n.Tag, Route: n.Route})
 			},
+			// The reaper's and the neutral Stop's half of the preview run-end
+			// chokepoint (issue #105); nil without --preview-addr.
+			Exposures: previewCloser,
 		})
 		if err != nil {
 			logger.Error("building afk engine", "component", "main", "err", err)
@@ -916,6 +957,13 @@ func run() int {
 	// the registry — the one seam both bindings resolve through — a single
 	// decorator covers the forge and builtin bindings identically.
 	agent := agentapi.New(st, vlt, secretscan.NewResolver(trackerReg, st, vlt), bus, logger, time.Now, scrub)
+	// The exposure routes (issue #105): registered only with a preview
+	// listener, so a lab without one answers `labctl expose` with the
+	// "previews are not enabled" 404. Guarded so the agent API never holds a
+	// typed-nil registry.
+	if previewReg != nil {
+		agent.SetPreviews(previewReg)
+	}
 
 	// Seed the settings AFTER the provider registry exists: provider_default
 	// is seeded to the FIRST registered provider's ID (issue #66) so the store
@@ -1087,6 +1135,9 @@ func run() int {
 		WarpgateAPIURL:   cfg.WarpgateURL,
 		WarpgateSSHAddr:  cfg.WarpgateSSHAddr,
 		WarpgateHostKeys: warpgateHTTPHostKeys,
+		// The run API's "exposures" key (issue #105); nil without
+		// --preview-addr, which renders [] on every run.
+		Exposures: previewExposures,
 	})
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
@@ -1179,6 +1230,24 @@ func run() int {
 		}
 	}
 
+	// The preview listener (issue #105): --preview-addr makes lab serve runs'
+	// exposed ports on a FOURTH listener, routed by Host to the tunnel of the
+	// run holding <name>.<preview-domain>. Nil when the flag is unset, the
+	// default — no registry, no listener. Plain HTTP like the others (TLS, if
+	// any, is the operator's proxy's), and deliberately no authentication:
+	// reachable is allowed, lab's own stance for its LAN path. No
+	// CloseStreams hook: a proxied WebSocket or long poll is a hijacked or
+	// ordinary connection Shutdown does not wait on past its deadline, and
+	// the tunnels themselves live on the agent listeners, not here.
+	var previewSrv *http.Server
+	if previewReg != nil {
+		previewSrv = &http.Server{
+			Addr:              cfg.PreviewAddr,
+			Handler:           previewReg.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
+
 	logger.Info("lab starting",
 		"component", "main",
 		"version", version,
@@ -1187,15 +1256,20 @@ func run() int {
 		"db", dbBackend(cfg.DB),
 		"state_dir", cfg.StateDir,
 		"onecli_dashboard", cfg.OneCLIDashboard,
-		"onecli_dashboard_addr", cfg.OneCLIDashboardAddr)
+		"onecli_dashboard_addr", cfg.OneCLIDashboardAddr,
+		"preview_addr", cfg.PreviewAddr,
+		"preview_domain", cfg.PreviewDomain)
 
 	// Buffered for every listener, so a goroutine whose server returns after
 	// another already reported never blocks forever on an unread channel.
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() { errCh <- srv.ListenAndServe() }()
 	go func() { errCh <- agentSrv.Serve(agentLn) }()
 	if dashSrv != nil {
 		go func() { errCh <- dashSrv.ListenAndServe() }()
+	}
+	if previewSrv != nil {
+		go func() { errCh <- previewSrv.ListenAndServe() }()
 	}
 
 	select {
@@ -1220,6 +1294,12 @@ func run() int {
 		if dashSrv != nil {
 			if err := dashSrv.Shutdown(shutdownCtx); err != nil {
 				logger.Error("onecli dashboard proxy shutdown failed", "component", "main", "err", err)
+				failed = true
+			}
+		}
+		if previewSrv != nil {
+			if err := previewSrv.Shutdown(shutdownCtx); err != nil {
+				logger.Error("preview listener shutdown failed", "component", "main", "err", err)
 				failed = true
 			}
 		}
@@ -1378,6 +1458,28 @@ func containerRepoIDs(ctx context.Context, st *store.Store) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// previewChangedPayload mirrors the run.changed payload every other
+// publisher sends (instance/reconcile/afk's repoScopedPayload, httpapi's
+// runChangedPayload) key-for-key, so a preview change looks like any other
+// run mutation to the SPA's SSE refetch — and, naming its run (issue #175),
+// the open chat skips sibling-run events.
+type previewChangedPayload struct {
+	Type   string `json:"type"`
+	RepoID string `json:"repoID"`
+	RunID  string `json:"runID,omitempty"`
+}
+
+// previewRunChanged is the preview registry's onChange (issue #105): every
+// reserve, attach, detach, stop and run-end publishes run.changed for the run
+// concerned, which is how the chat header's Preview chip and the run details'
+// Previews row learn that an exposure appeared, went live, dropped or ended.
+func previewRunChanged(bus *events.Bus) func(repoID, runID string) {
+	return func(repoID, runID string) {
+		bus.Publish(events.Event{Type: instance.EventRunChanged,
+			Payload: previewChangedPayload{Type: instance.EventRunChanged, RepoID: repoID, RunID: runID}})
+	}
 }
 
 // labURL is the LAB_URL handed to spawned sessions. An explicit --agent-url

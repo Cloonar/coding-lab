@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
@@ -463,6 +464,9 @@ func (s *Service) reapRun(ctx context.Context, trk tracker.Tracker, repo store.R
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("afk reap: delete run tokens", "component", "afk", "run", run.ID, "err", err)
 	}
+	// The run-end chokepoint's preview half (issue #105): the reaped run's
+	// names are released and its tunnels told "run-ended".
+	preview.CloseRunExposures(s.exposures, run.ID)
 	// Wipe the run's private per-run tree (issues #202/#205): the credential
 	// copy, config, AND the runtime dir's materialized git credential files go
 	// with the reaped run (the wipe subsumes the old per-file credential

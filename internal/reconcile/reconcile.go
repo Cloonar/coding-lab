@@ -39,6 +39,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -137,6 +138,14 @@ type Options struct {
 	PodmanRun          podmanx.CmdRunner
 	ContainerPreflight func() (podmanx.Result, bool)
 
+	// Exposures is the preview registry's run-end half (issue #105): the
+	// Discard kill releases each killed run's preview names and tunnels
+	// through it right after deleting the run's tokens, and the dead-session
+	// sweep does the same for a run whose session vanished. Called only via
+	// preview.CloseRunExposures, which is nil-safe — nil means this lab has
+	// no preview listener.
+	Exposures preview.RunCloser
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -168,6 +177,10 @@ type Service struct {
 	podmanBin          string
 	podmanRun          podmanx.CmdRunner
 	containerPreflight func() (podmanx.Result, bool)
+
+	// exposures releases an ended run's previews (issue #105; see
+	// Options.Exposures). nil = no preview listener.
+	exposures preview.RunCloser
 }
 
 // New validates o and returns a Service.
@@ -222,6 +235,8 @@ func New(o Options) (*Service, error) {
 		podmanBin:          o.PodmanBin,
 		podmanRun:          podmanRun,
 		containerPreflight: o.ContainerPreflight,
+
+		exposures: o.Exposures,
 	}, nil
 }
 
