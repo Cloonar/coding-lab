@@ -53,10 +53,13 @@ import { useRepoHome } from './repo-home/context';
 export default function IssueDetail() {
   const params = useParams<{ id: string; number: string }>();
   const issueNumber = () => Number(params.number);
+  // The issue's identity: what the fetch keys on and what the view below is
+  // keyed on (see the <Match>).
+  const issueKey = () => `${params.id}\n${params.number}`;
   const home = useRepoHome();
 
   const [issue, { refetch }] = createLiveResource(
-    () => `${params.id}\n${params.number}`,
+    issueKey,
     (key) => {
       const sep = key.indexOf('\n');
       return getIssue(key.slice(0, sep), Number(key.slice(sep + 1)));
@@ -142,9 +145,14 @@ export default function IssueDetail() {
         <Match when={issue.error !== undefined}>
           <Banner message={errorMessage(issue.error)} />
         </Match>
+        {/* Keyed on the issue's identity: a builtin `#N` link navigates to
+            another issue inside this same page instance (the router reuses
+            it), so another issue mounts fresh forms — no draft comment, open
+            editor or label selection carries over to be saved onto it. A
+            refetch of the same issue keeps them. */}
         <Match when={issue()}>
           {(i) => (
-            <>
+            <Show when={issueKey()} keyed>
               <SectionHead
                 title={
                   <>
@@ -269,7 +277,7 @@ export default function IssueDetail() {
                   </Show>
                 </SectionCard>
               </div>
-            </>
+            </Show>
           )}
         </Match>
       </Switch>

@@ -25,6 +25,8 @@ import RepoRoutes from './repo-home/routes';
 
 const REPO_ID = 'repo_1';
 const NUMBER = 7;
+// A sibling issue a builtin `#N` link navigates to (issue #103).
+const OTHER = 5;
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -44,6 +46,7 @@ let forgeKind: ForgeKind;
 let remoteUrl: string;
 let repoFails: boolean;
 let issueOnServer: Issue;
+let otherOnServer: Issue;
 let commentBodies: Record<string, unknown>[];
 let labelPuts: Record<string, unknown>[];
 let patches: Record<string, unknown>[];
@@ -101,6 +104,9 @@ function stubApi(): void {
       }
       if (url === `/api/v1/repos/${REPO_ID}/issues/${NUMBER}` && method === 'GET') {
         return Promise.resolve(jsonResponse(200, { ...issueOnServer }));
+      }
+      if (url === `/api/v1/repos/${REPO_ID}/issues/${OTHER}` && method === 'GET') {
+        return Promise.resolve(jsonResponse(200, { ...otherOnServer }));
       }
       if (url === `/api/v1/repos/${REPO_ID}/issues/${NUMBER}` && method === 'PATCH') {
         const patch = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -241,6 +247,13 @@ beforeEach(() => {
   remoteUrl = 'git@git.cloonar.com:Cloonar/coding-lab.git';
   repoFails = false;
   issueOnServer = baseIssue();
+  otherOnServer = {
+    ...baseIssue(),
+    number: OTHER,
+    title: 'Other issue',
+    body: 'Another body.',
+    comments: [],
+  };
   commentBodies = [];
   labelPuts = [];
   patches = [];
@@ -595,6 +608,53 @@ describe('IssueDetail markdown (issue #103)', () => {
     const body = container.querySelector('section.card > .issue-md');
     expect(body?.querySelector('a')).toBeNull();
     expect(body?.textContent).toBe('see #5');
+  });
+
+  it('a builtin #N link to another issue mounts fresh forms — no draft carries over', async () => {
+    issueOnServer = { ...baseIssue(), body: 'Depends on #5.' };
+    await mountDetail();
+
+    // Work in flight on #7: an open editor, an open label picker and a
+    // comment draft on its Preview tab.
+    mustButton('Edit').click();
+    mustButton('Edit labels').click();
+    await settle();
+    setValue('input[name="issue-title"]', 'Reworded title for #7');
+    setValue('textarea[name="comment"]', 'draft for #7');
+    tab('.comment-form', 'Preview').click();
+    await settle();
+
+    // The router reuses this page for /issues/5 — the forms must not.
+    container.querySelector<HTMLAnchorElement>('section.card > .issue-md a.md-ref')?.click();
+    await settle();
+
+    expect(container.querySelector('p.crumb')?.textContent).toBe('Issues / #5');
+    expect(container.textContent).toContain('Other issue');
+    expect(container.querySelector('input[name="issue-title"]')).toBeNull();
+    expect(buttonByText('Save labels')).toBeNull();
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[name="comment"]')?.value).toBe(
+      '',
+    );
+    expect(tab('.comment-form', 'Write').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('a refetch of the same issue keeps the open editor and its draft', async () => {
+    await mountDetail();
+
+    mustButton('Edit').click();
+    await settle();
+    setValue('input[name="issue-title"]', 'Reworded title');
+    // Posting a comment refetches the issue.
+    setValue('textarea[name="comment"]', 'looks good');
+    container
+      .querySelector('form.comment-form')
+      ?.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(container.textContent).toContain('Comments (2)');
+    expect(container.querySelector<HTMLInputElement>('input[name="issue-title"]')?.value).toBe(
+      'Reworded title',
+    );
   });
 
   it('tags comments whose first block is an Agent Brief heading', async () => {
