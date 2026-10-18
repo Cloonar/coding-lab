@@ -189,7 +189,7 @@ func previewGet(t *testing.T, srv *httptest.Server, host string, hdr http.Header
 	if err != nil {
 		t.Fatalf("GET via preview: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("reading body: %v", err)
@@ -286,7 +286,7 @@ func upgradeEcho(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo-test\r\n\r\nhello\n")
 	if brw.Flush() != nil {
 		return
@@ -304,7 +304,7 @@ func TestProxyUpgradeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial preview listener: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(waitTimeout))
 	_, err = io.WriteString(conn, "GET /hmr HTTP/1.1\r\nHost: web.lab.internal:8081\r\nConnection: Upgrade\r\nUpgrade: echo-test\r\n\r\n")
 	if err != nil {
@@ -485,7 +485,7 @@ func TestAttachWithoutReserve(t *testing.T) {
 
 func TestServeTunnelRejectsInvalidPort(t *testing.T) {
 	labEnd, agentEnd := net.Pipe()
-	defer labEnd.Close()
+	defer func() { _ = labEnd.Close() }()
 	ctl, err := ServeTunnel(context.Background(), agentEnd, 0)
 	if ctl != "" || !errors.Is(err, ErrInvalidPort) {
 		t.Errorf("ServeTunnel(port 0) = (%q, %v), want ErrInvalidPort", ctl, err)
@@ -512,7 +512,7 @@ func TestProxyConcurrentRequests(t *testing.T) {
 				errs <- err
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			if string(body) != strconv.Itoa(i) {
 				errs <- fmt.Errorf("request %d got %q", i, body)

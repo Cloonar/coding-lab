@@ -163,7 +163,7 @@ func (s *Server) handleExposureCreate(w http.ResponseWriter, r *http.Request) {
 	// must reach the session first.
 	tun := conn
 	if n := brw.Reader.Buffered(); n > 0 {
-		buffered, _ := brw.Reader.Peek(n)
+		buffered, _ := brw.Peek(n)
 		tun = &prefixConn{Conn: conn, r: io.MultiReader(bytes.NewReader(bytes.Clone(buffered)), conn)}
 	}
 
