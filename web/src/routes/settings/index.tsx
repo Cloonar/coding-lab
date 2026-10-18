@@ -1,13 +1,14 @@
 // Global settings, on one page (issue #85, ADR-0080): /settings renders all
-// four sections together, in the order and groups of GLOBAL_SETTINGS_CATEGORIES
-// — Runs (Agents, Runner), Setup (General), This device (Notifications) —
+// five sections together, in the order and groups of GLOBAL_SETTINGS_CATEGORIES
+// — Runs (Agents, Runner), Setup (General, Previews), This device (Notifications) —
 // under a sticky row of section chips (below 1024px) or beside a sticky
 // outline (from 1024px). Breadcrumb-free, like every top-level page.
 //
 // One save rule: the fields of Agents, Runner and General edit drafts in the
 // page's form store (form.tsx) and wait for the one save bar; Save sends ONE
 // PATCH of exactly the changed keys and confirms in the page's toast.
-// Notifications acts at once and says so in its heading. A Save that switches
+// Previews is read-only status with no field (issue #106). Notifications acts
+// at once and says so in its heading. A Save that switches
 // the runner default to host asks first, in an in-page dialog
 // (HostSwitchDialog.tsx); leaving /settings with pending changes asks in the
 // shared leave dialog. No browser confirm anywhere.
@@ -52,6 +53,7 @@ import HostSwitchDialog from './HostSwitchDialog';
 import AgentsSection from './sections/Agents';
 import GeneralSection from './sections/General';
 import NotificationsSection from './sections/Notifications';
+import PreviewsSection from './sections/Previews';
 import RunnerSection from './sections/Runner';
 
 /** Where focus goes after a Save takes the save bar away: the page heading. */
@@ -111,6 +113,8 @@ function SettingsBody() {
         return <RunnerSection />;
       case 'general':
         return <GeneralSection />;
+      case 'previews':
+        return <PreviewsSection />;
       case 'notifications':
         return <NotificationsSection />;
       default:

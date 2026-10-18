@@ -21,7 +21,15 @@ import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import type { MemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
 import { afterEach, beforeEach, vi } from 'vitest';
-import type { OneCLIHealth, Provider, PushDevice, Repo, Runner, WarpgateHealth } from '../../api';
+import type {
+  OneCLIHealth,
+  PreviewInfo,
+  Provider,
+  PushDevice,
+  Repo,
+  Runner,
+  WarpgateHealth,
+} from '../../api';
 import App from '../../App';
 import { viewport, type Viewport } from '../../components/settings/scrolling';
 import { baseRepo } from '../repo-settings/harness';
@@ -170,6 +178,12 @@ export interface SettingsHarnessState {
   oneCLIHealthOnServer: OneCLIHealth;
   /** SSH-bastion health (issue #39): General's BastionStatus card. */
   warpgateHealthOnServer: WarpgateHealth;
+  /** GET /preview (issue #106): the Previews section's status. */
+  previewOnServer: PreviewInfo;
+  /** Makes GET /preview answer 500 with this message (once; Try again works). */
+  previewError: string | null;
+  /** Number of GET /preview requests so far. */
+  previewGets: number;
 }
 export const h = {} as SettingsHarnessState;
 
@@ -271,6 +285,15 @@ export function stubApi(): void {
       }
       if (url === '/api/v1/warpgate/health' && method === 'GET') {
         return jsonResponse(200, h.warpgateHealthOnServer);
+      }
+      if (url === '/api/v1/preview' && method === 'GET') {
+        h.previewGets += 1;
+        if (h.previewError !== null) {
+          const message = h.previewError;
+          h.previewError = null;
+          return jsonResponse(500, { error: message });
+        }
+        return jsonResponse(200, h.previewOnServer);
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     }),
@@ -700,6 +723,9 @@ export function installSettingsHooks(): void {
       api: { configured: false, reachable: false },
       ssh: { configured: false, reachable: false },
     };
+    h.previewOnServer = { enabled: false };
+    h.previewError = null;
+    h.previewGets = 0;
     stubApi();
     // jsdom has no layout: the page's seam answers from `h` instead.
     Object.assign(viewport, {

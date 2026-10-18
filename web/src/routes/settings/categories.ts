@@ -2,7 +2,7 @@
 // ONE page, in this order and under these groups —
 //
 //   Runs          Agents, Runner
-//   Setup         General
+//   Setup         General, Previews (read-only status; no field, no save)
 //   This device   Notifications (its rows act at once: "applies immediately")
 //
 // — and /settings/:section opens the page scrolled to its section. The slugs
@@ -50,6 +50,13 @@ export const GLOBAL_SETTINGS_CATEGORIES: GlobalSettingsCategory[] = [
     title: 'General',
     description: 'Git author identity, transcript retention, and integration status.',
     icon: 'settings-2',
+    group: 'Setup',
+  },
+  {
+    slug: 'previews',
+    title: 'Previews',
+    description: 'The preview domain, its TLS certificate, and trusting the CA on your devices.',
+    icon: 'globe',
     group: 'Setup',
   },
   {

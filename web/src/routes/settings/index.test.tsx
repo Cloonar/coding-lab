@@ -1,4 +1,4 @@
-// Global settings on one page (issue #85): all four sections render together,
+// Global settings on one page (issue #85): all five sections render together,
 // in the order, groups and words of GLOBAL_SETTINGS_CATEGORIES, under section
 // chips below 1024px or an outline with the group labels from 1024px — no
 // category index, no redirect; every section slug of issue #198 still deep-
@@ -50,6 +50,7 @@ const probes: Record<string, () => Element | null> = {
   agents: () => container.querySelector('button[name="spawn_provider_default_afk"]'),
   runner: () => container.querySelector('button[role="radio"][name="runner_default"]'),
   general: () => container.querySelector('input[name="git_author_name"]'),
+  previews: () => container.querySelector('#settings-previews .preview-status'),
   notifications: () =>
     Array.from(container.querySelectorAll('section.card h2')).find(
       (el) => el.textContent === 'Notifications',
@@ -66,7 +67,7 @@ describe('global settings on one page', () => {
     );
   });
 
-  it('renders Agents, Runner, General and Notifications in order, grouped Runs, Setup, This device', async () => {
+  it('renders Agents, Runner, General, Previews and Notifications in order, grouped Runs, Setup, This device', async () => {
     await mountPage();
 
     const sections = Array.from(container.querySelectorAll('section.settings-section'));
@@ -74,14 +75,16 @@ describe('global settings on one page', () => {
       'settings-agents',
       'settings-runner',
       'settings-general',
+      'settings-previews',
       'settings-notifications',
     ]);
     expect(
       sections.map((section) => section.querySelector('.settings-section-head h2')?.textContent),
-    ).toEqual(['Agents', 'Runner', 'General', 'Notifications']);
+    ).toEqual(['Agents', 'Runner', 'General', 'Previews', 'Notifications']);
     expect(GLOBAL_SETTINGS_CATEGORIES.map((c) => c.group)).toEqual([
       'Runs',
       'Runs',
+      'Setup',
       'Setup',
       'This device',
     ]);
@@ -125,6 +128,7 @@ describe('global settings on one page', () => {
       'Agents',
       'Runner',
       'General',
+      'Previews',
       'Notifications',
     ]);
     expect(chips().map((chip) => chip.getAttribute('href'))).toEqual(
@@ -151,7 +155,7 @@ describe('global settings on one page', () => {
       Array.from(outline?.querySelectorAll('.settings-outline-group') ?? []).map((group) =>
         Array.from(group.querySelectorAll('a')).map((a) => a.textContent),
       ),
-    ).toEqual([['Agents', 'Runner'], ['General'], ['Notifications']]);
+    ).toEqual([['Agents', 'Runner'], ['General', 'Previews'], ['Notifications']]);
   });
 
   it('deep-links every section slug to the page scrolled to it (metadata ↔ route parity)', async () => {
@@ -173,7 +177,7 @@ describe('global settings on one page', () => {
 
     expect(h.scrolls).toEqual([]);
     expect(history.get()).toBe('/settings/never-heard-of-it');
-    expect(container.querySelectorAll('section.settings-section')).toHaveLength(4);
+    expect(container.querySelectorAll('section.settings-section')).toHaveLength(5);
   });
 
   it('?field= scrolls that field into view and focuses its control', async () => {

@@ -1,0 +1,57 @@
+/* Settings › Previews (issue #106) -------------------------------------------------
+   The read-only preview status: a definition list of facts (domain, URL shape,
+   certificate source, expiry, redirect), an error line, and the CA trust steps.
+   Rows are label + value in two columns from the phone width up (the label
+   column is narrow, the value wraps anywhere so a long domain never scrolls the
+   page sideways). */
+
+.preview-facts {
+  margin: 0;
+  display: grid;
+}
+
+.preview-fact {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  column-gap: var(--space-3);
+  align-items: center;
+  min-height: 44px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-fact:last-child {
+  border-bottom: 0;
+}
+
+.preview-fact dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.preview-fact dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.preview-cert-error {
+  margin: 0;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* The trust steps are a .settings-group inside the .settings-card (a flex
+   column with a gap, and a ruled eyebrow heading): no spacing of their own. */
+
+.preview-trust-list {
+  margin: var(--space-3) 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
