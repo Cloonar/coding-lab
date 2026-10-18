@@ -82,6 +82,17 @@ plus tests. Adds **no** runtime npm dependency. A future Codex/Gemini provider
 inherits all of this for free: it produces the same universal `text`/`tool`
 schema, and rendering is provider-agnostic.
 
+Amended by issue #103 (2026-10-18): the renderer gains a second consumer, the issue view at `/repos/:id/issues/:n`. The body and every comment render through the chat's parser, on both tracker bindings. The files named above are as of the original change. The renderer and its copy button now live in `web/src/components/Markdown.tsx`, and `web/src/lib/markdown.ts` is still the parser.
+
+- **The caller supplies the wrapper class and a reference resolver.** The chat passes no resolver, so its DOM is unchanged and `#N` in chat text stays text.
+- **Two new parser nodes.** An inline `ref` for `#N` uses the boundary grammar of `blockedByRefRe` in `internal/afk/blocked.go` (ADR-0042): not after a word character or `/`, number-bounded on the right. It is emitted only when it round-trips, so no leading zero and at most 9 digits. List items gain task state (`[ ]`, `[x]`, `[X]`) behind an opt-in `taskLists` parse option, so the chat's tree is untouched.
+- **The view resolves refs per tracker binding.** A built-in-tracker repo links to the issue inside lab. A forge-bound repo links to the forge in a new tab. When no forge URL can be derived, the ref is plain text. Task items render as read-only checkboxes.
+- **Still no library and no `innerHTML`.** The XSS-by-construction argument above holds unchanged.
+- **`## Blocked by` stays a plain link.** A fetch per reference would break ADR-0050's one bounded read per page view.
+- **Copy controls stay always visible** (no hover on mobile). Copy markdown sits in the body card footer and copies the raw body. Comments get no copy button.
+- **One shared Write / Preview control for both forms.** The title/body editor and the comment box use it. Preview renders the draft with the same renderer.
+- **The Agent brief tag is a first-heading check.** A comment whose first heading reads "Agent Brief" gets the tag (ADR-0070). There is no latest-wins logic in the view.
+
 ## Considered options
 
 - **Pull in a markdown library (`marked`/`markdown-it`/`remark`) plus DOMPurify.**
