@@ -18,8 +18,10 @@ lab holds credentials that reach real infrastructure and spawns agent sessions a
 - **Master key** — the vault encrypts every stored credential at rest with AES-256-GCM, keyed by a 32-byte master key kept in a 0600 file.
 - **Run token** — each run gets its own short-lived `lab_run_…` credential, scoped to that run's repo and handed to the session as `LAB_TOKEN`; it is the agent's only tracker surface.
 - **Runner** — the `host` runner is the deliberate break-glass: both Runner settings (global Settings → Runner and a repo's) warn "Host runs are unsandboxed — the agent has full host access to the server." whenever the runner they set is `host`, saving a switch of the global default to `host` asks first in a dialog naming how many repos inherit it, as does the New run page above its composer ("Runs on the host, unsandboxed, with full host access."); the `container` runner runs the pane command as rootless podman in the repo's dev image instead.
+- **Preview listener** — off unless `--preview-addr` is set. When on, it serves every port an agent exposes with `labctl expose` at `http://<name>.<preview-domain>`, over plain HTTP and with **no authentication**: anyone who can reach the listener can open every live preview. Traffic only ever goes to the run's own `127.0.0.1:<port>`, never to another host. Bind it to a trusted interface ([ops.md § Previews](docs/ops.md#previews), ADR-0084).
 
 ### Already documented, not a vulnerability
 
 - The `host` runner is unsandboxed by design — that is its stated purpose, not a bug.
+- The preview listener has no authentication by design: reachable equals allowed. Who can reach it is set by where `--preview-addr` binds and where the wildcard DNS name resolves.
 - Incogni mode's leak-prevention is bounded by design: it cannot hide the forge account of the token used, nor style/timing signals.

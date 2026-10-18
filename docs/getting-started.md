@@ -78,6 +78,8 @@ Drive the session from lab's **chat**: the rendered conversation with the agent 
 
 Inside the session, the agent has `labctl` on PATH with a run token scoped to this one repo — it can read and file issues, apply labels, and open a PR/CR against the repo's tracker, and nothing else.
 
+When previews are on ([`ops.md` § Previews](ops.md#previews)), the agent can also show you what it is serving: `labctl expose web 5173 &` in the run prints a URL like `http://web.lab.internal:8081`, and the chat header shows a **Preview** chip that opens it in a new tab. **Run details** lists every preview with its URL and whether it is live.
+
 When you **Stop** an instance, the **guarded teardown** rule applies: a clean, merged worktree is removed; anything dirty or unmerged is kept and listed under **Parked work** on the repo's Overview, where discarding is an explicit per-entry human action that asks you to confirm in place. Lab never destroys uncommitted work on its own.
 
 ## 8. Run an issue AFK
