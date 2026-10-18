@@ -429,6 +429,8 @@
                 services.lab.preview.domain = "previews.example.org";
               }; # any other preview option without enable must fail eval too
               execStart = d: d.config.systemd.services.lab.serviceConfig.ExecStart;
+              # The firewall module canonicalizes this list (apply = sort +
+              # unique), so expectations are ascending, not insertion order.
               firewallPorts = d: d.config.networking.firewall.allowedTCPPorts;
               # An absent AmbientCapabilities (mkIf false drops the attr) reads
               # as the empty list.
@@ -525,7 +527,7 @@
                 && !(previewDummy.config.systemd.services.lab.serviceConfig ? CapabilityBoundingSet)
               )
               "nixos-module check: preview ports below 1024 must add AmbientCapabilities=CAP_NET_BIND_SERVICE and never a CapabilityBoundingSet (rootless podman's setuid newuidmap/newgidmap need the full set)";
-            assert lib.assertMsg (firewallPorts previewDummy == [ 8080 443 80 ])
+            assert lib.assertMsg (firewallPorts previewDummy == [ 80 443 8080 ])
               "nixos-module check: openFirewall with preview.enable must open the main port, the preview port and the redirect port";
             assert lib.assertMsg
               (
@@ -541,7 +543,7 @@
                 lib.hasInfix "\"--preview-addr\" \"[::]:8443\"" (execStart previewLowRedirectDummy)
                 && lib.hasInfix "\"--preview-redirect-addr\" \":80\"" (execStart previewLowRedirectDummy)
                 && hasBindCap previewLowRedirectDummy
-                && firewallPorts previewLowRedirectDummy == [ 8080 8443 80 ]
+                && firewallPorts previewLowRedirectDummy == [ 80 8080 8443 ]
               )
               "nixos-module check: a privileged redirect port alone must add CAP_NET_BIND_SERVICE, and a bracketed IPv6 preview.listenAddr must yield its port for openFirewall";
             assert lib.assertMsg
