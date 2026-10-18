@@ -101,7 +101,7 @@ func TestLaunch_previewSectionFollowsListener(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 		local := contextFile(t, run.WorktreePath)
-		for _, want := range []string{"## Previews", "`http://<name>.lab.internal:8081`"} {
+		for _, want := range []string{"## Previews", "`https://<name>.lab.internal:8081`"} {
 			if !strings.Contains(local, want) {
 				t.Errorf("context file lacks %q:\n%s", want, local)
 			}

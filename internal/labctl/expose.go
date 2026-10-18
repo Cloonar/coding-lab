@@ -1,7 +1,7 @@
 package labctl
 
 // `labctl expose` (issue #105): serve the run's loopback <port> (127.0.0.1,
-// else [::1]) to the operator's browser at http://<name>.<preview-domain>.
+// else [::1]) to the operator's browser at https://<name>.<preview-domain>.
 // The command is the exposure's lifetime — the agent runs it in the
 // background — so it holds the tunnel in the foreground, reconnects across
 // dropped connections (a lab restart drops every tunnel while the run

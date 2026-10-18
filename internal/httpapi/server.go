@@ -245,6 +245,24 @@ type Options struct {
 	// a nil *preview.Registry back to nil regardless.
 	Exposures ExposureSource
 
+	// PreviewCerts is the preview listener's certificate manager (issue #106),
+	// seen through the PreviewCerts seam; *preview.CertManager satisfies it.
+	// It is also the previews switch for this package: nil means no preview
+	// listener, and GET /api/v1/preview answers {"enabled": false} while
+	// GET /api/v1/preview/ca 404s. Both routes mount regardless. Same
+	// typed-nil rule as Warpgate above: cmd/lab assigns it only when
+	// --preview-addr is set, and New folds a nil *preview.CertManager back to
+	// nil regardless (normalizePreviewCerts).
+	PreviewCerts PreviewCerts
+	// PreviewDomain is --preview-domain and PreviewPort the preview
+	// listener's port (443 is left out of printed URLs), reported by
+	// GET /api/v1/preview. PreviewRedirect is whether --preview-redirect-addr
+	// runs a plain-HTTP redirect listener. Reporting only, and read only
+	// while PreviewCerts is set — with previews off they are not echoed.
+	PreviewDomain   string
+	PreviewPort     int
+	PreviewRedirect bool
+
 	// AgentHandler is the /agent/v1 tree (run-token auth, no CSRF). Nil
 	// leaves it unmounted.
 	AgentHandler http.Handler
@@ -310,6 +328,14 @@ type Server struct {
 	// exposures backs every run response's "exposures" key (issue #105; see
 	// Options.Exposures). nil = no preview listener; runExposures handles it.
 	exposures ExposureSource
+
+	// The preview listener's TLS front door (issue #106; see
+	// Options.PreviewCerts). A nil previewCerts is "previews off"
+	// (normalized in New); the other three are reported only alongside it.
+	previewCerts    PreviewCerts
+	previewDomain   string
+	previewPort     int
+	previewRedirect bool
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -413,6 +439,10 @@ func New(o Options) (*Server, error) {
 
 		devImageFallback: o.DevImageFallback,
 
+		previewDomain:   o.PreviewDomain,
+		previewPort:     o.PreviewPort,
+		previewRedirect: o.PreviewRedirect,
+
 		sessionCookieDomain: o.SessionCookieDomain,
 
 		proxyAuth:     o.ProxyAuth,
@@ -431,6 +461,7 @@ func New(o Options) (*Server, error) {
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
 	s.warpgate, s.warpgateHostKeys = normalizeWarpgate(o.Warpgate, o.WarpgateHostKeys)
 	s.exposures = normalizeExposures(o.Exposures)
+	s.previewCerts = normalizePreviewCerts(o.PreviewCerts)
 
 	// The readiness evaluator (issue #61) reads the spawn path's own
 	// resolvers, the tracker registry's local validation and the AFK engine's
@@ -715,6 +746,17 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/repos/{id}/warpgate/targets", s.requireAuth(s.handleWarpgateTargetList))
 	api.HandleFunc("PUT /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetAssign))
 	api.HandleFunc("DELETE /api/v1/repos/{id}/warpgate/targets/{targetId}", s.requireAuth(s.handleWarpgateTargetUnassign))
+
+	// The preview listener's TLS front door (issue #106): its status (domain,
+	// port, redirect, the served certificate's source and expiry) and the lab
+	// CA download. Unconditional for the OneCLI/Warpgate routes' reason — a
+	// lab without previews answers the status with {"enabled": false}, never
+	// a 404 the SPA cannot tell from an older lab — and requireAuth on both:
+	// the CA is the trust anchor, and it is handed out only to an
+	// authenticated operator, on this listener and nowhere else
+	// (internal/httpapi/preview.go). GET, so csrfMiddleware waives them.
+	api.HandleFunc("GET /api/v1/preview", s.requireAuth(s.handlePreview))
+	api.HandleFunc("GET /api/v1/preview/ca", s.requireAuth(s.handlePreviewCA))
 
 	// Web Push (issue #98): the VAPID public key plus subscription CRUD/test
 	// (operator auth; CSRF guards the mutations). Mounted only when the

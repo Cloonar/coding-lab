@@ -87,8 +87,8 @@ func TestAPI_RunExposures(t *testing.T) {
 	runID := created["id"].(string)
 
 	exps := []preview.Exposure{
-		{Name: "api", URL: "http://api.lab.internal:8081", Port: 8080, Live: false},
-		{Name: "web", URL: "http://web.lab.internal:8081", Port: 5173, Live: true},
+		{Name: "api", URL: "https://api.lab.internal:8081", Port: 8080, Live: false},
+		{Name: "web", URL: "https://web.lab.internal:8081", Port: 5173, Live: true},
 	}
 	src.set(runID, exps)
 

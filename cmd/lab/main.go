@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -133,9 +134,24 @@ Flags (env overrides in parentheses; flag > env > default):
                            -onecli-dashboard=subdomain, an optional override
                            in port mode (LAB_ONECLI_DASHBOARD_URL)
   -preview-addr string     listen address of the opt-in preview listener that
-                           serves runs' exposed ports at
-                           http://<name>.<preview-domain>, e.g. :8081; empty
-                           (default) turns previews off (LAB_PREVIEW_ADDR)
+                           serves runs' exposed ports over HTTPS at
+                           https://<name>.<preview-domain> (port appended
+                           unless 443), e.g. :443 or :8443; empty (default)
+                           turns previews off (LAB_PREVIEW_ADDR)
+  -preview-redirect-addr string
+                           listen address of a plain-HTTP listener that only
+                           308-redirects to the HTTPS preview listener, e.g.
+                           :80; empty (default) runs none; requires
+                           -preview-addr (LAB_PREVIEW_REDIRECT_ADDR)
+  -preview-cert-file string
+                           PEM certificate served by the preview listener,
+                           e.g. an ACME wildcard for *.<preview-domain>; set
+                           together with -preview-key-file; unset makes lab
+                           mint its own CA and wildcard leaf
+                           (LAB_PREVIEW_CERT_FILE)
+  -preview-key-file string
+                           PEM private key for -preview-cert-file
+                           (LAB_PREVIEW_KEY_FILE)
   -preview-domain string   parent domain previews are served under,
                            <name>.<domain>; needs a wildcard DNS record you
                            provide (default "lab.internal"; LAB_PREVIEW_DOMAIN)
@@ -200,6 +216,37 @@ func run() int {
 	}
 
 	logger := logx.New(os.Stdout)
+
+	// The preview listeners bind FIRST (issue #106), before anything in this
+	// function can start a child process — the container preflight's podman
+	// execs, the tmux server, startup reconcile's re-adoption, AFK and every
+	// session after it. The NixOS module grants the unit
+	// AmbientCapabilities=CAP_NET_BIND_SERVICE for a preview port below 1024
+	// (the defaults are :443 and :80), and ambient capabilities survive
+	// execve, so the grant must be spent and dropped while lab is still the
+	// only process in the tree: bind here, clear the ambient set right after,
+	// and nothing lab ever starts can bind a privileged port. The servers are
+	// built much later (they need the registry and the certificate manager)
+	// and Serve these pre-bound listeners; a bind failure is fatal like any
+	// other listener's, only earlier. The deferred Close covers every early
+	// return below; after Serve took a listener over, its Shutdown already
+	// closed it and the second Close is a harmless error.
+	previewLn, redirectLn, err := bindPreviewListeners(cfg)
+	if err != nil {
+		logger.Error("binding the preview listeners", "component", "main", "err", err)
+		return 1
+	}
+	defer func() {
+		for _, ln := range []net.Listener{previewLn, redirectLn} {
+			if ln != nil {
+				_ = ln.Close()
+			}
+		}
+	}()
+	// Unconditionally, previews on or off: nothing lab starts ever needs an
+	// ambient capability, and a unit that granted one for any other reason
+	// should not hand it to agent sessions either.
+	dropAmbientCapabilities(logger)
 
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		logger.Error("creating state dir", "component", "main", "err", err)
@@ -605,7 +652,7 @@ func run() int {
 
 	// Previews (issue #105): `labctl expose <name> <port>` in a run tunnels
 	// the run's loopback port to lab, and lab serves it at
-	// http://<name>.<preview-domain> on the opt-in preview listener. ONE
+	// https://<name>.<preview-domain> on the opt-in preview listener. ONE
 	// in-memory registry holds every name → run, shared by the agent API
 	// (register/attach/stop), the preview listener (routing), the run API
 	// (the "exposures" key) and the run-end chokepoint (CloseRun). Its
@@ -623,7 +670,40 @@ func run() int {
 		previewExposures httpapi.ExposureSource // the run API's exposures key
 		previewSeed      *seeder.PreviewRef     // the worktree notes' Previews section
 	)
+	// The preview listener terminates TLS itself (issue #106), so with
+	// previews on there is also ONE certificate manager: it loads the
+	// operator's --preview-cert-file/--preview-key-file pair, or loads (and on
+	// first start mints) lab's own CA and wildcard leaf under
+	// <state>/preview. It is built here, at startup, so a broken pair or an
+	// unusable CA refuses the start with the reason in the log instead of
+	// surfacing as a handshake failure in a browser hours later. Its Run
+	// keeps the certificate current for the process lifetime: the daily
+	// leaf-renewal check, or the operator pair's mtime reload. The port
+	// handed to the registry and the seeder is the listener's own; both leave
+	// it out of the URL when it is 443.
+	//
+	// previewCerts stays the concrete pointer, nil when off, and the httpapi
+	// seam below is assigned only inside the branch — the same typed-nil rule
+	// as the registry.
+	var (
+		previewCerts     *preview.CertManager // nil = previews off
+		previewHTTPCerts httpapi.PreviewCerts // the status + CA download endpoints
+	)
 	if cfg.PreviewAddr != "" {
+		previewCerts, err = preview.NewCertManager(preview.CertOptions{
+			Domain:   cfg.PreviewDomain,
+			Dir:      filepath.Join(cfg.StateDir, "preview"),
+			CertFile: cfg.PreviewCertFile,
+			KeyFile:  cfg.PreviewKeyFile,
+			Logger:   logger,
+		})
+		if err != nil {
+			logger.Error("preview certificate", "component", "main", "err", err)
+			return 1
+		}
+		previewHTTPCerts = previewCerts
+		go previewCerts.Run(ctx)
+
 		previewReg = preview.NewRegistry(cfg.PreviewDomain, cfg.PreviewPort(), previewRunChanged(bus))
 		previewCloser = previewReg
 		previewExposures = previewReg
@@ -1138,6 +1218,14 @@ func run() int {
 		// The run API's "exposures" key (issue #105); nil without
 		// --preview-addr, which renders [] on every run.
 		Exposures: previewExposures,
+		// The preview TLS front door's status and CA download (issue #106).
+		// PreviewCerts nil without --preview-addr: the status then answers
+		// {"enabled": false} and the download 404s; the other three are
+		// reported only alongside it.
+		PreviewCerts:    previewHTTPCerts,
+		PreviewDomain:   cfg.PreviewDomain,
+		PreviewPort:     cfg.PreviewPort(),
+		PreviewRedirect: cfg.PreviewRedirectAddr != "",
 	})
 	if err != nil {
 		logger.Error("building http api", "component", "main", "err", err)
@@ -1213,7 +1301,8 @@ func run() int {
 	// whole-origin reverse proxy to the sidecar's dashboard. Nil in every other
 	// mode, which is the ordinary case — off is the default. It is a plain TCP
 	// listener like the main one, so TLS is terminated the same way (in front of
-	// lab, by the operator's proxy); lab terminates none itself, here or there.
+	// lab, by the operator's proxy); lab terminates none itself, here or there —
+	// the preview listener below is the one listener that speaks TLS itself.
 	// No CloseStreams hook: the dashboard has no SSE (ADR-0067 verified the
 	// approvals flow long-polls over fetch), so nothing holds Shutdown open.
 	var dashSrv *http.Server
@@ -1233,19 +1322,49 @@ func run() int {
 	// The preview listener (issue #105): --preview-addr makes lab serve runs'
 	// exposed ports on a FOURTH listener, routed by Host to the tunnel of the
 	// run holding <name>.<preview-domain>. Nil when the flag is unset, the
-	// default — no registry, no listener. Plain HTTP like the others (TLS, if
-	// any, is the operator's proxy's), and deliberately no authentication:
-	// reachable is allowed, lab's own stance for its LAN path. No
-	// CloseStreams hook: a proxied WebSocket or long poll is a hijacked or
-	// ordinary connection Shutdown does not wait on past its deadline, and
-	// the tunnels themselves live on the agent listeners, not here.
+	// default — no registry, no listener. Unlike every other listener it is
+	// NOT plain HTTP: lab terminates TLS on it itself (issue #106), with no
+	// reverse proxy in the path, so previews are secure origins on any lab
+	// install. ConfigureServer hands it the certificate manager's tls.Config —
+	// GetCertificate serves whatever pair is current, so a renewal or an
+	// operator reload takes effect on the next handshake — and the matching
+	// Protocols set (the HTTP/2-vs-WebSocket ALPN decision lives in
+	// preview.nextProtos); ServeTLS then runs with no cert/key file names.
+	// Deliberately no authentication: reachable is allowed, lab's own stance
+	// for its LAN path. No CloseStreams hook: a proxied WebSocket or long
+	// poll is a hijacked or ordinary connection Shutdown does not wait on
+	// past its deadline, and the tunnels themselves live on the agent
+	// listeners, not here. It serves previewLn, bound at the top of run().
 	var previewSrv *http.Server
 	if previewReg != nil {
 		previewSrv = &http.Server{
-			Addr:              cfg.PreviewAddr,
 			Handler:           previewReg.Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
+		previewCerts.ConfigureServer(previewSrv)
+	}
+	// The redirect listener (issue #106): --preview-redirect-addr adds a
+	// FIFTH listener, plain HTTP, that answers every request for the preview
+	// domain with a 308 to the same host, path and query on https:// (the
+	// preview port appended unless 443) and serves nothing else — no CA
+	// download, no status page: it is the only unauthenticated plain-HTTP
+	// surface lab exposes. Nil when the flag is unset (config.Parse refuses
+	// it without --preview-addr). It serves redirectLn, bound at the top of
+	// run(). No CloseStreams hook: every answer is a one-line redirect.
+	var redirectSrv *http.Server
+	if redirectLn != nil {
+		redirectSrv = &http.Server{
+			Handler:           preview.RedirectHandler(cfg.PreviewDomain, cfg.PreviewPort()),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
+	// What the startup line reports about the preview certificate: the
+	// source and the served leaf's expiry, empty with previews off.
+	var previewCertSource, previewCertNotAfter string
+	if previewCerts != nil {
+		cs := previewCerts.Status()
+		previewCertSource = string(cs.Source)
+		previewCertNotAfter = cs.NotAfter.UTC().Format(time.RFC3339)
 	}
 
 	logger.Info("lab starting",
@@ -1258,18 +1377,24 @@ func run() int {
 		"onecli_dashboard", cfg.OneCLIDashboard,
 		"onecli_dashboard_addr", cfg.OneCLIDashboardAddr,
 		"preview_addr", cfg.PreviewAddr,
-		"preview_domain", cfg.PreviewDomain)
+		"preview_domain", cfg.PreviewDomain,
+		"preview_redirect_addr", cfg.PreviewRedirectAddr,
+		"preview_cert_source", previewCertSource,
+		"preview_cert_not_after", previewCertNotAfter)
 
 	// Buffered for every listener, so a goroutine whose server returns after
 	// another already reported never blocks forever on an unread channel.
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	go func() { errCh <- srv.ListenAndServe() }()
 	go func() { errCh <- agentSrv.Serve(agentLn) }()
 	if dashSrv != nil {
 		go func() { errCh <- dashSrv.ListenAndServe() }()
 	}
 	if previewSrv != nil {
-		go func() { errCh <- previewSrv.ListenAndServe() }()
+		go func() { errCh <- previewSrv.ServeTLS(previewLn, "", "") }()
+	}
+	if redirectSrv != nil {
+		go func() { errCh <- redirectSrv.Serve(redirectLn) }()
 	}
 
 	select {
@@ -1303,6 +1428,12 @@ func run() int {
 				failed = true
 			}
 		}
+		if redirectSrv != nil {
+			if err := redirectSrv.Shutdown(shutdownCtx); err != nil {
+				logger.Error("preview redirect listener shutdown failed", "component", "main", "err", err)
+				failed = true
+			}
+		}
 		// Cancel running clone jobs; interrupted repos heal on next start.
 		repoSvc.Close()
 		if failed {
@@ -1310,6 +1441,32 @@ func run() int {
 		}
 		return 0
 	}
+}
+
+// bindPreviewListeners binds the preview listener (--preview-addr) and the
+// redirect listener (--preview-redirect-addr), each nil when its flag is
+// unset (issue #106). run() calls it before anything else so the bind — the
+// one thing a unit's ambient CAP_NET_BIND_SERVICE is granted for — happens
+// before the ambient set is dropped (see dropAmbientCapabilities). A failure
+// of the second bind closes the first, so the caller only ever owns both or
+// neither.
+func bindPreviewListeners(cfg config.Config) (previewLn, redirectLn net.Listener, err error) {
+	if cfg.PreviewAddr == "" {
+		return nil, nil, nil
+	}
+	previewLn, err = net.Listen("tcp", cfg.PreviewAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("preview listener: %w", err)
+	}
+	if cfg.PreviewRedirectAddr == "" {
+		return previewLn, nil, nil
+	}
+	redirectLn, err = net.Listen("tcp", cfg.PreviewRedirectAddr)
+	if err != nil {
+		_ = previewLn.Close()
+		return nil, nil, fmt.Errorf("preview redirect listener: %w", err)
+	}
+	return previewLn, redirectLn, nil
 }
 
 // loadOrGenerateMasterKey implements the design §6 first-start bootstrap:

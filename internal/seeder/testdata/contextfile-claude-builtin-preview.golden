@@ -67,13 +67,13 @@ their browser:
 `expose` runs in the foreground: start it in the background (`&`). It keeps
 forwarding until stopped and reconnects by itself if lab restarts.
 
-The URL is `http://<name>.lab.internal:8081`.
-The name is a single DNS label (a-z, 0-9, `-`); a name held by another run
-is refused, and a run holds at most 8.
+The URL is `https://<name>.lab.internal:8081` (HTTPS, served with lab's
+certificate). The name is a single DNS label (a-z, 0-9, `-`); a name held
+by another run is refused, and a run holds at most 8.
 
 Traffic goes to `127.0.0.1:<port>` inside this run, or `[::1]:<port>` when
 nothing listens there — your own loopback, nothing else is reachable — so a
-dev server's default `localhost` binding works. Vite: behind a public port
-other than 5173, HMR may need `server.hmr.clientPort` set to the URL's port,
-and its host check may need `server.allowedHosts` to include
+dev server's default `localhost` binding works. Vite: HMR's browser client
+connects over `wss` to the URL's port, so set `server.hmr.clientPort` to
+8081; its host check may need `server.allowedHosts` to include
 `.lab.internal`.
