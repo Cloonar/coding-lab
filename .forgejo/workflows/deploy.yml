@@ -130,7 +130,7 @@ jobs:
           git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
           cd nixos
           sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
-            hosts/dev-new/modules/coding-lab/default.nix
+            hosts/dev/modules/coding-lab/default.nix
           git diff --quiet && { echo "pin already current"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; }
           echo "changed=true" >> "$GITHUB_OUTPUT"
           git --no-pager diff --stat
@@ -269,7 +269,7 @@ jobs:
           set -euo pipefail
           set +u; . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; set -u
           cd nixos
-          ./scripts/test-configuration dev-new          # integration gate (needs nix)
+          ./scripts/test-configuration dev              # integration gate (needs nix)
           git config user.name  "coding-lab-bot"
           git config user.email "bot@cloonar.com"
           git commit -am "chore(coding-lab): bump nixos pin to ${SHA:0:12}"
