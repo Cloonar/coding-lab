@@ -44,14 +44,16 @@ var contextFileTemplate = template.Must(template.New("context-file").Parse(conte
 // is nil and secrets is non-empty (issue #104), never both, see
 // appendGatewaySecretsSection; then, ONLY when bastion is non-nil and names
 // at least one target, an SSH targets section (issue #39); then, ONLY when
-// imports is non-empty, a Read-only imports section is appended (issue
-// #261); then, ONLY for a provider that does not discover seeded skills
+// preview is non-nil (the preview listener is configured, issue #105), a
+// Previews section; then, ONLY when imports is non-empty, a Read-only
+// imports section is appended (issue #261); then, ONLY for a provider that does not discover seeded skills
 // natively yet does seed them (!meta.NativeSkillDiscovery && meta.SkillsDir
 // != ""), a generated skills index is appended (issue #79 / ADR-0035). A
-// native-discovery provider with a gateway-less, bastion-less, secret-less,
-// import-less repo — or one seeding no skills at all — gets byte-for-byte the
-// template render, which is exactly what the testdata goldens pin.
-func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef) ([]byte, error) {
+// native-discovery provider with a gateway-less, bastion-less, preview-less,
+// secret-less, import-less repo — or one seeding no skills at all — gets
+// byte-for-byte the template render, which is exactly what the testdata
+// goldens pin.
+func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef) ([]byte, error) {
 	var b bytes.Buffer
 	data := struct{ Binding, ForgeKind string }{repo.TrackerBinding, repo.ForgeKind}
 	if err := contextFileTemplate.Execute(&b, data); err != nil {
@@ -68,6 +70,9 @@ func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.
 	}
 	if bastion != nil && len(bastion.Targets) > 0 {
 		appendSSHTargetsSection(&b, bastion.Targets)
+	}
+	if preview != nil {
+		appendPreviewsSection(&b, preview)
 	}
 	if len(imports) > 0 {
 		appendImportsSection(&b, imports)
@@ -142,7 +147,7 @@ func appendSkillsIndex(buf *bytes.Buffer, skillsDir string, index []skillEntry) 
 // secret-less repo's byte-identity is then guaranteed by renderContextFile's
 // secrets branch simply not firing, never by a template conditional that must
 // stay inert. Section order in renderContextFile is template body → secrets →
-// SSH targets → read-only imports → skills index: repo-driven content (what THIS repo
+// SSH targets → previews → read-only imports → skills index: repo-driven content (what THIS repo
 // holds) precedes the provider-driven tail (what THIS provider needs
 // indexed), the same "what this repo is, then what this agent gets" ordering
 // the rest of the file follows.
@@ -291,7 +296,7 @@ func appendGatewaySecretsSection(buf *bytes.Buffer, services []string) {
 // because BastionRef carries nothing else.
 //
 // Placed after the Secrets section (both are "what this run can reach without
-// holding a credential") and before the Read-only imports, keeping every
+// holding a credential") and before the Previews and Read-only imports sections, keeping every
 // repo-driven section ahead of the provider-driven skills index. Appended in
 // Go for the same structural reason as its neighbours: an unwired run takes
 // renderContextFile's untouched path, byte-for-byte.
@@ -313,6 +318,53 @@ func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
 	}
 }
 
+// appendPreviewsSection writes the "## Previews" section onto buf (issue #105:
+// `labctl expose` tunnels a run's loopback port to lab, which serves it to the
+// operator's browser on the opt-in preview listener). The section is the
+// agent-facing half of that feature and teaches only what the agent cannot
+// guess:
+//
+//   - what it is for: showing the operator what the run is serving — a dev
+//     server, a built site — in their browser;
+//   - the two verbs: `labctl expose <name> <port>` is a foreground command the
+//     agent must background (`&`), prints the URL as its first line, keeps
+//     forwarding until stopped and reconnects by itself if lab restarts;
+//     `labctl expose stop <name>` ends it and frees the name;
+//   - the URL shape with the REAL domain (and port, when the listener is not
+//     on 80) rendered in, so the agent can announce a link without guessing;
+//   - the limits that surface as errors: a name is a single DNS label, a name
+//     held by another run is refused, eight exposures per run;
+//   - where traffic goes: 127.0.0.1:<port> inside the run — the run's own
+//     loopback and nothing else — so the dev server must listen there;
+//   - one Vite line, because HMR and the host check are the two things that
+//     reliably break a dev server behind a public name and port.
+//
+// Appended in Go for the same structural reason as its neighbours: with
+// Opts.Preview nil — the preview listener unconfigured — renderContextFile
+// takes the untouched path, byte-for-byte what it rendered before this
+// section existed.
+//
+// Shape mirrors appendSSHTargetsSection: a blank line separates the section
+// from whatever precedes it, then the heading, a blank line, the prose and
+// the indented command lines, ending in exactly one trailing "\n".
+func appendPreviewsSection(buf *bytes.Buffer, p *PreviewRef) {
+	buf.WriteString("\n## Previews\n\n")
+	buf.WriteString("Show the operator what you are serving — a dev server, a built site — in\n")
+	buf.WriteString("their browser:\n\n")
+	buf.WriteString("    labctl expose <name> <port> &    # prints the URL as its first line\n")
+	buf.WriteString("    labctl expose stop <name>        # ends the exposure and frees the name\n\n")
+	buf.WriteString("`expose` runs in the foreground: start it in the background (`&`). It keeps\n")
+	buf.WriteString("forwarding until stopped and reconnects by itself if lab restarts.\n\n")
+	fmt.Fprintf(buf, "The URL is `%s`.\n", p.URL("<name>"))
+	buf.WriteString("The name is a single DNS label (a-z, 0-9, `-`); a name held by another run\n")
+	buf.WriteString("is refused, and a run holds at most 8.\n\n")
+	buf.WriteString("Traffic goes to `127.0.0.1:<port>` inside this run — your own loopback,\n")
+	buf.WriteString("nothing else is reachable — so bind your dev server to it. Vite: behind a\n")
+	buf.WriteString("public port other than 5173, HMR may need `server.hmr.clientPort` set to the\n")
+	buf.WriteString("URL's port, and its host check may need `server.allowedHosts` to include\n")
+	fmt.Fprintf(buf, "`.%s`.\n", p.Domain)
+}
+
 // appendImportsSection writes the "## Read-only imports" section onto buf,
 // one bullet per import (issue #261: read-only imports — snapshots of other
 // lab repos materialized outside the worktree at spawn, so an instance can
@@ -332,7 +384,7 @@ func appendSSHTargetsSection(buf *bytes.Buffer, targets []string) {
 // import-less repo's byte-identity is guaranteed by the len(imports) == 0
 // check in renderContextFile, never by a template conditional that must stay
 // inert. Section order in renderContextFile is template body → secrets →
-// SSH targets → read-only imports → skills index (see appendSecretsSection's
+// SSH targets → previews → read-only imports → skills index (see appendSecretsSection's
 // ordering note): every repo-driven section precedes the provider-driven tail.
 //
 // Shape mirrors appendSecretsSection: a blank line separates the section from
@@ -359,12 +411,13 @@ func appendImportsSection(buf *bytes.Buffer, imports []ImportRef) {
 // append the Secrets section (issue #104); gateway flows through so it can
 // append the gateway Secrets section in its place (issue #24); bastion flows
 // through so it can append the SSH targets section (issue #39); imports flows
-// through so it can append the Read-only imports section (issue #261).
-func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef) error {
+// through so it can append the Read-only imports section (issue #261); preview
+// flows through so it can append the Previews section (issue #105).
+func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef) error {
 	if meta.ContextFileName == "" {
 		return nil
 	}
-	body, err := renderContextFile(repo, meta, secrets, gateway, bastion, imports)
+	body, err := renderContextFile(repo, meta, secrets, gateway, bastion, imports, preview)
 	if err != nil {
 		return err
 	}
