@@ -3,6 +3,7 @@
 //   secondary line carrying the project link, the forge link (issue #132) and
 //   the run's spawn-time model · effort (issue #68), at EVERY width;
 // - the exposed-secrets badge (issue #108);
+// - the Preview chip (issue #105): a link, or a menu for several exposures;
 // - the context meter (issue #243 / ADR-0061) as a ring + percentage button at
 //   every width and in every conversational state, opening Run details;
 // - the open affordance (ADR-0017) and the two-step Stop, inline at >=640px;
@@ -41,6 +42,7 @@ import { canGoBack } from '../../lib/navHistory';
 import { forgeWebUrl } from '../../lib/repoName';
 import { createInterrupt } from './Composer';
 import { createPullBase } from './pullBase';
+import { PreviewChip } from './PreviewChip';
 import {
   ContextRing,
   RunDetails,
@@ -491,6 +493,12 @@ export function ChatHeader(props: {
         </Show>
 
         <span class="spacer" />
+
+        {/* The Preview chip (issue #105): present only while the run has an
+            exposure (`labctl expose`); derived from the run resource, which
+            run.changed refetches, so it appears/disappears without a reload.
+            After the spacer so its menu anchors against the header's right. */}
+        <PreviewChip exposures={props.run?.exposures ?? []} />
 
         {/* The context meter (issue #58 §1): ring + rounded percentage at every
             width, in every conversational state, whenever usable usage exists
