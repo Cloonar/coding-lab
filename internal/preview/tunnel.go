@@ -22,7 +22,8 @@ import (
 // side that opens streams, because each stream stands for one browser
 // connection that arrived at lab. The FIRST stream lab opens is the control
 // stream, opened before the exposure is marked live; lab writes at most one
-// newline-terminated Control message on it and then closes the session.
+// newline-terminated Control message on it and then ends the session (once
+// labctl has closed its side, or after a short bound — see tunnel.end).
 // Every later stream is a data stream: labctl dials 127.0.0.1:<port>, writes
 // one status byte (statusOK / statusRefused), and on success copies bytes
 // both ways. Inside a data stream lab speaks plain HTTP/1.1, which is what
@@ -66,9 +67,11 @@ const (
 	// comfortably above upstreamDialTimeout so a slow-but-successful dial is
 	// never misreported as a dead tunnel.
 	statusTimeout = 15 * time.Second
-	// controlWriteTimeout bounds writing a control message to a peer that may
-	// already be gone; the session is closed either way afterwards.
-	controlWriteTimeout = 2 * time.Second
+	// defaultControlWriteTimeout bounds writing a control message (lab) or
+	// a refused status byte (labctl) to a peer that may already be gone; the
+	// stream or session is closed either way afterwards. Lab's side reads it
+	// through Registry.controlWriteTimeout so tests can change it.
+	defaultControlWriteTimeout = 2 * time.Second
 )
 
 // yamuxConfig is the session config both ends use: yamux's defaults —
@@ -84,20 +87,67 @@ func yamuxConfig() *yamux.Config {
 
 // tunnel is the lab side of one live yamux session.
 type tunnel struct {
-	sess *yamux.Session
-	ctrl *yamux.Stream
-	once sync.Once
+	sess         *yamux.Session
+	ctrl         *yamux.Stream
+	writeTimeout time.Duration // the Registry's controlWriteTimeout
+	once         sync.Once
 }
 
-// end delivers msg on the control stream (best effort, bounded by
-// controlWriteTimeout) and closes the session. Only the first call has any
-// effect, so Stop, CloseRun and a replacing Attach may race freely.
+// end delivers msg on the control stream (best effort), gives labctl a moment
+// to read it, and closes the session — all within about writeTimeout however
+// wedged the peer is. Only the first call has any effect, so Stop, CloseRun
+// and a replacing or vanished-reservation Attach may race freely.
+//
+// The bound is enforced here rather than with a stream write deadline: a
+// yamux stream's write deadline only bounds waiting for SEND WINDOW, which a
+// fresh control stream always has. The real wait is for the session's send
+// loop to put the frame on the connection, and that is bounded only by
+// yamux's ConnectionWriteTimeout (10s by default) — a connection whose peer
+// stopped reading (a suspended laptop, a wedged process) would hold every
+// end for those 10s. So the write runs on its own goroutine, and when
+// writeTimeout runs out the session is closed regardless, which unblocks the
+// write (yamux fails pending sends on shutdown) and lets that goroutine end.
+//
+// After a successful write, end lingers — inside the same bound — until
+// labctl closes the session, which ServeTunnel does as soon as it has read a
+// message. Closing at once would race labctl's side: a session torn down
+// before ServeTunnel accepted the control stream (Attach's vanished-
+// reservation path opens, writes and closes in one breath) looks to yamux's
+// AcceptStream like any other shutdown, and the message would be lost.
+//
+// A message lost anyway is not a resurrection risk: labctl sees a drop and
+// reconnects into the registry state the caller has already set — ErrStopped
+// or ErrRunEnded from Reserve, or an ordinary re-claim — which is just as
+// final.
 func (t *tunnel) end(msg Control) {
 	t.once.Do(func() {
-		_ = t.ctrl.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
-		_, _ = t.ctrl.Write([]byte(string(msg) + "\n"))
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			_, _ = t.ctrl.Write([]byte(string(msg) + "\n"))
+		}()
+		timer := time.NewTimer(t.writeTimeout)
+		defer timer.Stop()
+		select {
+		case <-written:
+			select {
+			case <-t.sess.CloseChan():
+			case <-timer.C:
+			}
+		case <-timer.C:
+		}
 		_ = t.sess.Close()
+		<-written
 	})
+}
+
+// endAsync is end on its own goroutine, for the callers that have already
+// changed the registry and must not wait on the peer: Stop (an agent API
+// request), CloseRun (the run-end sites) and a replacing Attach (whose new
+// tunnel is installed and should be announced at once). The goroutine lives
+// at most about writeTimeout.
+func (t *tunnel) endAsync(msg Control) {
+	go t.end(msg)
 }
 
 // Attach runs the lab side of one tunnel on conn, which the agent API has
@@ -108,15 +158,20 @@ func (t *tunnel) end(msg Control) {
 // until the session dies, after which the exposure stays reserved but not
 // live (unless it was stopped or released meanwhile), and returns nil.
 //
-// Reserve must have succeeded for (runID, name) first; otherwise — or if the
-// reservation is released while the session is being set up — Attach
-// returns ErrUnknown. Attach owns conn: it is closed on every return path.
+// Reserve must have succeeded for (runID, name) first. If the reservation is
+// not there when the tunnel is ready to install — never made, or released by
+// Stop or CloseRun since Reserve (the agent API's Reserve → 101 → Attach is
+// not atomic) — Attach returns ErrUnknown, but only after telling labctl why
+// on the control stream: "run-ended" when CloseRun marked the run ended,
+// "stopped" otherwise. A bare close would read to labctl as a dropped
+// connection, and it would reconnect into a name that is gone for good.
+// Attach owns conn: it is closed on every return path.
 func (r *Registry) Attach(runID, name string, conn net.Conn) error {
-	if !r.holds(runID, name) {
-		_ = conn.Close()
-		return ErrUnknown
-	}
-
+	// The session and control stream come first, unconditionally: the
+	// reservation is checked ONCE, under the lock that installs the tunnel,
+	// and whatever that check finds, labctl must hear it on a control
+	// stream. (An early "holds?" peek would only add a second answer to the
+	// same question, racing the first.)
 	sess, err := yamux.Client(conn, yamuxConfig())
 	if err != nil {
 		_ = conn.Close()
@@ -127,18 +182,22 @@ func (r *Registry) Attach(runID, name string, conn net.Conn) error {
 		_ = sess.Close()
 		return fmt.Errorf("preview: opening control stream: %w", err)
 	}
-	t := &tunnel{sess: sess, ctrl: ctrl}
-
-	// Install under the lock, re-checking the reservation: a Stop or CloseRun
-	// may have landed while the session was being set up, and installing a
-	// tunnel on a released name would resurrect it. Either way the name is
-	// gone for good, so labctl gets a final "stopped" rather than a silent
-	// drop it would answer by reconnecting.
 	r.mu.Lock()
+	t := &tunnel{sess: sess, ctrl: ctrl, writeTimeout: r.controlWriteTimeout}
+
+	// Install under the lock, re-checking the reservation: installing a
+	// tunnel on a released name would resurrect it.
 	e, ok := r.byName[name]
 	if !ok || e.runID != runID {
+		_, ended := r.ended[runID]
 		r.mu.Unlock()
-		t.end(ControlStopped)
+		msg := ControlStopped
+		if ended {
+			msg = ControlRunEnded
+		}
+		// Synchronous: this is the request's own goroutine, and Attach owns
+		// conn — it must be closed when Attach returns.
+		t.end(msg)
 		return ErrUnknown
 	}
 	prev := e.tun
@@ -147,7 +206,7 @@ func (r *Registry) Attach(runID, name string, conn net.Conn) error {
 	r.mu.Unlock()
 
 	if prev != nil {
-		prev.end(ControlReplaced)
+		prev.endAsync(ControlReplaced)
 	}
 	r.changed(repoID, runID)
 
@@ -167,14 +226,6 @@ func (r *Registry) Attach(runID, name string, conn net.Conn) error {
 		r.changed(repoID, runID)
 	}
 	return nil
-}
-
-// holds reports whether runID currently holds name.
-func (r *Registry) holds(runID, name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.byName[name]
-	return ok && e.runID == runID
 }
 
 // refusedError is the dialer's error for a data stream whose status byte
@@ -259,10 +310,11 @@ func ServeTunnel(ctx context.Context, conn io.ReadWriteCloser, port int) (Contro
 	}
 
 	// The control reader runs beside the accept loop. It yields exactly one
-	// value: the message, or "" when the session died without one. Lab closes
-	// the session right after writing a message, so the accept loop below
-	// usually sees the session end first — which is why the result is read
-	// only after the loop, never raced against it.
+	// value: the message, or "" when the session died without one. A message
+	// ends the session at once (this reader closes it; lab waits for that,
+	// see tunnel.end), so the accept loop below sees the session end around
+	// the same moment — which is why the result is read only after the loop,
+	// never raced against it.
 	ctlCh := make(chan Control, 1)
 	go func() {
 		line, err := bufio.NewReader(ctrl).ReadString('\n')
@@ -308,7 +360,7 @@ func forward(sess *yamux.Session, st *yamux.Stream, port int) {
 	d := net.Dialer{Timeout: upstreamDialTimeout}
 	up, err := d.Dial("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
-		_ = st.SetWriteDeadline(time.Now().Add(controlWriteTimeout))
+		_ = st.SetWriteDeadline(time.Now().Add(defaultControlWriteTimeout))
 		_, _ = st.Write([]byte{statusRefused})
 		return
 	}

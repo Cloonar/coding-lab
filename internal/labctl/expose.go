@@ -9,14 +9,19 @@ package labctl
 //
 // Exit codes follow the binary-wide convention: 0 when the exposure was
 // stopped (by `expose stop`, the operator, or a SIGINT/SIGTERM to this
-// process); 1 for every API/transport/validation failure and for lab ending
-// the exposure on its own (the run ended, or a newer `expose` of the same
-// name took over); 2 for a usage error or missing env.
+// process — whether lab says so on the live tunnel or, when the stop landed
+// while this process was reconnecting, with a 410 to its reconnect); 1 for
+// every API/transport/validation failure and for lab ending the exposure on
+// its own (the run ended, or a newer `expose` of the same name took over); 2
+// for a usage error or missing env.
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -100,6 +105,19 @@ func exposeLoop(c *Client, name string, port int, env Env) int {
 
 	sigs := env.Signals
 	if sigs == nil {
+		// The agent runs `labctl expose … &`, often with stdout/stderr on a
+		// pipe (a tool harness capturing the first line) whose reader goes
+		// away long before the exposure does. Go's runtime kills the process
+		// on EPIPE to fd 1 or 2 unless SIGPIPE is handled — so the next
+		// "reconnecting" note would silently end the preview. Ignored, the
+		// write just fails (every write here discards its error) and
+		// forwarding carries on. Only in this branch, the real process's:
+		// tests inject Signals and have no business changing the test
+		// binary's dispositions. Not unit-tested — it would mean a
+		// subprocess with a closed pipe for little more than asserting
+		// os/signal works; labctl expose execs nothing, so the inherited
+		// SIG_IGN reaches no child.
+		signal.Ignore(syscall.SIGPIPE)
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(ch)
@@ -124,9 +142,17 @@ func exposeLoop(c *Client, name string, port int, env Env) int {
 		return 0
 	}
 
+	// One session id for this process's whole life, sent on every attempt:
+	// it is how lab recognizes THIS process's reconnect after `expose stop`
+	// released the name mid-backoff (410 below), as opposed to a new
+	// `labctl expose` the agent started on purpose.
+	session := newExposeSession()
+
 	// The first attempt gets no retry of any kind: the agent must hear at once
-	// that lab is unreachable, previews are off, or the name is taken.
-	url, conn, err := c.ExposeOpen(ctx, name, port)
+	// that lab is unreachable, previews are off, or the name is taken. A 410
+	// cannot normally answer it — the session is brand new, so no stop can
+	// have named it — and if one does it is a 4xx like the rest: exit 1.
+	url, conn, err := c.ExposeOpen(ctx, name, session, port)
 	if err != nil {
 		if ctx.Err() != nil {
 			return interrupted()
@@ -153,7 +179,7 @@ func exposeLoop(c *Client, name string, port int, env Env) int {
 				return interrupted()
 			}
 			backoff = min(backoff*2, reconnectMax)
-			newURL, newConn, err := c.ExposeOpen(ctx, name, port)
+			newURL, newConn, err := c.ExposeOpen(ctx, name, session, port)
 			if err == nil {
 				conn = newConn
 				_, _ = fmt.Fprintf(env.Stderr, "labctl expose: reattached %q\n", name)
@@ -167,6 +193,12 @@ func exposeLoop(c *Client, name string, port int, env Env) int {
 			}
 			if ctx.Err() != nil {
 				return interrupted()
+			}
+			if stoppedWhileAway(err) {
+				// `expose stop` released the name while this process was
+				// between tunnels: the "stopped" control message it never
+				// got to read, delivered as a status instead.
+				return exposeFinal(env, name, preview.ControlStopped)
 			}
 			if !retryable(err) {
 				_, _ = fmt.Fprintf(env.Stderr, "labctl expose: %v\n", err)
@@ -193,6 +225,23 @@ func exposeFinal(env Env, name string, ctl preview.Control) int {
 		_, _ = fmt.Fprintf(env.Stderr, "labctl expose: lab ended exposure %q: %s\n", name, ctl)
 		return 1
 	}
+}
+
+// stoppedWhileAway reports whether a reconnect was refused because this
+// process's exposure was stopped meanwhile (lab's 410 Gone).
+func stoppedWhileAway(err error) bool {
+	var se *apiStatusError
+	return errors.As(err, &se) && se.status == http.StatusGone
+}
+
+// newExposeSession returns a fresh random session id: 16 bytes as hex. Lab
+// only compares it for equality, so all it needs is to be unique per process.
+// (crypto/rand.Read never fails since Go 1.24 — it crashes instead — so there
+// is no error to handle.)
+func newExposeSession() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // retryable reports whether a failed reconnect should be retried: transport

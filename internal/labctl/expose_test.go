@@ -281,7 +281,7 @@ func TestExposeRefusals(t *testing.T) {
 
 	t.Run("name held by another run", func(t *testing.T) {
 		f, reg := newExposeFixture(t)
-		if err := reg.Reserve(f.repo, "run_other", "web", 3000); err != nil {
+		if err := reg.Reserve(f.repo, "run_other", "web", "other-session", 3000); err != nil {
 			t.Fatalf("reserve for the other run: %v", err)
 		}
 		code, stdout, stderr := run(t, []string{"expose", "web", "5173"}, f.env())
@@ -370,6 +370,122 @@ func TestExposeReconnects(t *testing.T) {
 	if code := p.wait(t); code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr %q)", code, p.stderr.String())
 	}
+}
+
+// TestExposeStopDuringReconnect (issue #105): `labctl expose stop web` run
+// while the foreground `labctl expose web` sits in reconnect backoff frees
+// the name for good. The foreground's next attempt carries its session, lab
+// answers 410, and it exits 0 as if it had read "stopped" — instead of
+// re-reserving the name and bringing the preview back.
+func TestExposeStopDuringReconnect(t *testing.T) {
+	fastReconnect(t)
+	f, reg := newExposeFixture(t)
+
+	// Every registration after the first is held at 503 until the stop has
+	// landed, pinning the foreground in backoff.
+	var mu sync.Mutex
+	posts, refused := 0, 0
+	gate := make(chan struct{})
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/agent/v1/exposures" {
+			mu.Lock()
+			posts++
+			n := posts
+			mu.Unlock()
+			select {
+			case <-gate:
+			default:
+				if n > 1 {
+					mu.Lock()
+					refused++
+					mu.Unlock()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = io.WriteString(w, `{"error":"lab is restarting"}`)
+					return
+				}
+			}
+		}
+		f.handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	env := map[string]string{"LAB_URL": front.URL, "LAB_TOKEN": f.token}
+
+	p := startExpose(t, env, "web", strconv.Itoa(upstreamPort(t)))
+	waitLive(t, reg, f.runID, "web")
+	_ = (<-reg.conns).Close()
+	waitFor(t, "the foreground in backoff", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return refused >= 1
+	})
+
+	if code, _, stderr := run(t, []string{"expose", "stop", "web"}, f.env()); code != 0 {
+		t.Fatalf("expose stop = %d (stderr %q), want 0", code, stderr)
+	}
+	close(gate)
+
+	if code := p.wait(t); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, p.stderr.String())
+	}
+	if !strings.Contains(p.stderr.String(), `exposure "web" stopped`) {
+		t.Errorf("stderr = %q, want the stopped note", p.stderr.String())
+	}
+	if got := reg.Exposures(f.runID); len(got) != 0 {
+		t.Errorf("exposures after the foreground exited = %+v, want none", got)
+	}
+	if n := reg.attachCount(); n != 1 {
+		t.Errorf("attaches = %d, want 1 (the stopped exposure never re-attached)", n)
+	}
+	if code, _ := browse(reg, "web", "/"); code != http.StatusNotFound {
+		t.Errorf("preview after stop = %d, want 404", code)
+	}
+
+	// A NEW `labctl expose web` is the agent asking again, and gets it.
+	again := startExpose(t, f.env(), "web", strconv.Itoa(upstreamPort(t)))
+	waitLive(t, reg, f.runID, "web")
+	waitFor(t, "the new URL line", func() bool { return again.stdout.String() == "http://web.lab.internal:8081\n" })
+}
+
+// TestExposeOpenReleasesFailedConnections: each ExposeOpen builds its own
+// Transport, so a non-101 answer must not leave its connection in that
+// Transport's pool — a reconnect loop retrying through 503s would otherwise
+// pin one connection (a goroutine and an fd on lab) per attempt.
+func TestExposeOpenReleasesFailedConnections(t *testing.T) {
+	var mu sync.Mutex
+	open := 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"lab is restarting"}`)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch st {
+		case http.StateNew:
+			open++
+		case http.StateClosed, http.StateHijacked:
+			open--
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	c := &Client{BaseURL: srv.URL, Token: "lab_run_x"}
+	const attempts = 5
+	for range attempts {
+		_, _, err := c.ExposeOpen(context.Background(), "web", "session", 5173)
+		var se *apiStatusError
+		if !errors.As(err, &se) || se.status != http.StatusServiceUnavailable {
+			t.Fatalf("ExposeOpen = %v, want the 503", err)
+		}
+	}
+	waitFor(t, "every failed attempt's connection to close", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return open == 0
+	})
 }
 
 // TestExposeReconnectRefused: a 4xx on reconnect is final — here a 401
@@ -478,6 +594,7 @@ func TestExposeRetryable(t *testing.T) {
 		{&apiStatusError{status: 401, err: errors.New("invalid run token")}, false},
 		{&apiStatusError{status: 404, err: errors.New("previews are not enabled")}, false},
 		{&apiStatusError{status: 409, err: errors.New("taken")}, false},
+		{&apiStatusError{status: 410, err: errors.New("stopped")}, false},
 		{&apiStatusError{status: 200, err: errors.New("no upgrade")}, false},
 		{fmt.Errorf("wrapped: %w", &apiStatusError{status: 422, err: errors.New("limit")}), false},
 	} {

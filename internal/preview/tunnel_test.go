@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -437,7 +438,7 @@ func TestDroppedConnectionKeepsReservation(t *testing.T) {
 	assertPage(t, resp, body, http.StatusServiceUnavailable, "reconnecting")
 
 	// Another run still cannot take the name while labctl reconnects.
-	if err := r.Reserve("repo", "run2", "web", port); !errors.Is(err, ErrConflict) {
+	if err := r.Reserve("repo", "run2", "web", "s2", port); !errors.Is(err, ErrConflict) {
 		t.Errorf("other run during reconnect: err = %v, want ErrConflict", err)
 	}
 	// The holder reattaches.
@@ -463,24 +464,204 @@ func TestServeTunnelContextCancel(t *testing.T) {
 	}
 }
 
-func TestAttachWithoutReserve(t *testing.T) {
+// attachVanished runs Attach for (runID, name) — which the caller has made
+// sure is not reserved — against a real ServeTunnel, and returns what each
+// side returned.
+func attachVanished(t *testing.T, r *Registry, runID, name string) (res tunnelResult, attachErr error) {
+	t.Helper()
+	labEnd, agentEnd := net.Pipe()
+	attached := make(chan error, 1)
+	go func() { attached <- r.Attach(runID, name, labEnd) }()
+	served := make(chan tunnelResult, 1)
+	go func() {
+		ctl, err := ServeTunnel(context.Background(), agentEnd, 1)
+		served <- tunnelResult{ctl, err}
+	}()
+	for _, wait := range []func(){
+		func() { attachErr = <-attached },
+		func() { res = <-served },
+	} {
+		done := make(chan struct{})
+		go func() { wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(waitTimeout):
+			_ = labEnd.Close()
+			_ = agentEnd.Close()
+			t.Fatalf("Attach(%q, %q) on a vanished reservation did not finish", runID, name)
+		}
+	}
+	return res, attachErr
+}
+
+// An Attach that finds no reservation for its run — never made, held by
+// another run, or released since Reserve by Stop or CloseRun (the agent API's
+// Reserve → 101 → Attach is not atomic) — returns ErrUnknown AND gives labctl
+// a final control message. A bare close would read as a dropped connection
+// and send labctl reconnecting into a name that is gone.
+func TestAttachVanishedReservation(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	mustReserve(t, r, "repo", "run1", "web", 5173)
-	for _, tc := range []struct{ runID, name string }{
-		{"run1", "other"}, // never reserved
-		{"run2", "web"},   // held by another run
-	} {
-		labEnd, agentEnd := net.Pipe()
-		if err := r.Attach(tc.runID, tc.name, labEnd); !errors.Is(err, ErrUnknown) {
-			t.Errorf("Attach(%q, %q) = %v, want ErrUnknown", tc.runID, tc.name, err)
-		}
-		// Attach owns conn: it closed the lab end.
-		_ = agentEnd.SetReadDeadline(time.Now().Add(waitTimeout))
-		if _, err := agentEnd.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-			t.Errorf("Attach(%q, %q) left conn open: read err = %v, want EOF", tc.runID, tc.name, err)
-		}
-		_ = agentEnd.Close()
+
+	mustReserve(t, r, "repo", "run3", "stopped", 5173)
+	if err := r.Stop("run3", "stopped"); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
+	mustReserve(t, r, "repo", "run4", "ended", 5173)
+	r.CloseRun("run4")
+
+	for _, tc := range []struct {
+		why, runID, name string
+		want             Control
+	}{
+		{"never reserved", "run1", "other", ControlStopped},
+		{"held by another run", "run2", "web", ControlStopped},
+		{"stopped since Reserve", "run3", "stopped", ControlStopped},
+		{"run ended since Reserve", "run4", "ended", ControlRunEnded},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			res, attachErr := attachVanished(t, r, tc.runID, tc.name)
+			if !errors.Is(attachErr, ErrUnknown) {
+				t.Errorf("Attach = %v, want ErrUnknown", attachErr)
+			}
+			if res.ctl != tc.want || res.err != nil {
+				t.Errorf("ServeTunnel = (%q, %v), want (%q, nil)", res.ctl, res.err, tc.want)
+			}
+		})
+	}
+	// The vanished attaches installed nothing anywhere.
+	if isLive(r, "run1", "web") {
+		t.Errorf("run1's reservation went live from another run's Attach")
+	}
+}
+
+// wedgeConn is lab's end of a tunnel whose writes can be made to block, as
+// they do on a connection whose peer stopped reading (a suspended laptop, a
+// wedged labctl): after wedge, Write parks until the conn is closed.
+type wedgeConn struct {
+	net.Conn
+	wedged    chan struct{}
+	wedgeOnce sync.Once
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newWedgeConn(c net.Conn) *wedgeConn {
+	return &wedgeConn{Conn: c, wedged: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (c *wedgeConn) wedge() { c.wedgeOnce.Do(func() { close(c.wedged) }) }
+
+func (c *wedgeConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.wedged:
+		<-c.closed
+		return 0, net.ErrClosed
+	default:
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *wedgeConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// startWedgeableTunnel is startTunnel with lab's end wrapped in a wedgeConn,
+// and the Registry's control-write bound set to writeTimeout first.
+func startWedgeableTunnel(t *testing.T, r *Registry, runID, name string, port int, writeTimeout time.Duration) (*testTunnel, *wedgeConn) {
+	t.Helper()
+	r.mu.Lock()
+	r.controlWriteTimeout = writeTimeout
+	r.mu.Unlock()
+	mustReserve(t, r, "repo", runID, name, port)
+
+	labPipe, agentEnd := net.Pipe()
+	labEnd := newWedgeConn(labPipe)
+	ctx, cancel := context.WithCancel(context.Background())
+	tt := &testTunnel{
+		labEnd:   labEnd,
+		agentEnd: agentEnd,
+		cancel:   cancel,
+		attached: make(chan error, 1),
+		served:   make(chan tunnelResult, 1),
+	}
+	go func() { tt.attached <- r.Attach(runID, name, labEnd) }()
+	go func() {
+		ctl, err := ServeTunnel(ctx, agentEnd, port)
+		tt.served <- tunnelResult{ctl, err}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = labEnd.Close()
+		_ = agentEnd.Close()
+		tt.waitAttach(t)
+		tt.waitServed(t)
+	})
+	waitFor(t, "tunnel to go live", func() bool { return r.liveTunnel(name) != nil })
+	return tt, labEnd
+}
+
+// Stop and CloseRun change the registry synchronously but never wait on the
+// peer: with lab's writes wedged and a control-write bound far beyond the
+// test's patience, both still return at once, with the name already free.
+func TestStopAndCloseRunDoNotWaitOnPeer(t *testing.T) {
+	for _, op := range []string{"Stop", "CloseRun"} {
+		t.Run(op, func(t *testing.T) {
+			_, port := newUpstream(t, http.NotFoundHandler())
+			r, _ := newTestRegistry(t)
+			tt, labEnd := startWedgeableTunnel(t, r, "run1", "web", port, time.Hour)
+			labEnd.wedge()
+
+			returned := make(chan error, 1)
+			go func() {
+				if op == "Stop" {
+					returned <- r.Stop("run1", "web")
+					return
+				}
+				r.CloseRun("run1")
+				returned <- nil
+			}()
+			select {
+			case err := <-returned:
+				if err != nil {
+					t.Fatalf("%s: %v", op, err)
+				}
+			case <-time.After(waitTimeout):
+				t.Fatalf("%s blocked on a peer that stopped reading", op)
+			}
+			if got := r.Exposures("run1"); len(got) != 0 {
+				t.Errorf("Exposures right after %s = %v, want none", op, got)
+			}
+			mustReserve(t, r, "repo", "run2", "web", port)
+
+			// Unwedge by closing: the parked control write fails, the
+			// session ends, and labctl sees a drop (its reconnect would meet
+			// the registry state set above).
+			_ = labEnd.Close()
+			if res := tt.waitServed(t); res.ctl != "" || !errors.Is(res.err, ErrTunnelDropped) {
+				t.Errorf("ServeTunnel = (%q, %v), want a drop", res.ctl, res.err)
+			}
+			tt.waitAttach(t)
+		})
+	}
+}
+
+// tunnel.end is bounded by the Registry's control-write timeout, not by
+// yamux's 10s ConnectionWriteTimeout: with lab's writes wedged, the session
+// still closes — and Attach returns — well within waitTimeout.
+func TestEndBoundedOnWedgedPeer(t *testing.T) {
+	_, port := newUpstream(t, http.NotFoundHandler())
+	r, _ := newTestRegistry(t)
+	tt, labEnd := startWedgeableTunnel(t, r, "run1", "web", port, 50*time.Millisecond)
+	labEnd.wedge()
+
+	if err := r.Stop("run1", "web"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	tt.waitAttach(t) // fails if end waited out ConnectionWriteTimeout (10s)
+	_ = tt.agentEnd.Close()
+	tt.waitServed(t)
 }
 
 func TestServeTunnelRejectsInvalidPort(t *testing.T) {

@@ -718,6 +718,10 @@ func (e *apiStatusError) Unwrap() error { return e.err }
 // settings otherwise (the same route every other labctl request takes). A
 // fresh Transport with its own DialContext never negotiates HTTP/2, which
 // could not carry an HTTP/1.1 Upgrade.
+//
+// Every call builds a new Transport, so whatever connection it leaves in its
+// idle pool is reachable by nobody afterwards: ExposeOpen must close the
+// pool on every answer that is not the 101 (see there).
 func (c *Client) tunnelClient() *http.Client {
 	tr := &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: tunnelDialTimeout, KeepAlive: 30 * time.Second}).DialContext,
@@ -738,16 +742,22 @@ func (c *Client) tunnelClient() *http.Client {
 
 // ExposeOpen registers the exposure name → 127.0.0.1:port with lab and
 // switches the request into the tunnel: POST /agent/v1/exposures with
-// `Upgrade: lab-tunnel`. On the 101 it returns the preview's URL and the
-// switched connection, which the caller hands to preview.ServeTunnel (and
-// which the caller owns). Any other answer is an *apiStatusError carrying the
-// server's message; a failure to reach lab at all is a plain error.
-func (c *Client) ExposeOpen(ctx context.Context, name string, port int) (string, io.ReadWriteCloser, error) {
+// `Upgrade: lab-tunnel`. session is the calling `labctl expose` process's id,
+// the same on every attempt (see exposeLoop); "" omits it. On the 101 it
+// returns the preview's URL and the switched connection, which the caller
+// hands to preview.ServeTunnel (and which the caller owns). Any other answer
+// is an *apiStatusError carrying the server's message; a failure to reach lab
+// at all is a plain error.
+func (c *Client) ExposeOpen(ctx context.Context, name, session string, port int) (string, io.ReadWriteCloser, error) {
 	base, err := c.requestBase()
 	if err != nil {
 		return "", nil, err
 	}
-	data, err := json.Marshal(map[string]any{"name": name, "port": port})
+	body := map[string]any{"name": name, "port": port}
+	if session != "" {
+		body["session"] = session
+	}
+	data, err := json.Marshal(body)
 	if err != nil {
 		return "", nil, fmt.Errorf("encoding request: %w", err)
 	}
@@ -760,13 +770,21 @@ func (c *Client) ExposeOpen(ctx context.Context, name string, port int) (string,
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", tunnelProtocol)
 
-	resp, err := c.tunnelClient().Do(req)
+	client := c.tunnelClient()
+	resp, err := client.Do(req)
 	if err != nil {
+		client.CloseIdleConnections()
 		return "", nil, err
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		// A non-101 answer leaves its keep-alive connection in this one-shot
+		// Transport's idle pool once the body is closed, and nothing would
+		// ever reuse or close it: a reconnect loop retrying through 503s
+		// would pin one connection (and a lab-side goroutine) per attempt
+		// until the process exits. Close the body, then the pool.
+		_ = resp.Body.Close()
+		client.CloseIdleConnections()
 		err := c.errorFromResponse(resp, body)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Something between labctl and lab answered the request itself

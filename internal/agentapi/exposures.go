@@ -27,8 +27,9 @@ import (
 // Previews (the default) means lab has no preview listener configured, and
 // both exposure routes answer the "not enabled" 404.
 type Previews interface {
-	// Reserve claims name for runID (re-claiming it for the same run).
-	Reserve(repoID, runID, name string, port int) error
+	// Reserve claims name for runID (re-claiming it for the same run) on
+	// behalf of the labctl process identified by session.
+	Reserve(repoID, runID, name, session string, port int) error
 	// Attach serves the tunnel on conn — already past the 101 — and blocks
 	// until it ends. It owns conn.
 	Attach(runID, name string, conn net.Conn) error
@@ -55,14 +56,20 @@ const previewURLHeader = "Lab-Preview-URL"
 // runs without a preview listener.
 const previewsDisabledMessage = "previews are not enabled on this lab (no preview listener configured)"
 
-// maxExposeBody bounds the registration body: {"name": a DNS label, "port"}
-// is a few dozen bytes.
+// maxExposeBody bounds the registration body: {"name": a DNS label, "port",
+// "session": 32 hex digits} is well under a hundred bytes.
 const maxExposeBody = 4 << 10
 
-// exposeRequest is POST /agent/v1/exposures' body.
+// exposeRequest is POST /agent/v1/exposures' body. Session is the random id
+// one `labctl expose` process sends on every attempt (issue #105): it is how
+// the Registry refuses that process's reconnect after `expose stop` freed
+// its name (410 below) while still letting a NEW `labctl expose` of the name
+// in. It is opaque to lab; an older labctl omits it and keeps the
+// pre-session behavior.
 type exposeRequest struct {
-	Name string `json:"name"`
-	Port int    `json:"port"`
+	Name    string `json:"name"`
+	Port    int    `json:"port"`
+	Session string `json:"session"`
 }
 
 // exposureRun returns the authenticated run, or writes the response and
@@ -119,8 +126,13 @@ func (s *Server) handleExposureCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.previews.Reserve(repoID, runID, req.Name, req.Port); err != nil {
+	if err := s.previews.Reserve(repoID, runID, req.Name, req.Session, req.Port); err != nil {
 		switch {
+		case errors.Is(err, preview.ErrRunEnded):
+			// The run ended after the middleware accepted its token: the same
+			// opaque answer the middleware gives an ended run a moment later,
+			// so labctl treats it as final either way.
+			jsonError(w, http.StatusUnauthorized, "invalid run token")
 		case errors.Is(err, preview.ErrInvalidName):
 			jsonError(w, http.StatusBadRequest, invalidNameMessage(req.Name))
 		case errors.Is(err, preview.ErrInvalidPort):
@@ -129,6 +141,12 @@ func (s *Server) handleExposureCreate(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusConflict, fmt.Sprintf("name %q is already exposed by another run", req.Name))
 		case errors.Is(err, preview.ErrLimit):
 			jsonError(w, http.StatusUnprocessableEntity, fmt.Sprintf("exposure limit reached (%d per run)", preview.MaxPerRun))
+		case errors.Is(err, preview.ErrStopped):
+			// 410, not 404 or 409: the name is free, but THIS labctl process's
+			// exposure is gone for good — `expose stop` ended it while the
+			// tunnel was between connections. labctl reads it as "stopped"
+			// and exits 0, as it would on the control message it missed.
+			jsonError(w, http.StatusGone, fmt.Sprintf("exposure %q was stopped", req.Name))
 		default:
 			s.internalError(w, "reserving exposure", err)
 		}
@@ -170,7 +188,7 @@ func (s *Server) handleExposureCreate(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("exposure attached", "component", "agentapi", "run_id", runID, "name", req.Name, "port", req.Port)
 	if err := s.previews.Attach(runID, req.Name, tun); err != nil {
 		// Stopped or released between Reserve and Attach; Attach has already
-		// told labctl (or closed the connection).
+		// told labctl on the control stream ("stopped" or "run-ended").
 		s.log.Info("exposure attach ended", "component", "agentapi", "run_id", runID, "name", req.Name, "err", err)
 		return
 	}

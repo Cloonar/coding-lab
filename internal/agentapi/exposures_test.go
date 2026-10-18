@@ -149,7 +149,7 @@ func TestExposureCreateErrors(t *testing.T) {
 	})
 
 	t.Run("conflict with another run", func(t *testing.T) {
-		if err := f.reg.Reserve("repo_a", "run_b", "taken", 3000); err != nil {
+		if err := f.reg.Reserve("repo_a", "run_b", "taken", "sess_b", 3000); err != nil {
 			t.Fatalf("reserve for run_b: %v", err)
 		}
 		assertJSONError(t, exposeRecorded(f.handler, "POST", "/agent/v1/exposures", f.tokenA, `{"name":"taken","port":5173}`, true),
@@ -158,13 +158,46 @@ func TestExposureCreateErrors(t *testing.T) {
 
 	t.Run("limit", func(t *testing.T) {
 		for i := range preview.MaxPerRun {
-			if err := f.reg.Reserve("repo_a", "run_a", "n"+strconv.Itoa(i), 3000); err != nil {
+			if err := f.reg.Reserve("repo_a", "run_a", "n"+strconv.Itoa(i), "sess_a", 3000); err != nil {
 				t.Fatalf("reserve %d: %v", i, err)
 			}
 		}
 		assertJSONError(t, exposeRecorded(f.handler, "POST", "/agent/v1/exposures", f.tokenA, `{"name":"one-too-many","port":5173}`, true),
 			http.StatusUnprocessableEntity, "exposure limit reached (8 per run)")
 	})
+}
+
+// TestExposureCreateStopped: `expose stop` landing while the foreground
+// labctl is between tunnels leaves a tombstone, and that process's reconnect
+// (same session) is told 410 — final, read by labctl as "stopped".
+func TestExposureCreateStopped(t *testing.T) {
+	f := newExposeFixture(t)
+	if err := f.reg.Reserve("repo_a", "run_a", "web", "fg-session", 5173); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if rr := exposeRecorded(f.handler, "DELETE", "/agent/v1/exposures/web", f.tokenA, "", false); rr.Code != http.StatusNoContent {
+		t.Fatalf("stop status = %d, want 204", rr.Code)
+	}
+	assertJSONError(t, exposeRecorded(f.handler, "POST", "/agent/v1/exposures", f.tokenA, `{"name":"web","port":5173,"session":"fg-session"}`, true),
+		http.StatusGone, `exposure "web" was stopped`)
+	if got := f.reg.Exposures("run_a"); len(got) != 0 {
+		t.Fatalf("run_a exposures after the refused reconnect = %+v, want none", got)
+	}
+}
+
+// TestExposureCreateRunEnded: a run that ends between the middleware
+// accepting its token and Reserve gets the middleware's own 401, and no
+// reservation.
+func TestExposureCreateRunEnded(t *testing.T) {
+	f := newExposeFixture(t)
+	// The token is still valid here; only the Registry knows the run ended —
+	// exactly the window between auth and Reserve.
+	f.reg.CloseRun("run_a")
+	assertJSONError(t, exposeRecorded(f.handler, "POST", "/agent/v1/exposures", f.tokenA, `{"name":"web","port":5173,"session":"s"}`, true),
+		http.StatusUnauthorized, "invalid run token")
+	if got := f.reg.Exposures("run_a"); len(got) != 0 {
+		t.Fatalf("run_a exposures = %+v, want none", got)
+	}
 }
 
 func TestExposureDelete(t *testing.T) {
@@ -174,7 +207,7 @@ func TestExposureDelete(t *testing.T) {
 		http.StatusNotFound, `no exposure named "nope" in this run`)
 
 	// Another run's name is just as unknown — and survives the attempt.
-	if err := f.reg.Reserve("repo_a", "run_b", "theirs", 3000); err != nil {
+	if err := f.reg.Reserve("repo_a", "run_b", "theirs", "sess_b", 3000); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 	assertJSONError(t, exposeRecorded(f.handler, "DELETE", "/agent/v1/exposures/theirs", f.tokenA, "", false),
@@ -183,7 +216,7 @@ func TestExposureDelete(t *testing.T) {
 		t.Fatalf("run_b exposures = %+v, want its name kept", got)
 	}
 
-	if err := f.reg.Reserve("repo_a", "run_a", "web", 5173); err != nil {
+	if err := f.reg.Reserve("repo_a", "run_a", "web", "sess_a", 5173); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 	rr := exposeRecorded(f.handler, "DELETE", "/agent/v1/exposures/web", f.tokenA, "", false)

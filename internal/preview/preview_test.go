@@ -46,10 +46,14 @@ func newTestRegistry(t *testing.T) (*Registry, *changeLog) {
 	return NewRegistry("lab.internal", 8081, log.record), log
 }
 
-// mustReserve asserts Reserve succeeds.
+// testSession is the labctl session id mustReserve claims with: one fixed
+// "process" per run, which is what a reconnecting `labctl expose` looks like.
+func testSession(runID string) string { return "session-" + runID }
+
+// mustReserve asserts Reserve succeeds, as runID's testSession.
 func mustReserve(t *testing.T, r *Registry, repoID, runID, name string, port int) {
 	t.Helper()
-	if err := r.Reserve(repoID, runID, name, port); err != nil {
+	if err := r.Reserve(repoID, runID, name, testSession(runID), port); err != nil {
 		t.Fatalf("Reserve(%q, %q, %q, %d): %v", repoID, runID, name, port, err)
 	}
 }
@@ -103,11 +107,11 @@ func TestURL(t *testing.T) {
 
 func TestReserveValidates(t *testing.T) {
 	r, log := newTestRegistry(t)
-	if err := r.Reserve("repo", "run1", "Web", 5173); !errors.Is(err, ErrInvalidName) {
+	if err := r.Reserve("repo", "run1", "Web", "s1", 5173); !errors.Is(err, ErrInvalidName) {
 		t.Errorf("uppercase name: err = %v, want ErrInvalidName", err)
 	}
 	for _, port := range []int{0, -1, 65536} {
-		if err := r.Reserve("repo", "run1", "web", port); !errors.Is(err, ErrInvalidPort) {
+		if err := r.Reserve("repo", "run1", "web", "s1", port); !errors.Is(err, ErrInvalidPort) {
 			t.Errorf("port %d: err = %v, want ErrInvalidPort", port, err)
 		}
 	}
@@ -128,7 +132,7 @@ func TestReserveConflictAndReclaim(t *testing.T) {
 
 	// Another run cannot take the name, and the attempt changes nothing.
 	before := log.count()
-	if err := r.Reserve("repo2", "run2", "web", 3000); !errors.Is(err, ErrConflict) {
+	if err := r.Reserve("repo2", "run2", "web", "s2", 3000); !errors.Is(err, ErrConflict) {
 		t.Fatalf("other run: err = %v, want ErrConflict", err)
 	}
 	if log.count() != before {
@@ -152,7 +156,7 @@ func TestReserveLimit(t *testing.T) {
 	for i := range MaxPerRun {
 		mustReserve(t, r, "repo", "run1", fmt.Sprintf("app%d", i), 3000+i)
 	}
-	if err := r.Reserve("repo", "run1", "one-too-many", 4000); !errors.Is(err, ErrLimit) {
+	if err := r.Reserve("repo", "run1", "one-too-many", "s1", 4000); !errors.Is(err, ErrLimit) {
 		t.Fatalf("9th exposure: err = %v, want ErrLimit", err)
 	}
 	// Re-reserving a name the run already holds is not a new exposure.
@@ -219,6 +223,123 @@ func TestCloseRun(t *testing.T) {
 	if log.count() != before {
 		t.Errorf("CloseRun on a run holding nothing fired onChange")
 	}
+}
+
+// TestStopTombstone (issue #105): `labctl expose stop web` landing while the
+// foreground `labctl expose web` is between tunnels must stay stopped. That
+// very process's reconnect — same run, same session — gets ErrStopped; a new
+// `labctl expose` the agent starts on purpose (a different session) wins the
+// name back; and any successful Reserve clears the tombstone.
+func TestStopTombstone(t *testing.T) {
+	r, log := newTestRegistry(t)
+	if err := r.Reserve("repo", "run1", "web", "fg", 5173); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := r.Stop("run1", "web"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	before := log.count()
+	if err := r.Reserve("repo", "run1", "web", "fg", 5173); !errors.Is(err, ErrStopped) {
+		t.Fatalf("reconnect of the stopped session: err = %v, want ErrStopped", err)
+	}
+	if got := r.Exposures("run1"); len(got) != 0 {
+		t.Errorf("Exposures after refused reconnect = %v, want none", got)
+	}
+	if log.count() != before {
+		t.Errorf("a refused reconnect fired onChange")
+	}
+	// The tombstone is per name: the same session may hold another one.
+	if err := r.Reserve("repo", "run1", "api", "fg", 8080); err != nil {
+		t.Errorf("same session, other name: %v", err)
+	}
+
+	// A fresh `labctl expose web` (new session) is the agent asking again.
+	if err := r.Reserve("repo", "run1", "web", "fresh", 5173); err != nil {
+		t.Fatalf("new session after stop: %v", err)
+	}
+	// ...and that cleared the tombstone: the old session is now just a
+	// second labctl of the same run re-claiming (it would replace on attach).
+	if err := r.Reserve("repo", "run1", "web", "fg", 5173); err != nil {
+		t.Errorf("old session after a new holder: %v, want the ordinary re-claim", err)
+	}
+
+	// A tombstone never blocks another run, and that run's claim clears it.
+	if err := r.Stop("run1", "web"); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+	if err := r.Reserve("repo", "run2", "web", "fg", 3000); err != nil {
+		t.Fatalf("other run after stop: %v", err)
+	}
+	if err := r.Stop("run2", "web"); err != nil {
+		t.Fatalf("Stop by run2: %v", err)
+	}
+	if err := r.Reserve("repo", "run1", "web", "fg", 5173); err != nil {
+		t.Errorf("run1's old session after run2 held and stopped the name: %v, want ok (run2's stop left run2's tombstone)", err)
+	}
+
+	// An empty session (a labctl predating sessions) is never tombstoned.
+	if err := r.Reserve("repo", "run3", "legacy", "", 5173); err != nil {
+		t.Fatalf("Reserve with no session: %v", err)
+	}
+	if err := r.Stop("run3", "legacy"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := r.Reserve("repo", "run3", "legacy", "", 5173); err != nil {
+		t.Errorf("sessionless reconnect after stop: %v, want today's re-claim", err)
+	}
+}
+
+// CloseRun drops the ending run's tombstones, so the map is bounded by the
+// names live runs have stopped.
+func TestCloseRunDropsTombstones(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	for _, run := range []string{"run1", "run2"} {
+		if err := r.Reserve("repo", run, "web-"+run, "fg", 5173); err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		if err := r.Stop(run, "web-"+run); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	}
+	r.CloseRun("run1")
+	r.mu.Lock()
+	_, kept := r.tombstones["web-run2"]
+	n := len(r.tombstones)
+	r.mu.Unlock()
+	if n != 1 || !kept {
+		t.Errorf("tombstones after CloseRun(run1) = %d (run2's kept: %v), want only run2's", n, kept)
+	}
+}
+
+// TestReserveAfterCloseRun: the agent API authenticates the run token before
+// Reserve, so a run may end in between. Its Reserve must not re-claim a name
+// no run-end site will ever release again — it gets ErrRunEnded, even for a
+// run that held nothing when it ended.
+func TestReserveAfterCloseRun(t *testing.T) {
+	r, log := newTestRegistry(t)
+	mustReserve(t, r, "repo", "run1", "web", 5173)
+	r.CloseRun("run1")
+	r.CloseRun("run2") // held nothing
+
+	before := log.count()
+	for _, run := range []string{"run1", "run2"} {
+		if err := r.Reserve("repo", run, "web", testSession(run), 5173); !errors.Is(err, ErrRunEnded) {
+			t.Errorf("%s: Reserve after CloseRun = %v, want ErrRunEnded", run, err)
+		}
+		// Checked before anything else: an ended run learns nothing more.
+		if err := r.Reserve("repo", run, "Bad.Name", testSession(run), 0); !errors.Is(err, ErrRunEnded) {
+			t.Errorf("%s: invalid Reserve after CloseRun = %v, want ErrRunEnded", run, err)
+		}
+	}
+	if got := r.Exposures("run1"); len(got) != 0 {
+		t.Errorf("Exposures of the ended run = %v, want none", got)
+	}
+	if log.count() != before {
+		t.Errorf("a refused Reserve fired onChange")
+	}
+	// Other runs are unaffected, including for the released name.
+	mustReserve(t, r, "repo", "run3", "web", 5173)
 }
 
 // recordingCloser is a RunCloser fake recording every CloseRun.
