@@ -174,7 +174,7 @@ labctl secret exec <NAME...> -- <cmd> [args...]
                                       child output is redacted — values appear as [REDACTED:NAME]
 labctl secret scan <rev-arg>...       scan the outgoing diff for secret values; findings or ANY
                                       failure exit 1 (fail closed)
-labctl expose <name> <port>           serve the run's 127.0.0.1:<port> at http://<name>.<preview-domain>;
+labctl expose <name> <port>           serve the run's loopback <port> at http://<name>.<preview-domain>;
                                       prints the URL first, then forwards until stopped (run it with &)
 labctl expose stop <name>             end the exposure and free the name
 ```

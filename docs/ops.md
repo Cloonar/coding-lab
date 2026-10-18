@@ -970,7 +970,7 @@ labctl expose stop web        # ends the exposure and frees the name
 ```
 
 - `<name>` is a single DNS label: 1–63 characters of lowercase `a-z`, `0-9` and `-`, not starting or ending with `-`. The agent picks it; a readable name is one it can announce in the chat or a PR.
-- `<port>` is the port the dev server listens on **inside the run**. Traffic always goes to `127.0.0.1:<port>` in the run's own network: inside the container for a container run, the host loopback for a host run. labctl takes no host, so a preview can never reach any other service. The dev server can keep its default loopback binding.
+- `<port>` is the port the dev server listens on **inside the run**. Traffic always goes to the run's own loopback: `127.0.0.1:<port>`, or `[::1]:<port>` when nothing listens on the IPv4 address. That is inside the container for a container run, the host loopback for a host run. labctl takes no host, so a preview can never reach any other service. The dev server can keep its default `localhost` binding, whichever of the two addresses `localhost` resolves to.
 - `labctl expose` runs in the foreground until it is stopped, so the agent starts it in the background with `&`. Killing it (SIGINT or SIGTERM) also frees the name.
 - A run holds at most **8** exposures at once.
 - Vite: if the URL's port is not 5173, HMR may need `server.hmr.clientPort` set to that port. Recent Vite versions also refuse unknown hosts until `server.allowedHosts` includes `.lab.internal` (or your preview domain).
