@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -197,6 +198,9 @@ func (s *Service) killSessionOnBranch(ctx context.Context, repo store.Repo, bran
 		if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 			s.log.Warn("discard: delete run tokens", "component", "reconcile", "run", run.ID, "err", err)
 		}
+		// The run-end chokepoint's preview half (issue #105): the discarded
+		// run's names are released and its tunnels told "run-ended".
+		preview.CloseRunExposures(s.exposures, run.ID)
 		if repo.CredentialID != nil {
 			if err := s.mat.Cleanup(*repo.CredentialID, run.ID); err != nil {
 				s.log.Warn("discard: cleanup credential", "component", "reconcile", "run", run.ID, "err", err)

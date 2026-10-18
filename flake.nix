@@ -365,6 +365,39 @@
                 };
               };
 
+              # Eval-only preview dummies (issue #105) — only ExecStart and
+              # the firewall list are read, so nothing is realized. `common`
+              # sets openFirewall = true, so the port lists below are the
+              # openFirewall behavior. previewDummy: listener on + a custom
+              # domain; previewDomainOnlyDummy: a domain with no listener must
+              # render nothing at all (the domain is meaningless while off).
+              previewDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  preview = {
+                    listenAddr = "0.0.0.0:8081";
+                    domain = "previews.example.org";
+                  };
+                };
+              };
+              previewDefaultDomainDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  preview.listenAddr = ":8081";
+                };
+              };
+              previewDomainOnlyDummy = mkDummy {
+                services.lab = {
+                  agentPackages."claude-code" = null;
+                  agentPackages.codex = null;
+                  preview.domain = "previews.example.org";
+                };
+              };
+              execStart = d: d.config.systemd.services.lab.serviceConfig.ExecStart;
+              firewallPorts = d: d.config.networking.firewall.allowedTCPPorts;
+
               unitPathNames = d: map lib.getName d.config.systemd.services.lab.path;
               baselineNames = [
                 # bash is load-bearing for Claude Code's Bash tool (no /bin/bash
@@ -423,6 +456,39 @@
             assert lib.assertMsg
               (lib.any (m: lib.hasInfix "services.lab.onecli.dashboard" m && lib.hasInfix "services.lab.onecli.dashboardUrl" m) (failedAssertionMessages dashboardSubdomainNoUrlDummy))
               "nixos-module check: onecli.dashboard = \"subdomain\" with no dashboardUrl must fail eval with a message naming both options";
+            # Previews (issue #105): unset renders no --preview-* flag and
+            # opens only the main port; set renders both flags (domain
+            # defaulting to lab.internal) and openFirewall also opens the
+            # port derived from preview.listenAddr; a domain without a
+            # listener renders nothing.
+            assert lib.assertMsg
+              (
+                !lib.hasInfix "--preview-" (execStart defaultsDummy)
+                && firewallPorts defaultsDummy == [ 8080 ]
+              )
+              "nixos-module check: with preview.listenAddr unset the unit must carry no --preview-* flag and openFirewall must open only the main listen port";
+            assert lib.assertMsg
+              (
+                lib.hasInfix "\"--preview-addr\" \"0.0.0.0:8081\"" (execStart previewDummy)
+                && lib.hasInfix "\"--preview-domain\" \"previews.example.org\"" (execStart previewDummy)
+              )
+              "nixos-module check: preview.listenAddr + preview.domain must render --preview-addr and --preview-domain";
+            assert lib.assertMsg
+              (
+                lib.hasInfix "\"--preview-addr\" \":8081\"" (execStart previewDefaultDomainDummy)
+                && lib.hasInfix "\"--preview-domain\" \"lab.internal\"" (execStart previewDefaultDomainDummy)
+              )
+              "nixos-module check: preview.domain must default to lab.internal when preview.listenAddr is set";
+            assert lib.assertMsg
+              (!lib.hasInfix "--preview-" (execStart previewDomainOnlyDummy))
+              "nixos-module check: preview.domain without preview.listenAddr must render no --preview-* flag";
+            assert lib.assertMsg
+              (
+                firewallPorts previewDummy == [ 8080 8081 ]
+                && firewallPorts previewDefaultDomainDummy == [ 8080 8081 ]
+                && firewallPorts previewDomainOnlyDummy == [ 8080 ]
+              )
+              "nixos-module check: openFirewall must open the preview port (derived from preview.listenAddr) alongside the main port, and only while previews are on";
             assert lib.assertMsg (lib.any (lib.hasInfix "claudePackage") dummy.config.warnings)
               "nixos-module check: setting the deprecated claudePackage must emit a deprecation warning";
             assert lib.assertMsg (!lib.any (lib.hasInfix "claudePackage") defaultsDummy.config.warnings)

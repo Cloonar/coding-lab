@@ -236,6 +236,15 @@ type Options struct {
 	ProxyAuthHeader string
 	TrustedProxies  []netip.Prefix
 
+	// Exposures is the preview registry's read side (issue #105): the run
+	// API's "exposures" key lists what each run serves through `labctl
+	// expose`. Production passes *preview.Registry. Nil means this lab has no
+	// preview listener, and every run then renders "exposures": [] — the key
+	// is never absent and never null. Same typed-nil rule as Warpgate above:
+	// cmd/lab assigns it only when the listener is configured, and New folds
+	// a nil *preview.Registry back to nil regardless.
+	Exposures ExposureSource
+
 	// AgentHandler is the /agent/v1 tree (run-token auth, no CSRF). Nil
 	// leaves it unmounted.
 	AgentHandler http.Handler
@@ -297,6 +306,10 @@ type Server struct {
 	warpgateHostKeys WarpgateHostKeyPin
 
 	devImageFallback string // --container-image, reported as dev_image_fallback
+
+	// exposures backs every run response's "exposures" key (issue #105; see
+	// Options.Exposures). nil = no preview listener; runExposures handles it.
+	exposures ExposureSource
 
 	baseOrigin      string // canonical origin of --base-url, "" when unset
 	baseOriginHTTPS bool
@@ -417,6 +430,7 @@ func New(o Options) (*Server, error) {
 	}
 	s.shutdownCtx, s.shutdownCancel = context.WithCancel(context.Background())
 	s.warpgate, s.warpgateHostKeys = normalizeWarpgate(o.Warpgate, o.WarpgateHostKeys)
+	s.exposures = normalizeExposures(o.Exposures)
 
 	// The readiness evaluator (issue #61) reads the spawn path's own
 	// resolvers, the tracker registry's local validation and the AFK engine's

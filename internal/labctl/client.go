@@ -507,6 +507,12 @@ func (c *Client) SecretScan(diff io.Reader) ([]ScanFinding, error) {
 // server's {"error"} message (or "HTTP <status>" when the body is not the
 // envelope); out, when non-nil, receives the decoded 2xx body.
 func (c *Client) do(method, path string, reqBody, out any) error {
+	return c.doCtx(context.Background(), method, path, reqBody, out)
+}
+
+// doCtx is do bounded additionally by ctx (the client's own timeout still
+// applies) — for the callers that need a shorter bound than httpTimeout.
+func (c *Client) doCtx(ctx context.Context, method, path string, reqBody, out any) error {
 	base, err := c.requestBase()
 	if err != nil {
 		return err
@@ -519,7 +525,7 @@ func (c *Client) do(method, path string, reqBody, out any) error {
 		}
 		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
 		return err
 	}
@@ -574,15 +580,25 @@ func (c *Client) httpClient() *http.Client {
 		return c.HTTP
 	}
 	client := &http.Client{Timeout: httpTimeout, CheckRedirect: noRedirect}
-	if sock, ok := c.unixSocketPath(); ok {
-		client.Transport = &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", sock)
-			},
-		}
+	if dial := c.unixDialer(); dial != nil {
+		client.Transport = &http.Transport{DialContext: dial}
 	}
 	return client
+}
+
+// unixDialer returns the DialContext that connects to the unix:// socket
+// whatever host the request URL names, or nil for an http(s) BaseURL. Every
+// transport labctl builds — the default client and the tunnel's — goes
+// through it, so the unix scheme means the same thing everywhere.
+func (c *Client) unixDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	sock, ok := c.unixSocketPath()
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}
 }
 
 // decodeResponse turns one agent-API response into out or an error, shared by
@@ -667,4 +683,135 @@ func isHTML(resp *http.Response, data []byte) bool {
 	}
 	trimmed := bytes.TrimSpace(data)
 	return len(trimmed) > 0 && trimmed[0] == '<'
+}
+
+// The exposure tunnel (issue #105). `labctl expose` registers with an HTTP/1.1
+// Upgrade and keeps the switched connection as the preview's tunnel, so the
+// request must not carry httpTimeout — that would cut every tunnel at 60s.
+// Each phase is bounded on its own instead.
+const (
+	// tunnelDialTimeout bounds connecting to lab (TCP or the unix socket).
+	tunnelDialTimeout = 10 * time.Second
+	// tunnelHeaderTimeout bounds the wait for lab's answer to the upgrade.
+	tunnelHeaderTimeout = 30 * time.Second
+	// tunnelProtocol is the Upgrade token; tunnelURLHeader carries the
+	// preview's URL on the 101. Agreed with internal/agentapi on the wire.
+	tunnelProtocol  = "lab-tunnel"
+	tunnelURLHeader = "Lab-Preview-URL"
+)
+
+// apiStatusError is an agent-API answer that is a definite HTTP status (as
+// opposed to a transport failure). The message is exactly what the shared
+// error taxonomy produced; status lets `expose` tell a final answer (4xx — the
+// run is gone, the name is taken, previews are off) from a retryable one (5xx).
+type apiStatusError struct {
+	status int
+	err    error
+}
+
+func (e *apiStatusError) Error() string { return e.err.Error() }
+func (e *apiStatusError) Unwrap() error { return e.err }
+
+// tunnelClient is the client for the upgrade request: no overall Timeout,
+// bounded dial / TLS handshake / response-header phases, no redirects, the
+// unix:// dialer when LAB_URL names a socket and the environment's proxy
+// settings otherwise (the same route every other labctl request takes). A
+// fresh Transport with its own DialContext never negotiates HTTP/2, which
+// could not carry an HTTP/1.1 Upgrade.
+//
+// Every call builds a new Transport, so whatever connection it leaves in its
+// idle pool is reachable by nobody afterwards: ExposeOpen must close the
+// pool on every answer that is not the 101 (see there).
+func (c *Client) tunnelClient() *http.Client {
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: tunnelDialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   tunnelDialTimeout,
+		ResponseHeaderTimeout: tunnelHeaderTimeout,
+	}
+	if dial := c.unixDialer(); dial != nil {
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
+			defer cancel()
+			return dial(ctx, network, addr)
+		}
+	} else {
+		tr.Proxy = http.ProxyFromEnvironment
+	}
+	return &http.Client{Transport: tr, CheckRedirect: noRedirect}
+}
+
+// ExposeOpen registers the exposure name → the run's loopback port with lab
+// and switches the request into the tunnel: POST /agent/v1/exposures with
+// `Upgrade: lab-tunnel`. session is the calling `labctl expose` process's id,
+// the same on every attempt (see exposeLoop); "" omits it. On the 101 it
+// returns the preview's URL and the switched connection, which the caller
+// hands to preview.ServeTunnel (and which the caller owns). Any other answer
+// is an *apiStatusError carrying the server's message; a failure to reach lab
+// at all is a plain error.
+func (c *Client) ExposeOpen(ctx context.Context, name, session string, port int) (string, io.ReadWriteCloser, error) {
+	base, err := c.requestBase()
+	if err != nil {
+		return "", nil, err
+	}
+	body := map[string]any{"name": name, "port": port}
+	if session != "" {
+		body["session"] = session
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return "", nil, fmt.Errorf("encoding request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/agent/v1/exposures", bytes.NewReader(data))
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", tunnelProtocol)
+
+	client := c.tunnelClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		client.CloseIdleConnections()
+		return "", nil, err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		// A non-101 answer leaves its keep-alive connection in this one-shot
+		// Transport's idle pool once the body is closed, and nothing would
+		// ever reuse or close it: a reconnect loop retrying through 503s
+		// would pin one connection (and a lab-side goroutine) per attempt
+		// until the process exits. Close the body, then the pool.
+		_ = resp.Body.Close()
+		client.CloseIdleConnections()
+		err := c.errorFromResponse(resp, body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Something between labctl and lab answered the request itself
+			// instead of passing the Upgrade through.
+			err = fmt.Errorf("agent API answered HTTP %d instead of switching to %s; something between labctl and lab (LAB_URL %s) may be stripping the Upgrade",
+				resp.StatusCode, tunnelProtocol, strings.TrimRight(c.BaseURL, "/"))
+		}
+		return "", nil, &apiStatusError{status: resp.StatusCode, err: err}
+	}
+	rwc, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok || !strings.EqualFold(resp.Header.Get("Upgrade"), tunnelProtocol) {
+		_ = resp.Body.Close()
+		return "", nil, &apiStatusError{status: resp.StatusCode,
+			err: fmt.Errorf("agent API switched protocols to %q, not %s", resp.Header.Get("Upgrade"), tunnelProtocol)}
+	}
+	previewURL := resp.Header.Get(tunnelURLHeader)
+	if previewURL == "" {
+		_ = rwc.Close()
+		return "", nil, &apiStatusError{status: resp.StatusCode,
+			err: fmt.Errorf("agent API switched to %s without a %s header", tunnelProtocol, tunnelURLHeader)}
+	}
+	return previewURL, rwc, nil
+}
+
+// ExposeStop ends the run's exposure name and releases the name
+// (DELETE /agent/v1/exposures/{name}); ctx bounds it below httpTimeout for the
+// signal path's best-effort stop.
+func (c *Client) ExposeStop(ctx context.Context, name string) error {
+	return c.doCtx(ctx, http.MethodDelete, "/agent/v1/exposures/"+url.PathEscape(name), nil, nil)
 }

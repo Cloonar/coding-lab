@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/gitx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
 )
@@ -144,6 +145,11 @@ func (s *Service) teardownManualRun(ctx context.Context, run store.Run, repo sto
 	if err := s.store.DeleteRunTokens(ctx, run.ID); err != nil {
 		s.log.Warn("deleting run tokens", "component", "instance", "run", run.ID, "err", err)
 	}
+	// The run-end chokepoint's preview half (issue #105): the run's tokens
+	// now 401, so its labctl could not re-register anyway — release its
+	// names and tell its live tunnels "run-ended" so they exit instead of
+	// reconnecting into that 401.
+	preview.CloseRunExposures(s.exposures, run.ID)
 	// Wipe the run's private per-run tree (issues #202/#205): the provider
 	// credential copy, config, transcripts, AND the runtime dir — the run's
 	// materialized git credential files, known_hosts, settings file, and

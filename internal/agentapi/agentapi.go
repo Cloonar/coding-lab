@@ -40,6 +40,9 @@ type Server struct {
 	log      *slog.Logger
 	now      func() time.Time
 	scrub    []*regexp.Regexp
+	// previews is the preview registry behind the exposure routes; nil means
+	// lab runs without a preview listener (SetPreviews).
+	previews Previews
 }
 
 // New builds an agent API server. vlt decrypts repo-secret blobs at exec time
@@ -98,6 +101,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agent/v1/secrets", s.handleSecretList)
 	mux.HandleFunc("POST /agent/v1/secrets/values", s.handleSecretValues)
 	mux.HandleFunc("POST /agent/v1/secrets/scan", s.handleSecretScan)
+	// Previews (issue #105): register + tunnel upgrade, and stop.
+	mux.HandleFunc("POST /agent/v1/exposures", s.handleExposureCreate)
+	mux.HandleFunc("DELETE /agent/v1/exposures/{name}", s.handleExposureDelete)
 	mux.HandleFunc("/agent/v1/", func(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "not found")
 	})

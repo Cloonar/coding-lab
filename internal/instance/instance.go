@@ -34,6 +34,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/seeder"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
@@ -294,6 +295,21 @@ type Options struct {
 	// passes *warpgate.HostKeyPin built on the same address.
 	WarpgateHostKeys BastionHostKeys
 
+	// --- Previews wiring (issue #105). Both optional and both nil on a lab
+	// with no --preview-addr, which leaves every spawn and every Stop exactly
+	// as before the feature.
+
+	// Preview is the preview listener's URL shape for the seeded worktree
+	// notes: non-nil makes every spawned run's context file carry the
+	// "## Previews" section teaching `labctl expose`, nil omits it — so the
+	// agent is only ever told about a listener that exists.
+	Preview *seeder.PreviewRef
+	// Exposures is the preview registry's run-end half: the manual Stop
+	// releases the run's preview names and tunnels through it, right after
+	// deleting the run's tokens (via preview.CloseRunExposures, which is
+	// nil-safe — nil means no preview listener).
+	Exposures preview.RunCloser
+
 	// GitEnv is prepended to every git subprocess (before the per-credential
 	// env). Production leaves it nil; tests pass testutil.HermeticGitEnv so
 	// service-driven worktree ops never read the developer's git config.
@@ -359,6 +375,12 @@ type Service struct {
 	warpgate         BastionAPI
 	warpgateSSHAddr  string
 	warpgateHostKeys BastionHostKeys
+
+	// Previews wiring (issue #105; see the Options fields). previewRef nil = no
+	// Previews section in the seeded notes; exposures nil = Stop has no
+	// preview names to release (preview.CloseRunExposures no-ops).
+	previewRef *seeder.PreviewRef
+	exposures  preview.RunCloser
 
 	// hostPATH returns the base PATH a wired HOST run's wrapper dir is
 	// prepended to. New sets it to read os.Getenv("PATH") AT SPAWN, not once
@@ -480,6 +502,8 @@ func New(o Options) (*Service, error) {
 		warpgate:         bastion,
 		warpgateSSHAddr:  o.WarpgateSSHAddr,
 		warpgateHostKeys: hostKeys,
+		previewRef:       o.Preview,
+		exposures:        o.Exposures,
 		hostPATH:         func() string { return os.Getenv("PATH") },
 		userSSHConfig:    serviceUserSSHConfig,
 	}, nil

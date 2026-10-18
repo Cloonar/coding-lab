@@ -116,7 +116,7 @@ func (s *Server) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]instanceResponse, 0, len(views))
 	for _, v := range views {
-		run := runJSON(v.Run)
+		run := s.runView(v.Run)
 		run.CommitsBehind = s.commitsBehind(r.Context(), v.Run, defaultBranch[v.Run.RepoID])
 		items = append(items, instanceResponse{
 			runResponse: run,

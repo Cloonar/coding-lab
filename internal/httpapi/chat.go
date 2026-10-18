@@ -63,7 +63,7 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 		s.writeRunError(w, "getting run", err)
 		return
 	}
-	resp := runJSON(run)
+	resp := s.runView(run)
 	resp.ExposedSecrets = exposed
 	if repo, err := s.store.RepoByID(r.Context(), run.RepoID); err == nil {
 		resp.CommitsBehind = s.commitsBehind(r.Context(), run, repo.DefaultBranch)

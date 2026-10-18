@@ -27,6 +27,8 @@
 package seeder
 
 import (
+	"strconv"
+
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
@@ -82,6 +84,30 @@ type BastionRef struct {
 	Targets []string // SSH target aliases (Warpgate target names), caller-ordered
 }
 
+// PreviewRef describes the run's preview wiring for the context file (issue
+// #105): the lab has a preview listener, so `labctl expose <name> <port>` makes
+// a run's loopback port reachable by the operator at a hostname under Domain.
+// It carries just enough to render the real URL shape, and nothing about the
+// listener's bind address or the run's tunnels.
+type PreviewRef struct {
+	// Domain is the preview domain (e.g. "lab.internal"): exposures are served
+	// at http://<name>.<Domain>. Never empty for a non-nil ref.
+	Domain string
+	// Port is the preview listener's public port. 0 and 80 mean "default HTTP
+	// port": the URL carries no ":port" suffix.
+	Port int
+}
+
+// URL returns the URL an exposure called name is served at:
+// "http://<name>.<Domain>", with ":<Port>" appended unless Port is 0 or 80.
+func (p *PreviewRef) URL(name string) string {
+	u := "http://" + name + "." + p.Domain
+	if p.Port != 0 && p.Port != 80 {
+		u += ":" + strconv.Itoa(p.Port)
+	}
+	return u
+}
+
 // Opts parametrizes SeedWorkspace — the growth point for later per-spawn
 // seeding knobs (mirrors provider.SeedOpts).
 type Opts struct {
@@ -127,6 +153,14 @@ type Opts struct {
 	// byte-identical to today" is made structural at this boundary. Alias
 	// NAMES only, like Gateway's service names.
 	Bastion *BastionRef
+
+	// Preview is the lab's preview-listener wiring (issue #105), or nil when
+	// the listener is not configured (--preview-addr unset: the feature is
+	// opt-in and off by default). Non-nil makes renderContextFile append a
+	// "Previews" section teaching `labctl expose`, with the real URL shape;
+	// nil leaves the render exactly as it was, which is how "no listener, no
+	// section" is made structural at this boundary.
+	Preview *PreviewRef
 }
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
@@ -149,5 +183,5 @@ func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.S
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Bastion, opts.Imports)
+	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Bastion, opts.Imports, opts.Preview)
 }

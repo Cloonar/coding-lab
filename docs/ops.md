@@ -9,6 +9,7 @@ What's here, in the order you'll need it:
 - [Seeding the initial operator user](#seeding-the-initial-operator-user) · [Forge credentials](#forge-credentials)
 - [OneCLI credential gateway](#onecli-credential-gateway) — repo secrets for agent runs
 - [Warpgate SSH bastion](#warpgate-ssh-bastion) — SSH targets for agent runs
+- [Previews](#previews) — open what an agent is serving in your browser
 - [State directory layout](#state-directory-layout) · [Backup & restore](#backup-restore)
 - [CI runner prerequisites](#ci-runner-prerequisites) · [Agent-tools images](#agent-tools-images) · [Container runner](#container-runner)
 - [Observability](#observability) · [Metrics](#metrics) · [Push notifications](#push-notifications) · [Incogni mode](#incogni-mode)
@@ -43,6 +44,8 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `warpgate.adminTokenFile` | `null` | Passed as `--warpgate-admin-token-file`. File holding Warpgate's admin token — 0600 or stricter (startup refuses otherwise); never auto-generated, the token is minted when you deploy Warpgate. |
 | `warpgate.sshAddr` | `null` | Passed as `--warpgate-ssh-addr`. `host:port` runs dial for Warpgate's SSH listener — usually a container-reachable address such as `"10.88.0.1:2222"`, not loopback. Independent of the other `warpgate.*` options. |
 | `warpgate.caFile` | `null` | Passed as `--warpgate-ca-file`. PEM file lab trusts — exclusively — for the admin API: Warpgate's generated self-signed certificate. `null` uses the system roots. |
+| `preview.listenAddr` | `null` | Passed as `--preview-addr`. Listen address of the [preview listener](#previews), e.g. `":8081"`. `null` keeps previews off: nothing listens and `labctl expose` refuses. Plain HTTP with no authentication — bind it to an interface you trust. |
+| `preview.domain` | `"lab.internal"` | Passed as `--preview-domain`, only together with `preview.listenAddr`. Parent domain previews are served under (`http://<name>.<domain>`); you provide the wildcard DNS record. |
 | `db` | `null` | Passed as `--db` (`sqlite:<path>` or `postgres://…`). `null` keeps the sqlite default **and** lets `LAB_DB` from `environmentFile` take effect (flag > env > default). |
 | `environmentFile` | `null` | systemd `EnvironmentFile=` for secret env vars (e.g. `LAB_DB` with a password-bearing DSN). `LoadCredential`-friendly. |
 | `masterKeyFile` | `"${stateDir}/master.key"` | Passed as `--master-key-file`. Auto-generated 0600 when absent; loose permissions or malformed content refuse startup. |
@@ -55,7 +58,7 @@ Import `nixosModules.lab` from this repo's flake. Options (authoritative default
 | `proxyAuth.enable` | `false` | Trust a reverse-proxy auth header as the authenticated username — only from `trustedProxies` peers (asserted non-empty). |
 | `proxyAuth.header` | `"Remote-User"` | Passed as `--proxy-auth-header`. |
 | `proxyAuth.trustedProxies` | `[ ]` | CIDRs, passed as `--trusted-proxies` whenever non-empty — also without `proxyAuth.enable` (gates `X-Forwarded-Proto` trust for Secure cookies behind TLS proxies). |
-| `openFirewall` | `false` | Open the firewall for `listenAddr`'s port. |
+| `openFirewall` | `false` | Open the firewall for `listenAddr`'s port and, when previews are on, `preview.listenAddr`'s port. |
 | `extraFlags` | `[ ]` | Extra flags appended to `ExecStart`; rendered after the container flags, so a hand-rolled container flag here wins during a migration. |
 | `container.enable` | `true` | Master switch for container-runner host provisioning ([Container runner](#container-runner)): rootless podman + passt on the unit PATH, lingering for the service user, subuid/subgid ranges. **On by default** (ADR-0054) — enabling lab makes the host container-ready. Set `false` for a host-only deployment (the unit reverts to the byte-identical pre-container output). Forcing `virtualisation.podman.enable = false` while this is on conflicts at eval. |
 | `container.toolsImageRepo` | `"ghcr.io/cloonar/agent-tools"` | OCI repository the default `toolsImages` refs point into; pulled **anonymously** (the package must stay publicly readable — [Agent-tools images](#agent-tools-images)). |
@@ -214,6 +217,8 @@ Precedence: **flag > env > default**. Env overrides exist only where listed.
 | `--warpgate-admin-token-file` | `LAB_WARPGATE_ADMIN_TOKEN_FILE` | (empty) | File with Warpgate's admin token, 0600 or stricter, one line. Never auto-generated; read at startup. |
 | `--warpgate-ssh-addr` | `LAB_WARPGATE_SSH_ADDR` | (empty) | `host:port` runs dial for Warpgate's SSH listener, e.g. `10.88.0.1:2222` — a container-reachable address, independent of `--warpgate-url`. |
 | `--warpgate-ca-file` | `LAB_WARPGATE_CA_FILE` | (empty) | PEM file lab trusts — and only it — for the admin API, e.g. Warpgate's generated `tls.certificate.pem`. Unset = the system roots. |
+| `--preview-addr` | `LAB_PREVIEW_ADDR` | (empty) | Listen address of the [preview listener](#previews), `host:port` with a port in 1–65535, e.g. `:8081`. Unset = previews off: nothing listens and `labctl expose` refuses. Plain HTTP, no authentication. |
+| `--preview-domain` | `LAB_PREVIEW_DOMAIN` | `lab.internal` | Parent domain previews are served under, `<name>.<domain>`. Lowercase dot-separated DNS labels, no trailing dot; checked at boot even while previews are off. Needs a wildcard DNS record you provide. |
 
 Per-provider host settings resolve per provider entry, highest wins: **generic flag > generic env > alias flag > alias env** (ADR-0034).
 
@@ -910,6 +915,106 @@ Reading the failures:
 - **Don't require MFA.** Warpgate's **Config → Global parameters → MFA enforcement** set to **Require** demands a second factor on every SSH login, which a run's key login can't give: target-bearing runs start and then fail to authenticate inside the session, where lab can't catch it. **Off** and **Enroll** are fine.
 - **The static admin token is full admin over Warpgate and never expires.** Whoever reads it can create a user, give it every target, and log in through the bastion. Keep both copies — `warpgate.env` and lab's token file — at 0600. To rotate, write a new token to both, `docker compose up -d --force-recreate`, and restart lab.
 - The admin UI stays on loopback: the SSH tunnel is the way in until issue #47 adds exposure through lab's auth.
+
+## Previews
+
+A preview lets you open what an agent is serving — a Vite or Next dev server, a built docs site, a Storybook — in your own browser. The agent runs `labctl expose web 5173 &` in its run. labctl opens a tunnel from the run to lab over the agent API, and lab serves that port at `http://web.lab.internal:8081` on a separate **preview listener**. This works the same for `host` and `container` runs: the run connects out to lab the way labctl always does, so no port is published and nothing about the run's network changes. Each preview has its own hostname, so two previews never share cookies or storage with each other or with lab.
+
+Previews are off until you turn them on. The listener is **plain HTTP with no authentication**: anyone who can reach it can open every live preview ([ADR-0084](adr/0084-previews-reverse-tunnel.md)).
+
+### Turning previews on
+
+1. **Pick a listen address** and pass it to lab:
+
+    ```sh
+    lab ... --preview-addr :8081                      # or LAB_PREVIEW_ADDR=:8081
+    lab ... --preview-addr 10.0.0.15:8081             # bind one trusted interface only
+    lab ... --preview-domain previews.example.internal  # optional; default lab.internal
+    ```
+
+    On NixOS:
+
+    ```nix
+    services.lab.preview = {
+      listenAddr = "10.0.0.15:8081";   # null (the default) = previews off
+      # domain = "lab.internal";       # the default
+    };
+    services.lab.openFirewall = true;  # also opens the preview port
+    ```
+
+    Bind the listener to an interface only trusted devices reach: a LAN or VPN address, not a public one. `--preview-addr` must be `host:port` with a port in 1–65535; `--preview-domain` must be lowercase dot-separated DNS labels with no trailing dot. Lab checks the domain at startup even while previews are off, so a typo fails the boot rather than the day you enable them.
+
+2. **Add a wildcard DNS record** for every name under the preview domain, pointing at the lab host. Lab cannot do this for you, and without it the URLs an agent prints resolve nowhere. With dnsmasq it is one line, the same shape as a `*.ddev.site` wildcard for ddev projects:
+
+    ```ini
+    # dnsmasq.conf — lab.internal and every name under it → the lab host
+    address=/lab.internal/10.0.0.15
+    ```
+
+    ```nix
+    # NixOS, on the host that runs dnsmasq
+    services.dnsmasq.settings.address = [ "/lab.internal/10.0.0.15" ];
+    ```
+
+    A client that reaches that DNS server only over a VPN with split DNS (systemd-resolved, NetworkManager) also needs `~lab.internal` as a routing domain on the VPN link, the way `~ddev.site` is routed. Don't use `.local` as the preview domain: Apple devices resolve `.local` by mDNS first, and systemd-resolved never sends it to unicast DNS, so the wildcard would not be consulted. The default `lab.internal` sits under `.internal`, the TLD reserved for private use.
+
+3. **Restart lab.** New runs get a `## Previews` section in their worktree notes (`CLAUDE.local.md`) telling the agent how to expose a port. A run already live when you enabled previews can still use `labctl expose`; its notes just don't mention it.
+
+The printed URL is `http://<name>.<domain>`, with the listener's port appended unless it is 80.
+
+### What the agent does
+
+```sh
+labctl expose web 5173 &      # prints http://web.lab.internal:8081 as its first line, then keeps forwarding
+labctl expose stop web        # ends the exposure and frees the name
+```
+
+- `<name>` is a single DNS label: 1–63 characters of lowercase `a-z`, `0-9` and `-`, not starting or ending with `-`. The agent picks it; a readable name is one it can announce in the chat or a PR.
+- `<port>` is the port the dev server listens on **inside the run**. Traffic always goes to the run's own loopback: `127.0.0.1:<port>`, or `[::1]:<port>` when nothing listens on the IPv4 address. That is inside the container for a container run, the host loopback for a host run. labctl takes no host, so a preview can never reach any other service. The dev server can keep its default `localhost` binding, whichever of the two addresses `localhost` resolves to.
+- `labctl expose` runs in the foreground until it is stopped, so the agent starts it in the background with `&`. Killing it (SIGINT or SIGTERM) also frees the name.
+- A run holds at most **8** exposures at once.
+- Vite: if the URL's port is not 5173, HMR may need `server.hmr.clientPort` set to that port. Recent Vite versions also refuse unknown hosts until `server.allowedHosts` includes `.lab.internal` (or your preview domain).
+
+When `labctl expose` cannot start, it exits 1 with one line naming the reason:
+
+| Message | Cause |
+| --- | --- |
+| `previews are not enabled on this lab (no preview listener configured)` | `--preview-addr` is unset. |
+| `invalid name "X": must be a single DNS label (a-z, 0-9, '-', at most 63 characters)` | Uppercase, a dot, an underscore, too long, or a leading/trailing `-`. |
+| `invalid port N: must be 1–65535` | Port out of range. |
+| `name "X" is already exposed by another run` | Another run holds the name. The message says nothing about which run; pick another name. |
+| `exposure limit reached (8 per run)` | The run already holds 8 exposures; stop one first. |
+| `no exposure named "X" in this run` | From `labctl expose stop`, for a name this run does not hold. |
+
+The same run exposing the same name again (a second `labctl expose web …`) takes the name over, with the new port. The older `labctl expose` process exits.
+
+### What you see
+
+- **Preview chip in the chat header.** While the run has at least one exposure, the chat header shows a **Preview** chip (a globe icon on a phone). Tap it to open the preview in a new tab; with several exposures it opens a menu listing each one. An exposure whose tunnel is reconnecting is marked *reconnecting*.
+- **Previews row in Run details.** Run details (tap the context meter) lists every exposure with its URL and whether it is *live* or *reconnecting*.
+
+Both update live, without a reload, as exposures appear, reconnect or go away.
+
+When the preview listener cannot serve a request, it answers with a short page that names the problem:
+
+| Status | Page | Meaning |
+| --- | --- | --- |
+| `404` | *No such preview* | No run holds this name, or the host is not `<name>.<domain>` at all (the bare domain, another host). |
+| `503` | *Preview reconnecting* | A run holds the name, but its tunnel is down and labctl is reconnecting. Reload in a moment. |
+| `502` | *Nothing listening* | The tunnel is up, but nothing is listening on the port inside the run: the dev server is not running, crashed, or listens on another port. |
+| `502` | *Preview unreachable* | The tunnel failed while forwarding this request. |
+
+### Lifecycle
+
+- **A name is held for the run.** It stays with the run that registered it until the agent stops it (`labctl expose stop`, or killing the `labctl expose` process) or the run ends. Stopping the run in the UI, the AFK reaper, AFK Stop and parked-run cleanup all close the run's exposures and free its names.
+- **A dropped connection** keeps the name held; the preview answers 503 while labctl reconnects on its own, retrying with backoff.
+- **A lab restart** drops every tunnel, but the runs survive it. Lab keeps no record of exposures across a restart, so each preview answers 404 until its labctl reconnects and re-registers, and then works again with no agent action. labctl gives up, exiting 1, only when lab answers that the run or the name is gone.
+
+### Security and TLS
+
+- **There is no authentication on the preview listener.** Reachable means allowed: anyone who can reach `--preview-addr` and resolve the names can open every live preview, with no login. A preview is whatever the agent happens to be running. Bind the listener to a trusted interface, and serve the wildcard DNS name only on the network that should see previews. A host run shares the host's network, so it can reach the preview listener too, including other runs' previews.
+- **Plain HTTP only.** Lab terminates no TLS on the preview listener; HTTPS previews are a planned follow-up. Until then, browser features that require a secure context (service workers, `crypto.subtle`, clipboard writes) don't work on a preview page.
+- Upstream, the dev server sees the browser's own `Host` header plus `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto: http`.
 
 ## State directory layout
 

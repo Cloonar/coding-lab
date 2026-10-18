@@ -475,3 +475,32 @@ func TestReadinessFanout(t *testing.T) {
 		t.Fatalf("a flipped image verdict announced %v, want every container repo %v", got, want)
 	}
 }
+
+// TestPreviewRunChanged pins the preview registry's onChange wiring (issue
+// #105): a registry transition publishes run.changed with the exact
+// {type, repoID, runID} payload every other run.changed publisher sends, so
+// the SPA's SSE refetch and the open chat's run filter treat it like any
+// other run mutation.
+func TestPreviewRunChanged(t *testing.T) {
+	bus := events.NewBus()
+	ch, unsubscribe := bus.Subscribe(t.Context())
+	defer unsubscribe()
+
+	previewRunChanged(bus)("repo_1", "run_1")
+
+	select {
+	case ev := <-ch:
+		if ev.Type != "run.changed" {
+			t.Errorf("event type = %q, want run.changed", ev.Type)
+		}
+		got, err := json.Marshal(ev.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `{"type":"run.changed","repoID":"repo_1","runID":"run_1"}`; string(got) != want {
+			t.Errorf("payload = %s, want %s", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event published")
+	}
+}

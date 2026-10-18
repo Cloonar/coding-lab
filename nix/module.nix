@@ -81,6 +81,14 @@ let
   # "[::]:8080" all work — the port is the piece after the last colon).
   listenPort = lib.toInt (lib.last (lib.splitString ":" cfg.listenAddr));
 
+  # Same derivation for the preview listener's port (null = previews off, no
+  # port to open).
+  previewPort =
+    if cfg.preview.listenAddr == null then
+      null
+    else
+      lib.toInt (lib.last (lib.splitString ":" cfg.preview.listenAddr));
+
   args = [
     "--addr"
     cfg.listenAddr
@@ -141,6 +149,15 @@ let
   ++ lib.optionals (cfg.onecli.dashboardUrl != null) [
     "--onecli-dashboard-url"
     cfg.onecli.dashboardUrl
+  ]
+  # Previews (issue #105): off — and no flag at all — while listenAddr is
+  # null. The domain only means something alongside a listener, so it is
+  # emitted with it and never on its own.
+  ++ lib.optionals (cfg.preview.listenAddr != null) [
+    "--preview-addr"
+    cfg.preview.listenAddr
+    "--preview-domain"
+    cfg.preview.domain
   ]
   ++ lib.optionals (cfg.warpgate.url != null) [
     "--warpgate-url"
@@ -614,6 +631,42 @@ in
       };
     };
 
+    preview = {
+      listenAddr = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = ":8081";
+        description = ''
+          Listen address of lab's preview listener (--preview-addr), the
+          opt-in HTTP listener that serves ports an agent exposes with
+          `labctl expose <name> <port>` at `http://<name>.<domain>`, routed by
+          the `Host` header. `null` (the default) keeps previews off: nothing
+          listens and `labctl expose` refuses. Distinct from
+          {option}`services.lab.listenAddr` (lab's main listener). The
+          listener is plain HTTP and has no authentication of its own —
+          reachable means allowed — so bind it to an interface you trust.
+          You must also provide a wildcard DNS record covering every
+          subdomain of {option}`domain` and pointing at this host. With
+          {option}`services.lab.openFirewall` the port in this address is
+          opened too.
+        '';
+      };
+
+      domain = lib.mkOption {
+        type = lib.types.str;
+        default = "lab.internal";
+        example = "previews.example.com";
+        description = ''
+          Parent domain previews are served under (--preview-domain): each
+          exposure `<name>` is reachable at `http://<name>.<domain>`. A
+          hostname — lowercase dot-separated DNS labels, no trailing dot; lab
+          refuses to start otherwise. The default sits under ICANN's reserved
+          private-use TLD. Only passed to lab together with
+          {option}`listenAddr`; meaningless while previews are off.
+        '';
+      };
+    };
+
     warpgate = {
       url = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -927,7 +980,10 @@ in
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Open the firewall for the port in {option}`listenAddr`.";
+      description = ''
+        Open the firewall for the port in {option}`listenAddr` and, when
+        previews are on, the port in {option}`preview.listenAddr`.
+      '';
     };
 
     extraFlags = lib.mkOption {
@@ -1050,7 +1106,9 @@ in
     # Operators debug sessions with `tmux attach` (v0 parity).
     environment.systemPackages = [ pkgs.tmux ];
 
-    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ listenPort ];
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
+      [ listenPort ] ++ lib.optional (previewPort != null) previewPort
+    );
 
     systemd.services.lab = {
       description = "lab — phone-first control panel for Claude Code agent sessions";

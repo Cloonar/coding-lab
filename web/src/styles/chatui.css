@@ -23,6 +23,77 @@
 .chat-exposed-chip {
   display: none;
 }
+/* The Preview chip (issue #105): the globe icon below 640px, a "Preview" pill
+   at >=640px (gate in the >=640px block at the end). A link, or the trigger of
+   a small menu when the run exposes several ports; a not-live exposure (labctl
+   reconnecting) is muted but stays openable. */
+.chat-preview-anchor {
+  position: relative; /* the menu anchors under the chip, right-aligned */
+  flex: none;
+  display: flex;
+}
+.chat-preview {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.chat-preview:hover {
+  background: none;
+  text-decoration: none;
+}
+.chat-preview.not-live {
+  color: var(--muted);
+}
+.chat-preview-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chat-preview-label {
+  display: none;
+}
+.chat-preview:hover .chat-preview-pill,
+.chat-preview[aria-expanded='true'] .chat-preview-pill {
+  text-decoration: underline;
+}
+.chat-preview-menu {
+  min-width: 14rem;
+  max-width: min(22rem, calc(100vw - 1rem));
+}
+.chat-preview-item {
+  text-decoration: none;
+}
+.chat-preview-item.not-live {
+  color: var(--muted);
+}
+.chat-preview-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.chat-preview-item-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--muted);
+}
+.chat-preview-item-state {
+  flex: none;
+  color: var(--muted);
+}
 /* The inline open affordance + two-step Stop are the >=640px view; below it
    they live in the ••• sheet. */
 .chat-desktop-actions {
@@ -378,6 +449,21 @@
   }
   .chat-exposed-chip {
     display: inline-block;
+  }
+  .chat-preview {
+    padding: 0 4px;
+  }
+  .chat-preview-pill {
+    height: 26px;
+    padding: 0 0.7rem;
+    border-radius: var(--radius-pill);
+    background: var(--chip-bg);
+  }
+  .chat-preview-icon {
+    display: none;
+  }
+  .chat-preview-label {
+    display: inline;
   }
   .chat-desktop-actions {
     display: contents; /* transparent wrapper → identical flex layout to before */

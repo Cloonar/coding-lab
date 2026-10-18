@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pressly/goose/v3 v3.27.2
 	github.com/prometheus/client_golang v1.23.2

@@ -517,7 +517,11 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	if bw.active() {
 		bastionRef = &seeder.BastionRef{Targets: bw.aliases}
 	}
-	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef, Bastion: bastionRef}); err != nil {
+	// The preview ref (issue #105) is lab-wide, not per run: every run on a
+	// lab with a preview listener can `labctl expose`, so every run's notes
+	// say so, and s.previewRef is NIL on a lab without one — the same
+	// nil-is-parity contract as the two refs above.
+	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef, Bastion: bastionRef, Preview: s.previewRef}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}

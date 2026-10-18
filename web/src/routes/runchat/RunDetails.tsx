@@ -11,10 +11,12 @@
 // - RunDetails: what the meter (or the `•••` menu's "Run details" entry)
 //   opens — model and effort, context as `N of M tokens` with a bar, the run's
 //   branch, and the base branch with its commits-behind count and a Pull base
-//   action shown only while a live run is behind. ChatHeader picks the
-//   container: a bottom sheet below 1024px, an anchored popover at and above.
+//   action shown only while a live run is behind, and a Previews row (issue
+//   #105) listing each exposure's URL and live state when there are any.
+//   ChatHeader picks the container: a bottom sheet below 1024px, an anchored
+//   popover at and above.
 
-import { Show, createUniqueId, type JSX } from 'solid-js';
+import { For, Show, createUniqueId, type JSX } from 'solid-js';
 import type { ContextUsage, Provider, Repo, Run } from '../../api';
 import Icon from '../../components/Icon';
 
@@ -121,6 +123,8 @@ export function RunDetails(props: {
   // omits the count when there is nothing to report — up to date, ended, or
   // not computable — so absence reads as "up to date" only while live.
   const behind = () => props.run.commits_behind ?? 0;
+  // The run's Previews (issue #105); absent from an older server = none.
+  const exposures = () => props.run.exposures ?? [];
 
   const card = (): JSX.Element => (
     // The card stops touchstart like ToolPanel's sheet: window-level touch
@@ -223,6 +227,37 @@ export function RunDetails(props: {
             </Show>
           </dd>
         </div>
+        {/* Previews (issue #105): every exposure — name, URL (new tab) and live
+            state. The row is absent while there are none, like the model row. */}
+        <Show when={exposures().length > 0}>
+          <div class="chat-details-fact chat-details-previews">
+            <dt>Previews</dt>
+            <dd>
+              <ul class="chat-details-preview-list">
+                <For each={exposures()}>
+                  {(e) => (
+                    <li class="chat-details-preview">
+                      <span class="chat-details-preview-name">{e.name}</span>
+                      <a
+                        class="mono chat-details-preview-url"
+                        href={e.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {e.url}
+                      </a>
+                      <small
+                        classList={{ 'chat-details-preview-state': true, 'not-live': !e.live }}
+                      >
+                        {e.live ? 'live' : 'reconnecting'}
+                      </small>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </dd>
+          </div>
+        </Show>
       </dl>
       <Show when={props.meter}>
         <p class="chat-details-note">The ring turns amber at 80% and red at 95%.</p>

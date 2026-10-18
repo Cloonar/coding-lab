@@ -16,11 +16,14 @@
 //   one-tap turn Interrupt (POST /interrupt, no confirm, a `pause` glyph
 //   distinct from the two-step danger `square` Stop); below 640px it also
 //   carries the open affordance and the two-step Stop;
+// - the Preview chip (issue #105) shows only while the run has exposures: a
+//   new-tab link for one, a menu of new-tab links for several, muted when not
+//   live, and it follows run.changed refetches; Run details gets a Previews row;
 // - the Back button (issue #76) pops the in-app history when lib/navHistory
 //   says an in-app entry exists, else replaces the chat with Runs (`/`).
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationState } from '../../api';
+import type { ConversationState, RunExposure } from '../../api';
 import {
   DESKTOP_QUERY,
   baseRepo,
@@ -35,6 +38,8 @@ import {
   stubMatchMedia,
   buttonByLabel,
   chatHistory,
+  FakeEventSource,
+  RUN_ID,
 } from './harness';
 
 // navHistory reads the real window.history's router stamps, which a
@@ -806,6 +811,196 @@ describe('ChatHeader', () => {
     await settle();
     expect(details()).toBeNull();
     expect(container.querySelector('.chat-sheet-scrim')).toBeNull();
+  });
+
+  // Previews (issue #105).
+  const web = (over: Partial<RunExposure> = {}): RunExposure => ({
+    name: 'web',
+    url: 'http://web.lab.internal:8081',
+    port: 5173,
+    live: true,
+    ...over,
+  });
+  const api = (over: Partial<RunExposure> = {}): RunExposure => ({
+    name: 'api',
+    url: 'http://api.lab.internal:8081',
+    port: 3000,
+    live: true,
+    ...over,
+  });
+  const previewChip = () => header().querySelector<HTMLElement>('.chat-preview');
+  const previewItems = () =>
+    Array.from(header().querySelectorAll<HTMLAnchorElement>('[role="menuitem"].chat-preview-item'));
+
+  it('shows no Preview chip for a run without exposures (absent or empty)', async () => {
+    await mountChat(); // baseRun() carries no exposures key at all
+    expect(previewChip()).toBeNull();
+    h.runOnServer = { ...baseRun(), exposures: [] };
+    FakeEventSource.instances[0]?.emit('run.changed', {
+      type: 'run.changed',
+      repoID: 'repo_1',
+      runID: RUN_ID,
+    });
+    await settle();
+    expect(previewChip()).toBeNull();
+  });
+
+  it('renders one exposure as a Preview link opening the URL in a new tab', async () => {
+    h.runOnServer = { ...baseRun(), exposures: [web()] };
+    await mountChat();
+
+    const chip = previewChip() as HTMLAnchorElement;
+    expect(chip.tagName).toBe('A');
+    expect(chip.getAttribute('href')).toBe('http://web.lab.internal:8081');
+    expect(chip.getAttribute('target')).toBe('_blank');
+    expect(chip.getAttribute('rel')).toBe('noopener noreferrer');
+    // Icon-only <640px (CSS-gated): the accessible name rides the link; the
+    // >=640px text chip is the label span.
+    expect(chip.getAttribute('aria-label')).toBe('Open preview: web');
+    expect(chip.querySelector('svg')).not.toBeNull();
+    expect(chip.querySelector('.chat-preview-label')?.textContent).toBe('Preview');
+    expect(chip.classList.contains('not-live')).toBe(false);
+  });
+
+  it('mutes a not-live single exposure but keeps it openable', async () => {
+    h.runOnServer = { ...baseRun(), exposures: [web({ live: false })] };
+    await mountChat();
+
+    const chip = previewChip() as HTMLAnchorElement;
+    expect(chip.classList.contains('not-live')).toBe(true);
+    expect(chip.getAttribute('href')).toBe('http://web.lab.internal:8081');
+    expect(chip.getAttribute('title')).toContain('reconnecting');
+    expect(chip.getAttribute('aria-label')).toContain('reconnecting');
+  });
+
+  it('lists several exposures in a menu of new-tab links, closing on pick, Escape and outside press', async () => {
+    h.runOnServer = {
+      ...baseRun(),
+      exposures: [web(), api({ live: false })],
+    };
+    await mountChat();
+
+    const toggle = previewChip() as HTMLButtonElement;
+    expect(toggle.tagName).toBe('BUTTON');
+    expect(toggle.getAttribute('aria-haspopup')).toBe('menu');
+    expect(toggle.getAttribute('aria-label')).toBe('Previews (2)');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(previewItems()).toHaveLength(0);
+
+    toggle.click();
+    await settle();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const items = previewItems();
+    expect(items.map((a) => a.querySelector('.chat-preview-item-name')?.textContent)).toEqual([
+      'web',
+      'api',
+    ]);
+    expect(items.map((a) => a.getAttribute('href'))).toEqual([
+      'http://web.lab.internal:8081',
+      'http://api.lab.internal:8081',
+    ]);
+    expect(items[0]!.textContent).toContain('http://web.lab.internal:8081');
+    for (const a of items) {
+      expect(a.getAttribute('target')).toBe('_blank');
+      expect(a.getAttribute('rel')).toBe('noopener noreferrer');
+    }
+    expect(items[0]!.classList.contains('not-live')).toBe(false);
+    expect(items[1]!.classList.contains('not-live')).toBe(true);
+    expect(items[1]!.textContent).toContain('reconnecting');
+
+    // Escape closes (consumed), returning focus to the chip.
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    window.dispatchEvent(esc);
+    await settle();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(previewItems()).toHaveLength(0);
+
+    // An outside press closes it.
+    toggle.click();
+    await settle();
+    expect(previewItems()).toHaveLength(2);
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    await settle();
+    expect(previewItems()).toHaveLength(0);
+
+    // Picking an entry closes it (jsdom does not navigate a new-tab link).
+    toggle.click();
+    await settle();
+    previewItems()[1]!.click();
+    await settle();
+    expect(previewItems()).toHaveLength(0);
+  });
+
+  it('shows and hides the chip, and collapses link/menu forms, as run.changed refetches the run', async () => {
+    await mountChat();
+    expect(previewChip()).toBeNull();
+    const changed = async () => {
+      FakeEventSource.instances[0]?.emit('run.changed', {
+        type: 'run.changed',
+        repoID: 'repo_1',
+        runID: RUN_ID,
+      });
+      await settle();
+    };
+
+    // An exposure appears server-side: run.changed → refetch → chip, no reload.
+    h.runOnServer = { ...baseRun(), exposures: [web()] };
+    await changed();
+    expect(previewChip()?.tagName).toBe('A');
+
+    // It goes not-live, then a second one appears: the chip becomes a menu.
+    h.runOnServer = { ...baseRun(), exposures: [web({ live: false })] };
+    await changed();
+    expect(previewChip()?.classList.contains('not-live')).toBe(true);
+    h.runOnServer = { ...baseRun(), exposures: [web(), api()] };
+    await changed();
+    expect(previewChip()?.tagName).toBe('BUTTON');
+    expect(previewChip()?.classList.contains('not-live')).toBe(false);
+
+    // Back to one, then none: the chip disappears.
+    h.runOnServer = { ...baseRun(), exposures: [api()] };
+    await changed();
+    expect(previewChip()?.tagName).toBe('A');
+    expect(previewChip()?.getAttribute('href')).toBe('http://api.lab.internal:8081');
+    h.runOnServer = { ...baseRun(), exposures: [] };
+    await changed();
+    expect(previewChip()).toBeNull();
+  });
+
+  it('lists every exposure with its URL link and live state in Run details, and omits the row without any', async () => {
+    h.runOnServer = {
+      ...baseRun(),
+      exposures: [web(), api({ live: false })],
+    };
+    await mountChat();
+    moreButton()!.click();
+    await settle();
+    menuItem('Run details')!.click();
+    await settle();
+
+    expect(fact('Previews')).toBe(
+      'webhttp://web.lab.internal:8081liveapihttp://api.lab.internal:8081reconnecting',
+    );
+    const rows = Array.from(details()!.querySelectorAll('.chat-details-preview'));
+    expect(rows).toHaveLength(2);
+    const link = rows[1]!.querySelector('a') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('http://api.lab.internal:8081');
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(rows[0]!.querySelector('.chat-details-preview-state')?.textContent).toBe('live');
+    expect(rows[1]!.querySelector('.chat-details-preview-state')?.textContent).toBe('reconnecting');
+
+    // The open sheet follows the refetch: the last exposure disappearing
+    // removes the row.
+    h.runOnServer = { ...baseRun(), exposures: [] };
+    FakeEventSource.instances[0]?.emit('run.changed', {
+      type: 'run.changed',
+      repoID: 'repo_1',
+      runID: RUN_ID,
+    });
+    await settle();
+    expect(details()).not.toBeNull();
+    expect(fact('Previews')).toBeUndefined();
   });
 
   it('Back pops the in-app history to the page the chat was opened from', async () => {

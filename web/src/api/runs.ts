@@ -13,6 +13,19 @@ export type RunKind =
   | 'scheduled';
 export type RunOutcome = 'active' | 'success' | 'death' | 'timeout' | 'stopped' | 'escalated';
 
+/**
+ * One Preview (issue #105): a port the run is serving to the operator via
+ * `labctl expose`, reachable at `url` on lab's preview listener. `live` is
+ * false while the tunnel is down (labctl reconnecting) — the name is still
+ * held and the URL still opens, to a page saying so.
+ */
+export interface RunExposure {
+  name: string;
+  url: string;
+  port: number;
+  live: boolean;
+}
+
 /** One row of the runs table, as the API serializes it. */
 export interface Run {
   id: string;
@@ -59,6 +72,14 @@ export interface Run {
    * optional rather than nullable: absent everywhere but the chat header.
    */
   exposed_secrets?: string[];
+  /**
+   * The run's Previews (issue #105), from GET /runs and GET /runs/{id}; the
+   * server publishes `run.changed` whenever one appears, goes live/not-live or
+   * disappears. Always present (possibly empty) from a server that knows
+   * Previews, optional only so an older server's row still types: treat absent
+   * as empty — no chip, no details row.
+   */
+  exposures?: RunExposure[];
   /**
    * Commits on origin/<base> not yet in this run's branch (issue #149), from
    * GET /runs/{id} and GET /instances rows (which embed the run shape).

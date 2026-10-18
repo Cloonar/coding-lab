@@ -45,6 +45,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
+	"git.cloonar.com/Cloonar/coding-lab/internal/preview"
 	"git.cloonar.com/Cloonar/coding-lab/internal/startguard"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tmuxx"
@@ -161,6 +162,13 @@ type Options struct {
 	// readiness recorder; nil is a no-op.
 	OnClaimable func(repo store.Repo, count int)
 
+	// Exposures is the preview registry's run-end half (issue #105): the
+	// reaper and the neutral Stop release an ended run's preview names and
+	// tunnels through it, right after deleting the run's tokens. Called only
+	// via preview.CloseRunExposures, which is nil-safe — nil means this lab
+	// has no preview listener.
+	Exposures preview.RunCloser
+
 	// Now overrides the clock (tests); nil → time.Now.
 	Now func() time.Time
 }
@@ -194,6 +202,9 @@ type Service struct {
 	// onClaimable receives each computed claimable count (Options.OnClaimable);
 	// nil is a no-op — reportClaimable is the one caller.
 	onClaimable func(repo store.Repo, count int)
+	// exposures releases an ended run's previews (issue #105; see
+	// Options.Exposures). nil = no preview listener.
+	exposures preview.RunCloser
 
 	// mu single-flights the entire select→claim→spawn in launch — the ONE
 	// claim path (manual starts, spawn-pass launches, toggle-on kicks); v0's
@@ -303,6 +314,7 @@ func New(o Options) (*Service, error) {
 		notify:             o.Notify,
 		now:                now,
 		onClaimable:        o.OnClaimable,
+		exposures:          o.Exposures,
 		schedulePending:    map[string]time.Time{},
 		scheduleChecked:    map[string]time.Time{},
 		// Construction time bounds the startup missed-slot log alone: slots
