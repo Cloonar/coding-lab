@@ -9,7 +9,12 @@
 // - the comment form POSTs {body}; the state toggle PATCHes {state}; the
 //   label editor PUTs the replaced set built with the toggle algebra;
 // - it renders inside the repo home frame's Issues tab (issue #61) with an
-//   "Issues / #N" trail; the frame names the repo.
+//   "Issues / #N" trail; the frame names the repo;
+// - body and comments render markdown (issue #103) with task lists on, on both
+//   bindings; `#N` links per binding (builtin → in-app route, forge → forge
+//   issue page in a new tab, plain text when no forge URL derives); the body
+//   card's Copy markdown copies the raw body; both forms share the Write /
+//   Preview control; a comment opening with an `Agent Brief` heading is tagged.
 
 import { MemoryRouter, Route, createMemoryHistory } from '@solidjs/router';
 import { render } from 'solid-js/web';
@@ -168,6 +173,59 @@ function mustButton(text: string): HTMLButtonElement {
   const el = buttonByText(text);
   if (!el) throw new Error(`missing button ${text}`);
   return el;
+}
+
+function stubClipboard(): ReturnType<typeof vi.fn> {
+  const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  return writeText;
+}
+
+function tab(form: string, name: string): HTMLButtonElement {
+  const el = Array.from(
+    container.querySelectorAll<HTMLButtonElement>(`${form} [role="tablist"] [role="tab"]`),
+  ).find((b) => b.textContent?.trim() === name);
+  if (!el) throw new Error(`missing ${name} tab in ${form}`);
+  return el;
+}
+
+const RICH_BODY = [
+  '## Summary',
+  '',
+  'Some **bold** words.',
+  '',
+  '```ts',
+  'const x = 1;',
+  '```',
+  '',
+  '| a | b |',
+  '| - | - |',
+  '| 1 | 2 |',
+  '',
+  '- [x] done item',
+  '- [ ] open item',
+].join('\n');
+
+function expectRichBody(): void {
+  const body = container.querySelector('section.card > .issue-md');
+  if (!body) throw new Error('missing rendered body');
+  expect(body.querySelector('h2.md-h')?.textContent).toBe('Summary');
+  expect(body.querySelector('strong')?.textContent).toBe('bold');
+  expect(body.querySelector('.md-codeblock .md-codeblock-lang')?.textContent).toBe('ts');
+  expect(body.querySelector('.md-codeblock .copy-btn')).not.toBeNull();
+  expect(body.querySelector('.md-codeblock pre')?.textContent).toBe('const x = 1;');
+  expect(body.querySelector('.md-table-wrap table.md-table')).not.toBeNull();
+  const boxes = Array.from(
+    body.querySelectorAll<HTMLInputElement>('ul.md-task li.md-task-item input[type="checkbox"]'),
+  );
+  expect(boxes.map((b) => [b.checked, b.disabled])).toEqual([
+    [true, true],
+    [false, true],
+  ]);
+  expect(body.querySelector('li.md-task-item.done')?.textContent).toContain('done item');
+  // No raw markdown syntax leaks into the rendered body.
+  expect(body.textContent).not.toContain('##');
+  expect(body.textContent).not.toContain('**');
 }
 
 function setValue(selector: string, value: string): void {
@@ -445,5 +503,222 @@ describe('IssueDetail (forge repo)', () => {
 
     expect(container.textContent).toContain('managed on the forge');
     expect(container.querySelector('.forge-note a')).toBeNull();
+  });
+});
+
+describe('IssueDetail markdown (issue #103)', () => {
+  it('renders the body as markdown on a builtin repo', async () => {
+    issueOnServer = { ...baseIssue(), body: RICH_BODY };
+    await mountDetail();
+    expectRichBody();
+  });
+
+  it('renders the body as markdown on a forge repo', async () => {
+    binding = 'forge';
+    issueOnServer = { ...baseIssue(), body: RICH_BODY };
+    await mountDetail();
+    expectRichBody();
+  });
+
+  it('renders every comment as markdown', async () => {
+    issueOnServer = {
+      ...baseIssue(),
+      comments: [
+        { author: 'a', body: 'one **strong**', created_at: '2026-07-06T01:00:00.000Z' },
+        { author: 'b', body: '- [ ] todo\n- [x] done', created_at: '2026-07-06T02:00:00.000Z' },
+      ],
+    };
+    await mountDetail();
+
+    const bodies = container.querySelectorAll('.comment .issue-md.comment-body');
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.querySelector('p.md-p strong')?.textContent).toBe('strong');
+    const boxes = Array.from(bodies[1]?.querySelectorAll<HTMLInputElement>('input') ?? []);
+    expect(boxes.map((b) => b.checked)).toEqual([false, true]);
+    // Author and time stay as before.
+    expect(container.querySelector('.comment-meta')?.textContent).toMatch(/^a · /);
+  });
+
+  it('keeps the "No description." fallback for an empty body', async () => {
+    issueOnServer = { ...baseIssue(), body: '' };
+    await mountDetail();
+
+    const fallback = container.querySelector('p.muted.issue-body');
+    expect(fallback?.textContent).toBe('No description.');
+    expect(container.querySelector('section.card > .issue-md')).toBeNull();
+    // Nothing to copy from an empty body.
+    expect(buttonByText('Copy markdown')).toBeNull();
+  });
+
+  it('links #N in-app on a builtin repo; foo#N and code stay literal', async () => {
+    issueOnServer = { ...baseIssue(), body: 'see #5, not foo#5 or `#5`' };
+    await mountDetail();
+
+    const refs = container.querySelectorAll<HTMLAnchorElement>('section.card > .issue-md a.md-ref');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]?.getAttribute('href')).toBe(`/repos/${REPO_ID}/issues/5`);
+    expect(refs[0]?.getAttribute('target')).toBeNull();
+    expect(refs[0]?.textContent).toBe('#5');
+    const body = container.querySelector('section.card > .issue-md');
+    expect(body?.textContent).toBe('see #5, not foo#5 or #5');
+    expect(body?.querySelector('code.md-code')?.textContent).toBe('#5');
+  });
+
+  it('links #N to the forge issue in a new tab on a forge repo', async () => {
+    binding = 'forge';
+    issueOnServer = { ...baseIssue(), body: 'see #5' };
+    await mountDetail();
+
+    const ref = container.querySelector<HTMLAnchorElement>('section.card > .issue-md a.md-ref');
+    expect(ref?.getAttribute('href')).toBe('https://git.cloonar.com/Cloonar/coding-lab/issues/5');
+    expect(ref?.getAttribute('target')).toBe('_blank');
+    expect(ref?.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('leaves #N as plain text on a forge repo with an unparseable remote', async () => {
+    binding = 'forge';
+    remoteUrl = '/srv/git/coding-lab.git';
+    issueOnServer = { ...baseIssue(), body: 'see #5' };
+    await mountDetail();
+
+    const body = container.querySelector('section.card > .issue-md');
+    expect(body?.querySelector('a')).toBeNull();
+    expect(body?.textContent).toBe('see #5');
+  });
+
+  it('leaves #N as plain text on a forge repo with forge_kind none', async () => {
+    binding = 'forge';
+    forgeKind = 'none';
+    issueOnServer = { ...baseIssue(), body: 'see #5' };
+    await mountDetail();
+
+    const body = container.querySelector('section.card > .issue-md');
+    expect(body?.querySelector('a')).toBeNull();
+    expect(body?.textContent).toBe('see #5');
+  });
+
+  it('tags comments whose first block is an Agent Brief heading', async () => {
+    issueOnServer = {
+      ...baseIssue(),
+      comments: [
+        { author: 'a', body: '## Agent Brief\n\nDo it.', created_at: '2026-07-06T01:00:00.000Z' },
+        { author: 'b', body: '# agent brief', created_at: '2026-07-06T02:00:00.000Z' },
+        { author: 'c', body: 'intro\n\n## Agent Brief', created_at: '2026-07-06T03:00:00.000Z' },
+        { author: 'd', body: '## Agent Briefing', created_at: '2026-07-06T04:00:00.000Z' },
+        { author: 'e', body: 'plain', created_at: '2026-07-06T05:00:00.000Z' },
+      ],
+    };
+    await mountDetail();
+
+    const tagged = Array.from(container.querySelectorAll('.comment')).map(
+      (li) => li.querySelector('.comment-meta .brief-tag')?.textContent ?? null,
+    );
+    expect(tagged).toEqual(['Agent brief', 'Agent brief', null, null, null]);
+  });
+
+  it('Copy markdown copies the raw body verbatim', async () => {
+    const writeText = stubClipboard();
+    issueOnServer = { ...baseIssue(), body: RICH_BODY };
+    await mountDetail();
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '.card .body-foot button[aria-label="Copy markdown"]',
+    );
+    if (!btn) throw new Error('missing Copy markdown button');
+    expect(btn.textContent).toContain('Copy markdown');
+    btn.click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith(RICH_BODY);
+  });
+
+  it('editor: Write / Preview renders the draft and keeps it; Save PATCHes only the body', async () => {
+    await mountDetail();
+
+    mustButton('Edit').click();
+    await settle();
+
+    const write = tab('.issue-editor', 'Write');
+    const preview = tab('.issue-editor', 'Preview');
+    // Opens on Write.
+    expect(write.getAttribute('aria-selected')).toBe('true');
+    expect(preview.getAttribute('aria-selected')).toBe('false');
+    expect(container.querySelector('.issue-editor .preview-pane')?.hasAttribute('hidden')).toBe(
+      true,
+    );
+    // The textarea keeps an accessible name.
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea[name="issue-body"]');
+    const labelId = textarea?.getAttribute('aria-labelledby') ?? '';
+    expect(document.getElementById(labelId)?.textContent).toBe('Description');
+
+    setValue('textarea[name="issue-body"]', '## Draft\n\nsee #5');
+    await settle();
+    preview.click();
+    await settle();
+
+    const pane = container.querySelector('.issue-editor .preview-pane');
+    expect(pane?.hasAttribute('hidden')).toBe(false);
+    expect(preview.getAttribute('aria-selected')).toBe('true');
+    expect(pane?.querySelector('h2.md-h')?.textContent).toBe('Draft');
+    expect(pane?.querySelector('a.md-ref')?.getAttribute('href')).toBe(
+      `/repos/${REPO_ID}/issues/5`,
+    );
+
+    // An empty (whitespace) draft previews as "Nothing to preview".
+    tab('.issue-editor', 'Write').click();
+    setValue('textarea[name="issue-body"]', '   ');
+    tab('.issue-editor', 'Preview').click();
+    await settle();
+    expect(pane?.textContent).toBe('Nothing to preview');
+
+    // Back to Write: the draft is intact.
+    tab('.issue-editor', 'Write').click();
+    setValue('textarea[name="issue-body"]', 'Reworded steps');
+    tab('.issue-editor', 'Preview').click();
+    await settle();
+    tab('.issue-editor', 'Write').click();
+    await settle();
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[name="issue-body"]')?.value).toBe(
+      'Reworded steps',
+    );
+
+    mustButton('Save').click();
+    await settle();
+    expect(patches).toEqual([{ body: 'Reworded steps' }]);
+  });
+
+  it('comment form: Preview renders the draft; posting still sends {body} and returns to Write', async () => {
+    await mountDetail();
+
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea[name="comment"]');
+    const labelId = textarea?.getAttribute('aria-labelledby') ?? '';
+    expect(document.getElementById(labelId)?.textContent).toBe('Add a comment');
+
+    tab('.comment-form', 'Preview').click();
+    await settle();
+    expect(container.querySelector('.comment-form .preview-pane')?.textContent).toBe(
+      'Nothing to preview',
+    );
+
+    tab('.comment-form', 'Write').click();
+    setValue('textarea[name="comment"]', '  **ship** it  ');
+    tab('.comment-form', 'Preview').click();
+    await settle();
+    expect(
+      container.querySelector('.comment-form .preview-pane .issue-md strong')?.textContent,
+    ).toBe('ship');
+
+    const form = container.querySelector('form.comment-form');
+    if (!form) throw new Error('missing comment form');
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle();
+
+    expect(commentBodies).toEqual([{ body: '**ship** it' }]);
+    expect(tab('.comment-form', 'Write').getAttribute('aria-selected')).toBe('true');
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[name="comment"]')?.value).toBe(
+      '',
+    );
+    // The posted comment renders as markdown in the thread.
+    const last = Array.from(container.querySelectorAll('.comment .comment-body')).at(-1);
+    expect(last?.querySelector('strong')?.textContent).toBe('ship');
   });
 });

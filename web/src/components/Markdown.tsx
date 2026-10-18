@@ -1,7 +1,7 @@
 // --- Markdown rendering (issues #13, #103) --------------------------------
 // One renderer, two consumers: the run chat (issue #13) and the issue view
 // (issue #103). The parser (lib/markdown) emits a plain node tree; the view
-// maps it to Solid JSX nodes directly — never an HTML string, never innerHTML —
+// maps it to Solid JSX nodes directly — never an HTML string parsed as markup —
 // so rendering is XSS-safe by construction. Only allowed-scheme hrefs reach an
 // <a>; an issue reference's href comes from the caller's resolver, never from
 // the source text. The caller owns the wrapper class and whether `#N` links.

@@ -1,6 +1,13 @@
-// Issue detail (/repos/:id/issues/:number): title, state badge, pre-wrapped
-// body (no markdown engine — no heavy deps), label chips, and the comments
-// thread (author · time · body). Title and body are editable on both bindings
+// Issue detail (/repos/:id/issues/:number): title, state badge, body, label
+// chips, and the comments thread (author · time · body). Body and comments
+// render as markdown through the chat's parser and node-tree renderer
+// (components/Markdown, issue #103 — Solid nodes, never an HTML string; no new
+// dependency) with task lists on and `#N` linked per tracker binding: builtin
+// → this app's issue page, forge → the forge's issue page in a new tab, plain
+// text when no forge URL derives. The body card carries an always-visible Copy
+// markdown (the raw source); both forms share one Write / Preview control; a
+// comment opening with an `Agent Brief` heading gets an "Agent brief" tag
+// (ADR-0070's run contract). Title and body are editable on both bindings
 // — the server routes the patch through the tracker seam. State, labels and
 // comments stay builtin-only: their controls disappear on forge-bound repos
 // behind a short managed-on-the-forge note while the read view keeps working.
@@ -9,7 +16,7 @@
 // "Issues / #N" trail within the tab.
 
 import { useParams } from '@solidjs/router';
-import { For, Match, Show, Switch, createSignal } from 'solid-js';
+import { For, Match, Show, Switch, createMemo, createSignal } from 'solid-js';
 import {
   createIssueComment,
   errorMessage,
@@ -25,11 +32,20 @@ import Crumbs, { type Crumb } from '../components/Crumbs';
 import Banner from '../components/Banner';
 import LabelChip from '../components/LabelChip';
 import LabelPicker from '../components/LabelPicker';
+import {
+  CopyButton,
+  Markdown,
+  MarkdownTree,
+  inlineText,
+  type RefResolver,
+} from '../components/Markdown';
 import SectionCard from '../components/SectionCard';
 import SectionHead from '../components/SectionHead';
+import WritePreview, { type WritePreviewTab } from '../components/WritePreview';
 import { canMutateTracker, formatDateTime } from '../lib/issues';
 import { sameLabelSet, toggleLabel } from '../lib/labels';
 import { createLiveResource } from '../lib/liveResource';
+import { parseMarkdown } from '../lib/markdown';
 import { forgeWebUrl } from '../lib/repoName';
 import { resourceValue } from '../lib/resource';
 import { useRepoHome } from './repo-home/context';
@@ -82,6 +98,20 @@ export default function IssueDetail() {
     if (r === undefined) return null;
     const base = forgeWebUrl(r.remote_url, r.forge_kind);
     return base === null ? null : `${base}/issues/${number}`;
+  };
+
+  // `#N` in rendered markdown: builtin → this app's issue page (SPA
+  // navigation); forge → the forge's issue page in a new tab, or plain text
+  // when no forge URL derives (as the forge note degrades). Repo not loaded →
+  // binding unknown → plain text.
+  const resolveRef: RefResolver = (n) => {
+    const r = repoData();
+    if (r === undefined) return null;
+    if (r.tracker_binding === 'builtin') {
+      return { href: `/repos/${params.id}/issues/${n}`, external: false };
+    }
+    const href = forgeIssueUrl(n);
+    return href === null ? null : { href, external: true };
   };
 
   const [error, setError] = createSignal<string | null>(null);
@@ -148,14 +178,29 @@ export default function IssueDetail() {
                     when={i().body !== ''}
                     fallback={<p class="muted issue-body">No description.</p>}
                   >
-                    <p class="issue-body">{i().body}</p>
+                    <Markdown
+                      source={i().body}
+                      class="md issue-md"
+                      resolveRef={resolveRef}
+                      taskLists
+                    />
                   </Show>
-                  <div class="chip-row">
-                    <For each={i().labels}>
-                      {(name) => <LabelChip name={name} color={colorOf(name)} />}
-                    </For>
-                    <Show when={i().labels.length === 0}>
-                      <span class="muted issue-meta">No labels</span>
+                  <div class="body-foot">
+                    <div class="chip-row">
+                      <For each={i().labels}>
+                        {(name) => <LabelChip name={name} color={colorOf(name)} />}
+                      </For>
+                      <Show when={i().labels.length === 0}>
+                        <span class="muted issue-meta">No labels</span>
+                      </Show>
+                    </div>
+                    {/* An empty body has nothing to copy. */}
+                    <Show when={i().body !== ''}>
+                      <CopyButton
+                        text={i().body}
+                        label="Copy markdown"
+                        title="Copy the markdown source"
+                      />
                     </Show>
                   </div>
                   <Show when={repoData() !== undefined}>
@@ -164,6 +209,7 @@ export default function IssueDetail() {
                       number={i().number}
                       title={i().title}
                       body={i().body}
+                      resolveRef={resolveRef}
                       onError={setError}
                       onSaved={() => void refetch()}
                     />
@@ -202,13 +248,12 @@ export default function IssueDetail() {
                     <ul class="comment-list">
                       <For each={i().comments}>
                         {(comment) => (
-                          <li class="comment">
-                            <p class="muted comment-meta">
-                              <strong>{comment.author}</strong> ·{' '}
-                              {formatDateTime(comment.created_at)}
-                            </p>
-                            <p class="comment-body">{comment.body}</p>
-                          </li>
+                          <CommentItem
+                            author={comment.author}
+                            body={comment.body}
+                            createdAt={comment.created_at}
+                            resolveRef={resolveRef}
+                          />
                         )}
                       </For>
                     </ul>
@@ -217,6 +262,7 @@ export default function IssueDetail() {
                     <CommentForm
                       repoID={params.id}
                       number={i().number}
+                      resolveRef={resolveRef}
                       onError={setError}
                       onPosted={() => void refetch()}
                     />
@@ -232,6 +278,42 @@ export default function IssueDetail() {
 }
 
 /**
+ * One comment: meta row (author · time, plus the "Agent brief" tag when the
+ * body opens with an `Agent Brief` heading — ADR-0070's run contract; every
+ * such comment is tagged) over the rendered body. The body is parsed once and
+ * the tree serves both the tag check and the render.
+ */
+function CommentItem(props: {
+  author: string;
+  body: string;
+  createdAt: string;
+  resolveRef: RefResolver;
+}) {
+  const blocks = createMemo(() => parseMarkdown(props.body, { taskLists: true }));
+  const isBrief = () => {
+    const first = blocks()[0];
+    return (
+      first?.type === 'heading' && inlineText(first.children).trim().toLowerCase() === 'agent brief'
+    );
+  };
+  return (
+    <li class="comment">
+      <p class="muted comment-meta">
+        <strong>{props.author}</strong> · {formatDateTime(props.createdAt)}
+        <Show when={isBrief()}>
+          <span class="brief-tag">Agent brief</span>
+        </Show>
+      </p>
+      <MarkdownTree
+        blocks={blocks()}
+        class="md issue-md comment-body"
+        resolveRef={props.resolveRef}
+      />
+    </li>
+  );
+}
+
+/**
  * Title/body editor: seeds both fields from the issue on open and sends a
  * single PATCH carrying only the fields that actually changed ({title} and/or
  * {body}, never state). Available on every binding — the server routes the
@@ -243,17 +325,20 @@ function TitleBodyEditor(props: {
   number: number;
   title: string;
   body: string;
+  resolveRef: RefResolver;
   onError: (message: string) => void;
   onSaved: () => void;
 }) {
   const [editing, setEditing] = createSignal(false);
   const [title, setTitle] = createSignal('');
   const [body, setBody] = createSignal('');
+  const [tab, setTab] = createSignal<WritePreviewTab>('write');
   const [busy, setBusy] = createSignal(false);
 
   const open = () => {
     setTitle(props.title);
     setBody(props.body);
+    setTab('write');
     setEditing(true);
   };
   const titleChanged = () => title().trim() !== props.title;
@@ -296,15 +381,24 @@ function TitleBodyEditor(props: {
           onInput={(e) => setTitle(e.currentTarget.value)}
         />
       </label>
-      <label class="field">
-        <span>Description</span>
-        <textarea
-          name="issue-body"
-          rows="6"
-          value={body()}
-          onInput={(e) => setBody(e.currentTarget.value)}
-        />
-      </label>
+      <WritePreview
+        label="Description"
+        class="issue-editor"
+        value={body()}
+        tab={tab()}
+        onTabChange={setTab}
+        resolveRef={props.resolveRef}
+      >
+        {(labelId) => (
+          <textarea
+            name="issue-body"
+            rows="10"
+            aria-labelledby={labelId}
+            value={body()}
+            onInput={(e) => setBody(e.currentTarget.value)}
+          />
+        )}
+      </WritePreview>
       <div class="card-actions">
         <button
           type="button"
@@ -393,10 +487,12 @@ function LabelEditor(props: {
 function CommentForm(props: {
   repoID: string;
   number: number;
+  resolveRef: RefResolver;
   onError: (message: string) => void;
   onPosted: () => void;
 }) {
   const [draft, setDraft] = createSignal('');
+  const [tab, setTab] = createSignal<WritePreviewTab>('write');
   const [busy, setBusy] = createSignal(false);
 
   const submit = async (event: SubmitEvent) => {
@@ -407,6 +503,7 @@ function CommentForm(props: {
     try {
       await createIssueComment(props.repoID, props.number, body);
       setDraft('');
+      setTab('write');
     } catch (err) {
       props.onError(errorMessage(err));
     } finally {
@@ -417,15 +514,23 @@ function CommentForm(props: {
 
   return (
     <form class="comment-form" onSubmit={(e) => void submit(e)}>
-      <label class="field">
-        <span>Add a comment</span>
-        <textarea
-          name="comment"
-          rows="3"
-          value={draft()}
-          onInput={(e) => setDraft(e.currentTarget.value)}
-        />
-      </label>
+      <WritePreview
+        label="Add a comment"
+        value={draft()}
+        tab={tab()}
+        onTabChange={setTab}
+        resolveRef={props.resolveRef}
+      >
+        {(labelId) => (
+          <textarea
+            name="comment"
+            rows="4"
+            aria-labelledby={labelId}
+            value={draft()}
+            onInput={(e) => setDraft(e.currentTarget.value)}
+          />
+        )}
+      </WritePreview>
       <button type="submit" class="primary" disabled={busy() || draft().trim() === ''}>
         {busy() ? 'Posting…' : 'Comment'}
       </button>

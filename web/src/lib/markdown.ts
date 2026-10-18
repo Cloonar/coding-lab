@@ -1,6 +1,6 @@
 // Hand-rolled markdown → node tree. No library, no new npm dep: the parser
 // emits a plain data tree that the shared node-tree renderer maps to Solid JSX
-// (never an HTML string, never innerHTML), so rendering is XSS-safe by
+// (never an HTML string parsed into the DOM), so rendering is XSS-safe by
 // construction and needs no sanitizer. One parser, two consumers: the embedded
 // chat (issue #13) and the issue view (issue #103). Beyond the CommonMark/GFM
 // subset it recognises issue references `#N` (an inline `ref` node, same
