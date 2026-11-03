@@ -61,6 +61,9 @@ type repoInheritedResponse struct {
 	ContainerMemory *string `json:"container_memory"`
 	ContainerPids   *int    `json:"container_pids"`
 	ContainerNofile *int    `json:"container_nofile"`
+	// NestedContainers is the global nested_containers_default an
+	// inheriting repo resolves to (issue #115).
+	NestedContainers *bool `json:"nested_containers"`
 }
 
 // inheritedDraftKeys are the request keys the inherited endpoint resolves
@@ -322,6 +325,17 @@ func (s *Server) repoInherited(ctx context.Context, repo store.Repo) repoInherit
 		c.ContainerMemory, c.ContainerPids, c.ContainerNofile = nil, nil, nil
 		if mem, pids, nofile, err := inst.EffectiveContainerLimits(ctx, c); err == nil {
 			out.ContainerMemory, out.ContainerPids, out.ContainerNofile = valPtr(mem), valPtr(pids), valPtr(nofile)
+		}
+	}
+	// Nested containers — instance.EffectiveNestedContainers: the global
+	// nested_containers_default, read live; an absent, unreadable or invalid
+	// row is the spawn's refusal, so null here. Answered whatever the
+	// effective Runner is: the UI says the knob is ignored under host.
+	{
+		c := repo
+		c.NestedContainers = nil
+		if v, err := instance.EffectiveNestedContainers(ctx, s.store, c); err == nil {
+			out.NestedContainers = valPtr(v)
 		}
 	}
 	return out

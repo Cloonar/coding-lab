@@ -7,8 +7,9 @@ package httpapi
 // body first — unknown keys (the read-only fields included), non-integers,
 // non-booleans, out-of-range intervals (transcript_retention_days, issue #81,
 // is bounded both ways: 0..365), spawn defaults outside the provider
-// catalogs, and a runner_default outside host/container are 400s that write
-// NOTHING — then upserts and returns the updated map. The one validation that
+// catalogs, a runner_default outside host/container, and a nested_image_cache
+// line that is not one image ref are 400s that write NOTHING — then upserts
+// and returns the updated map. The one validation that
 // touches the network, pinning a non-blank dev_image_default (issue #55 /
 // ADR-0071, through the same pinner a repo's image_ref uses), runs LAST,
 // after every cheap check of the body has passed, and a failed pin writes
@@ -27,6 +28,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/afk"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
@@ -41,6 +43,14 @@ import (
 // ARG_MAX ceiling at spawn; 16 KiB sits far under any platform limit yet is
 // ample for a full custom playbook.
 const afkPromptMaxBytes = 16 << 10
+
+// nestedImageCacheMaxBytes caps a stored nested_image_cache list (issue #115
+// / ADR-0086), measured after normalization. Every ref in it is pulled into
+// the shared image store at startup and on every save, so the cap bounds that
+// work as much as the row: 16 KiB is a few hundred refs, far past any real
+// ddev/compose stack, yet small enough that a pasted log never becomes a
+// pull queue.
+const nestedImageCacheMaxBytes = 16 << 10
 
 // afkPromptDefaultKey is the read-only settings field carrying the built-in
 // seed-prompt template (issue #52 / ADR-0027). It is NOT a stored settings row:
@@ -106,6 +116,12 @@ var settingsBoolNullable = map[string]bool{
 	// false is a VALUE (keep the head branch on origin), and the seeded
 	// "true" row is always present, so there is no inherit state.
 	store.SettingMergeDeleteHead: false,
+
+	// nested_containers_default (issue #115 / ADR-0086): non-nullable for the
+	// same reason — it is the BOTTOM layer of the Nested containers tri-state
+	// (the repo column's NULL inherits it), so there is nothing below it to
+	// inherit, and the resolver refuses any row but "true"/"false".
+	store.SettingNestedContainersDefault: false,
 }
 
 // typedSettings renders a raw settings map with the integer keys as JSON
@@ -354,6 +370,22 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			} else {
 				devImageRef = &v
 			}
+		case store.SettingNestedImageCache:
+			// The shared image store list (issue #115 / ADR-0086): one image ref
+			// per line, stored normalized so its reader only splits on "\n".
+			// Refs are NOT resolved or pinned here — the list is a best-effort
+			// cache, a ref that fails to pull is logged then, never refused now.
+			v, err := parseSettingString(raw)
+			if err != nil {
+				writeFieldError(w, http.StatusBadRequest, key, fmt.Sprintf("%s must be a string", key))
+				return
+			}
+			norm, err := normalizeNestedImageCache(v)
+			if err != nil {
+				writeFieldError(w, http.StatusBadRequest, key, err.Error())
+				return
+			}
+			updates[key] = norm
 		default:
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown setting %q", key))
 			return
@@ -395,6 +427,21 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.SetSetting(r.Context(), key, value); err != nil {
 			s.internalError(w, "saving settings", err)
 			return
+		}
+	}
+	// The Nested containers side effects of SAVED keys (issue #115 /
+	// ADR-0086), keyed off updates — the canonical values just stored: a
+	// default saved "true" kicks the nested preflight (startup skipped it if
+	// nested was on nowhere then), and a saved image cache list — any save,
+	// even an unchanged or emptied one — refreshes the shared store. Both
+	// return at once and report nothing: a failed pull is logged by the
+	// refresh, never an error response for a persisted save.
+	if s.nested != nil {
+		if updates[store.SettingNestedContainersDefault] == "true" {
+			s.nested.Kick()
+		}
+		if _, ok := updates[store.SettingNestedImageCache]; ok {
+			s.nested.RefreshCache()
 		}
 	}
 	all, err := s.store.AllSettings(r.Context())
@@ -460,6 +507,38 @@ func parseSettingBool(raw json.RawMessage, key string, nullable bool) (string, e
 		return "", nil // null = inherit the base layer (stored as the blank row)
 	}
 	return strconv.FormatBool(*v), nil
+}
+
+// normalizeNestedImageCache canonicalizes a nested_image_cache value (issue
+// #115 / ADR-0086) to the form the store holds and the shared-store refresh
+// reads: each line trimmed (so CRLF pastes and indentation vanish), blank
+// lines dropped, the rest joined with "\n" — "" is the empty list. It refuses,
+// naming the 1-based line, a line with whitespace INSIDE it (two refs pasted
+// on one line, or a ref with a stray argument, would otherwise become one
+// unpullable ref) and a line starting with "-" (every ref later lands in a
+// podman pull argv, where it would parse as a flag), and caps the normalized
+// list at nestedImageCacheMaxBytes. Refs are otherwise not validated: a typo
+// is a logged pull failure, never a refusal (a cache miss costs a pull).
+func normalizeNestedImageCache(v string) (string, error) {
+	var refs []string
+	for i, line := range strings.Split(v, "\n") {
+		ref := strings.TrimSpace(line)
+		if ref == "" {
+			continue
+		}
+		if strings.ContainsFunc(ref, unicode.IsSpace) {
+			return "", fmt.Errorf("%s line %d (%q) must be one image ref per line, without spaces", store.SettingNestedImageCache, i+1, ref)
+		}
+		if strings.HasPrefix(ref, "-") {
+			return "", fmt.Errorf("%s line %d (%q) must be an image ref, not start with \"-\"", store.SettingNestedImageCache, i+1, ref)
+		}
+		refs = append(refs, ref)
+	}
+	out := strings.Join(refs, "\n")
+	if len(out) > nestedImageCacheMaxBytes {
+		return "", fmt.Errorf("%s must be at most %d bytes", store.SettingNestedImageCache, nestedImageCacheMaxBytes)
+	}
+	return out, nil
 }
 
 func parseSettingString(raw json.RawMessage) (string, error) {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +285,11 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		t.Errorf("container overrides = %v/%v/%v, want null/null/null at create",
 			repo["container_memory"], repo["container_pids"], repo["container_nofile"])
 	}
+	// Nested containers (issue #115) is null at create too: the repo inherits
+	// the global nested_containers_default.
+	if repo["nested_containers"] != nil {
+		t.Errorf("nested_containers = %v, want null (inherit the global default)", repo["nested_containers"])
+	}
 	// The pinned repo JSON: every key present (nullables as null).
 	for _, k := range []string{"id", "name", "remote_url", "credential_id", "forge_credential_id",
 		"tracker_binding", "forge_kind", "default_branch", "provider", "incogni", "model_default",
@@ -293,7 +299,8 @@ func TestRepoCreateCloneLifecycleAndEvents(t *testing.T) {
 		"afk_prompt", "afk_prompt_effective", "afk_provider_default",
 		"autoland_enabled", "max_fix_attempts", "auto_merge", "lander_provider",
 		"lander_model", "lander_effort",
-		"runner", "container_memory", "container_pids", "container_nofile", "image_ref"} {
+		"runner", "container_memory", "container_pids", "container_nofile", "image_ref",
+		"nested_containers"} {
 		if _, ok := repo[k]; !ok {
 			t.Errorf("repo JSON missing pinned key %q", k)
 		}
@@ -555,6 +562,9 @@ func TestRepoPatchValidationMatrix(t *testing.T) {
 		{"empty runner", map[string]any{"runner": ""}, "runner", "runner"},   // issue #55: blank is not a spelling of inherit
 		{"blank runner", map[string]any{"runner": "  "}, "runner", "runner"}, // nor is whitespace
 		{"non-string runner", map[string]any{"runner": 1}, "runner", "must be a string or null"},
+		// Nested containers (issue #115): a boolean or null, nothing else.
+		{"string nested containers", map[string]any{"nested_containers": "true"}, "nested_containers", "must be a boolean or null"},
+		{"numeric nested containers", map[string]any{"nested_containers": 1}, "nested_containers", "must be a boolean or null"},
 		{"bad container memory", map[string]any{"container_memory": "9x"}, "container_memory", "podman --memory"},
 		{"container pids zero", map[string]any{"container_pids": 0}, "container_pids", "at least 1"},
 		{"container nofile zero", map[string]any{"container_nofile": 0}, "container_nofile", "at least 1"},
@@ -700,6 +710,67 @@ func TestRepoPatchRunnerTriState(t *testing.T) {
 		}
 		if got := x.getRepo(t, id)["runner"]; got != "container" {
 			t.Errorf("runner after rejected PATCH %q = %v, want the container pin untouched", bad, got)
+		}
+	}
+}
+
+// TestRepoPatchNestedContainersTriState pins the nested_containers repo
+// surface (issue #115 / ADR-0086): a new repo carries a present null
+// (inherit); PATCH round-trips true and false as pins — false echoed as a
+// real false, never folded into null — and null back to inherit, each echoed
+// by the PATCH response and a fresh GET; and every non-boolean value is a 400
+// naming the field that leaves the stored pin untouched.
+func TestRepoPatchNestedContainersTriState(t *testing.T) {
+	x := newRepoTestServer(t)
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	created := decodeBody(t, resp)
+	if v, ok := created["nested_containers"]; !ok || v != nil {
+		t.Fatalf("created nested_containers = %v (present %v), want a present null", v, ok)
+	}
+	id := created["id"].(string)
+	x.waitCloneStatus(t, id, "ready")
+
+	for _, step := range []struct {
+		send any // the PATCH nested_containers value
+		want any // the echoed value: a bool pin, or nil for inherit
+	}{
+		{true, true},
+		{false, false},
+		{nil, nil},
+		{false, false},
+	} {
+		resp := x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"nested_containers": step.send}, h)
+		wantStatus(t, resp, http.StatusOK)
+		if got := decodeBody(t, resp)["nested_containers"]; got != step.want {
+			t.Errorf("PATCH nested_containers=%v echoed %v, want %v", step.send, got, step.want)
+		}
+		if got := x.getRepo(t, id)["nested_containers"]; got != step.want {
+			t.Errorf("GET after PATCH nested_containers=%v = %v, want %v", step.send, got, step.want)
+		}
+	}
+	row, err := x.st.RepoByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.NestedContainers == nil || *row.NestedContainers {
+		t.Errorf("stored nested_containers = %v, want a non-nil pointer to false", row.NestedContainers)
+	}
+
+	// Invalid values are 400s naming the field and leave the false pin from
+	// the last step exactly where it was.
+	for _, bad := range []any{"true", "", 1, 0, map[string]any{}} {
+		resp := x.do("PATCH", "/api/v1/repos/"+id, map[string]any{"nested_containers": bad}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		body := decodeBody(t, resp)
+		if body["field"] != "nested_containers" {
+			t.Errorf("PATCH nested_containers=%#v field = %v, want nested_containers", bad, body["field"])
+		}
+		if got := x.getRepo(t, id)["nested_containers"]; got != false {
+			t.Errorf("nested_containers after rejected PATCH %#v = %v, want the false pin untouched", bad, got)
 		}
 	}
 }
@@ -1312,4 +1383,51 @@ func TestRepoRoutesRequireAuthAndCSRF(t *testing.T) {
 	resp = x.do("POST", "/api/v1/repos", map[string]any{"remote_url": "/tmp/x"}, nil)
 	wantStatus(t, resp, http.StatusForbidden)
 	_ = resp.Body.Close()
+}
+
+// fakeNestedHooks is the Options.Nested seam (issue #115): counts of the two
+// side effects a save may trigger.
+type fakeNestedHooks struct {
+	kicks, refreshes atomic.Int32
+}
+
+func (f *fakeNestedHooks) Kick()         { f.kicks.Add(1) }
+func (f *fakeNestedHooks) RefreshCache() { f.refreshes.Add(1) }
+
+// A repo PATCH that pins nested_containers on kicks the nested preflight
+// (issue #115 / ADR-0086); pinning it off, clearing it to inherit, a PATCH
+// of another field, and a rejected PATCH kick nothing, and a repo PATCH
+// never refreshes the image cache.
+func TestRepoPatchNestedContainersKicksThePreflight(t *testing.T) {
+	hooks := &fakeNestedHooks{}
+	x := newRepoTestServerWith(t, func(o *Options) { o.Nested = hooks })
+	h := csrfHeaders(x.ts.URL)
+	origin := makeRepoOrigin(t, x.home, "main", 1)
+	resp := x.do("POST", "/api/v1/repos", map[string]any{"remote_url": origin}, h)
+	wantStatus(t, resp, http.StatusCreated)
+	id := decodeBody(t, resp)["id"].(string)
+	x.waitCloneStatus(t, id, "ready")
+
+	for _, step := range []struct {
+		body      map[string]any
+		status    int
+		wantKicks int32
+	}{
+		{map[string]any{"nested_containers": false}, http.StatusOK, 0},
+		{map[string]any{"nested_containers": nil}, http.StatusOK, 0},
+		{map[string]any{"name": "renamed"}, http.StatusOK, 0},
+		{map[string]any{"nested_containers": "true"}, http.StatusBadRequest, 0},
+		{map[string]any{"nested_containers": true}, http.StatusOK, 1},
+		{map[string]any{"nested_containers": true, "name": "again"}, http.StatusOK, 2},
+	} {
+		resp := x.do("PATCH", "/api/v1/repos/"+id, step.body, h)
+		wantStatus(t, resp, step.status)
+		_ = resp.Body.Close()
+		if got := hooks.kicks.Load(); got != step.wantKicks {
+			t.Errorf("after PATCH %v: kicks = %d, want %d", step.body, got, step.wantKicks)
+		}
+	}
+	if hooks.refreshes.Load() != 0 {
+		t.Error("a repo PATCH refreshed the nested image cache")
+	}
 }

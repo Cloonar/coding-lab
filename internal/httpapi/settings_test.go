@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/imageref"
+	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider/providertest"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
@@ -985,5 +987,188 @@ func TestAPI_SettingsTranscriptRetention(t *testing.T) {
 	}
 	if v, err := x.st.GetString(ctx, store.SettingGitAuthorName, ""); err != nil || v != "" {
 		t.Errorf("git_author_name = %q (%v) after rejected PATCHes, want empty", v, err)
+	}
+}
+
+// nested_containers_default (issue #115 / ADR-0086): seeded off and typed as
+// a JSON bool on GET; PATCH takes only a strict JSON bool — null (it is the
+// bottom layer of the tri-state, there is nothing to inherit), strings and
+// numbers are 400s naming the key that write nothing — and persists exactly
+// the "true"/"false" instance.EffectiveNestedContainers reads.
+func TestAPI_SettingsNestedContainersDefault(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+	ctx := context.Background()
+	key := store.SettingNestedContainersDefault
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if v, ok := got[key].(bool); !ok || v {
+		t.Errorf("seeded %s = %v (%T), want the JSON bool false", key, got[key], got[key])
+	}
+
+	for _, want := range []bool{true, false, true} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{key: want}, h)
+		wantStatus(t, resp, http.StatusOK)
+		got = settingsOf(t, decodeBody(t, resp))
+		if v, ok := got[key].(bool); !ok || v != want {
+			t.Errorf("PATCH %v echoed %v (%T)", want, got[key], got[key])
+		}
+		if v, err := x.st.GetSetting(ctx, key); err != nil || v != strconv.FormatBool(want) {
+			t.Errorf("stored %s = %q (%v), want %q", key, v, err, strconv.FormatBool(want))
+		}
+		// The stored row is what the spawn resolver reads for an inheriting repo.
+		if v, err := instance.EffectiveNestedContainers(ctx, x.st, store.Repo{Name: "proj"}); err != nil || v != want {
+			t.Errorf("EffectiveNestedContainers after PATCH %v = %v, %v", want, v, err)
+		}
+	}
+
+	for _, bad := range []any{nil, "true", "", 1} {
+		resp = x.do("PATCH", "/api/v1/settings", map[string]any{key: bad}, h)
+		wantStatus(t, resp, http.StatusBadRequest)
+		body := decodeBody(t, resp)
+		if body["error"] != key+" must be a boolean" {
+			t.Errorf("PATCH %#v error = %v, want %q", bad, body["error"], key+" must be a boolean")
+		}
+		assertErrorField(t, body, key)
+	}
+	if v, err := x.st.GetSetting(ctx, key); err != nil || v != "true" {
+		t.Errorf("%s after rejected PATCHes = %q (%v), want the stored \"true\"", key, v, err)
+	}
+}
+
+// nested_image_cache (issue #115 / ADR-0086): seeded "" and a plain string on
+// GET; PATCH normalizes the list — each line trimmed (CRLF and indentation
+// included), blank lines dropped, joined with "\n" — and refuses, with a 400
+// naming the key that writes nothing, a non-string, a line with whitespace
+// inside it, a line starting with "-", and a list over the cap.
+func TestAPI_SettingsNestedImageCache(t *testing.T) {
+	x := newSettingsServer(t)
+	h := csrfHeaders(x.ts.URL)
+	ctx := context.Background()
+	key := store.SettingNestedImageCache
+
+	resp := x.do("GET", "/api/v1/settings", nil, nil)
+	wantStatus(t, resp, http.StatusOK)
+	got := settingsOf(t, decodeBody(t, resp))
+	if v, ok := got[key].(string); !ok || v != "" {
+		t.Errorf("seeded %s = %#v (%T), want the empty string", key, got[key], got[key])
+	}
+
+	const (
+		mariadb = "docker.io/library/mariadb:11.8"
+		router  = "ghcr.io/ddev/ddev-router:v1.25.5@sha256:" + "3333333333333333333333333333333333333333333333333333333333333333"
+	)
+	for _, tc := range []struct {
+		name, send, want string
+	}{
+		{"one ref", mariadb, mariadb},
+		{"normalized list", "\n  " + mariadb + "  \r\n\n\t" + router + "\n\n", mariadb + "\n" + router},
+		{"blank lines only clear it", " \n\r\n\t", ""},
+		{"empty clears it", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := x.do("PATCH", "/api/v1/settings", map[string]any{key: tc.send}, h)
+			wantStatus(t, resp, http.StatusOK)
+			got := settingsOf(t, decodeBody(t, resp))
+			if got[key] != tc.want {
+				t.Errorf("PATCH %q echoed %#v, want %q", tc.send, got[key], tc.want)
+			}
+			if v, err := x.st.GetSetting(ctx, key); err != nil || v != tc.want {
+				t.Errorf("stored %s = %q (%v), want %q", key, v, err, tc.want)
+			}
+		})
+	}
+
+	// Seed a value the refusals below must leave alone.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{key: mariadb}, h)
+	wantStatus(t, resp, http.StatusOK)
+
+	// Over the cap once normalized — trailing blank lines do not count.
+	long := strings.Repeat("r", nestedImageCacheMaxBytes+1)
+	atCap := strings.Repeat("r", nestedImageCacheMaxBytes) + "\n\n  \n"
+	for _, tc := range []struct {
+		name string
+		send any
+		want string // substring of the error
+	}{
+		{"non-string", 3, "must be a string"},
+		{"two refs on one line", mariadb + " " + router, "line 1"},
+		{"tab inside a ref", "\n" + mariadb + "\n" + "ghcr.io/x\t:1", "line 3"},
+		{"flag-shaped ref", "--all-tags", `not start with "-"`},
+		{"over the cap", long, "at most"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := x.do("PATCH", "/api/v1/settings", map[string]any{key: tc.send, store.SettingMaxInstances: 2}, h)
+			wantStatus(t, resp, http.StatusBadRequest)
+			body := decodeBody(t, resp)
+			if msg, _ := body["error"].(string); !strings.Contains(msg, tc.want) || !strings.Contains(msg, key) {
+				t.Errorf("PATCH %q error = %q, want it to name %s and carry %q", tc.send, msg, key, tc.want)
+			}
+			assertErrorField(t, body, key)
+			if v, err := x.st.GetSetting(ctx, key); err != nil || v != mariadb {
+				t.Errorf("%s after a rejected PATCH = %q (%v), want %q untouched", key, v, err, mariadb)
+			}
+			if v, _ := x.st.GetInt(ctx, store.SettingMaxInstances, 0); v == 2 {
+				t.Error("a rejected PATCH wrote its valid sibling max_instances")
+			}
+		})
+	}
+
+	// Exactly at the cap after normalization is accepted.
+	resp = x.do("PATCH", "/api/v1/settings", map[string]any{key: atCap}, h)
+	wantStatus(t, resp, http.StatusOK)
+	if v, err := x.st.GetSetting(ctx, key); err != nil || len(v) != nestedImageCacheMaxBytes {
+		t.Errorf("stored at-cap %s has %d bytes (%v), want %d", key, len(v), err, nestedImageCacheMaxBytes)
+	}
+}
+
+// The settings PATCH's Nested containers side effects (issue #115 /
+// ADR-0086): saving nested_containers_default "true" kicks the nested
+// preflight (saving "false" does not); saving nested_image_cache — any
+// value, the empty list included — refreshes the shared image store; a
+// PATCH of other keys and a rejected PATCH trigger neither.
+func TestAPI_SettingsNestedHooks(t *testing.T) {
+	hooks := &fakeNestedHooks{}
+	x := newTestServer(t, func(o *Options) {
+		if err := o.Store.SeedDefaultSettings(context.Background(), 6, "claude-code"); err != nil {
+			t.Fatal(err)
+		}
+		reg, err := provider.NewRegistry(providertest.New())
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Providers = reg
+		o.Nested = hooks
+	})
+	x.setup("op", "password123")
+	h := csrfHeaders(x.ts.URL)
+
+	for _, step := range []struct {
+		body           map[string]any
+		status         int
+		kicks, refresh int32
+	}{
+		{map[string]any{store.SettingNestedContainersDefault: false}, http.StatusOK, 0, 0},
+		{map[string]any{store.SettingMaxInstances: 4}, http.StatusOK, 0, 0},
+		{map[string]any{store.SettingNestedContainersDefault: "true"}, http.StatusBadRequest, 0, 0},
+		{map[string]any{store.SettingNestedImageCache: "a b"}, http.StatusBadRequest, 0, 0},
+		{map[string]any{store.SettingNestedContainersDefault: true}, http.StatusOK, 1, 0},
+		{map[string]any{store.SettingNestedImageCache: "ddev/ddev-webserver:v1.25.5"}, http.StatusOK, 1, 1},
+		{map[string]any{store.SettingNestedImageCache: ""}, http.StatusOK, 1, 2},
+		{map[string]any{store.SettingNestedContainersDefault: true, store.SettingNestedImageCache: "x:1"}, http.StatusOK, 2, 3},
+		// One invalid key fails the whole body: nothing saved, nothing kicked.
+		{map[string]any{store.SettingNestedContainersDefault: true, store.SettingNestedImageCache: "-x"}, http.StatusBadRequest, 2, 3},
+	} {
+		resp := x.do("PATCH", "/api/v1/settings", step.body, h)
+		wantStatus(t, resp, step.status)
+		_ = resp.Body.Close()
+		if got := hooks.kicks.Load(); got != step.kicks {
+			t.Errorf("after PATCH %v: kicks = %d, want %d", step.body, got, step.kicks)
+		}
+		if got := hooks.refreshes.Load(); got != step.refresh {
+			t.Errorf("after PATCH %v: refreshes = %d, want %d", step.body, got, step.refresh)
+		}
 	}
 }

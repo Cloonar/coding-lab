@@ -175,14 +175,22 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// image that chain resolved, placed here on purpose so a failed pull
 	// refuses PRE-claim rather than stranding one. A refusal here rolls back
 	// nothing because nothing exists yet. The resolved image and limits carry
-	// to the spawn branch below.
+	// to the spawn branch below, and so does the gate's Nested containers
+	// answer (ADR-0086, issue #115): the gate resolves the knob only here,
+	// under the container Runner — a host spawn never reads it — and refuses
+	// an unresolvable inherited default or a host whose nested preflight is
+	// pending or failed in this same pre-claim spot. ctrNested then shapes
+	// both the run pane's argv and the worktree notes.
 	container := effRunner == store.RunnerContainer
 	var ctrImage, ctrMemory string
 	var ctrPids, ctrNofile int
+	var ctrNested bool
 	if container {
-		if ctrImage, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
+		var gate ContainerGate
+		if gate, err = s.refuseContainerSpawn(ctx, spec.Provider.ID(), repo); err != nil {
 			return store.Run{}, err
 		}
+		ctrImage, ctrNested = gate.Image, gate.Nested
 		if ctrMemory, ctrPids, ctrNofile, err = s.EffectiveContainerLimits(ctx, repo); err != nil {
 			return store.Run{}, &StartFailedError{cause: err}
 		}
@@ -520,8 +528,10 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// The preview ref (issue #105) is lab-wide, not per run: every run on a
 	// lab with a preview listener can `labctl expose`, so every run's notes
 	// say so, and s.previewRef is NIL on a lab without one — the same
-	// nil-is-parity contract as the two refs above.
-	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef, Bastion: bastionRef, Preview: s.previewRef}); err != nil {
+	// nil-is-parity contract as the two refs above. Nested (issue #115) is
+	// the container gate's answer — true only for a container run whose
+	// effective knob is on — so a run that is not nested renders as before.
+	if err := s.seeder.SeedWorkspace(wtPath, repo, seedMeta, seeder.Opts{Secrets: secrets, Imports: importRefs, Gateway: gwRef, Bastion: bastionRef, Preview: s.previewRef, Nested: ctrNested}); err != nil {
 		rollback(false)
 		return store.Run{}, &StartFailedError{cause: err}
 	}
@@ -634,7 +644,9 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 	// ride tmux -e + name-only --env so no argv ever carries them, and the
 	// host prlimit cap is retired in favor of the container's own --ulimit
 	// (WithoutNofileCap — capping the podman client would aim at the wrong
-	// process).
+	// process). A nested run (ADR-0086, issue #115) renders the same RunSpec
+	// in its nested shape (nestedSpec); login panes and the provider CLI
+	// never get here, so they keep today's shapes whatever the knob says.
 	var spawnErr error
 	if container {
 		env, forward := containerEnv(extraEnv, home, s.containerSockURL(), bastionPATHPrefix)
@@ -658,6 +670,7 @@ func (s *Service) Launch(ctx context.Context, spec LaunchSpec) (store.Run, error
 			Env:        env,
 			ForwardEnv: forward,
 			Argv:       spawnArgv,
+			Nested:     s.nestedSpec(ctrNested),
 		})
 		spawnErr = s.runner.Start(ctx, name, wtPath, paneArgv, secretForwardEnv(extraEnv, forward), tmuxx.WithoutNofileCap())
 	} else {

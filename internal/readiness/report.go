@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"git.cloonar.com/Cloonar/coding-lab/internal/instance"
+	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 	"git.cloonar.com/Cloonar/coding-lab/internal/tracker"
 )
@@ -361,7 +362,10 @@ func agentLoginCheck(in Input) *Check {
 // ContainerGate — the very verdict a spawn is refused by), and past an open
 // gate it reports the last pull-if-missing of the resolved dev image. Every
 // host-side refusal points at the Runner field, because switching the Runner
-// is the one remedy this app offers for a host that cannot run containers.
+// is the one remedy this app offers for a host that cannot run containers;
+// the Nested containers stages (issue #115) point at the repo's
+// nested_containers field instead, the knob whose off position is the
+// remedy for a host that cannot run nested ones.
 func devImageCheck(in Input) *Check {
 	if in.RunnerErr != nil {
 		detail := "This repository inherits the global default Runner, which is not set to host or container."
@@ -391,6 +395,22 @@ func devImageCheck(in Input) *Check {
 			detail = "No dev image is configured for this repository."
 		}
 		return failing(CheckDevImage, detail, sectionRunner, "image_ref")
+	// The Nested containers stages (issue #115 / ADR-0086). Every failing
+	// one points at the repo's Nested containers field: turning the knob off
+	// (or pinning it, over a broken inherited default) is the remedy this
+	// app offers, as switching the Runner is for the host stages above.
+	case instance.ContainerGateNestedUnresolved:
+		return failing(CheckDevImage,
+			"This repository inherits the global Nested containers default, which is not set to on or off.",
+			sectionRunner, "nested_containers")
+	case instance.ContainerGateNestedUnavailable:
+		return failing(CheckDevImage, "Nested containers are on, but this server does not support them.",
+			sectionRunner, "nested_containers")
+	case instance.ContainerGateNestedPending:
+		return pending(CheckDevImage, "The nested containers preflight has not finished yet.")
+	case instance.ContainerGateNestedFailed:
+		return failing(CheckDevImage, failuresProblem("The nested containers preflight failed: ", c.Gate.NestedFailures),
+			sectionRunner, "nested_containers")
 	case instance.ContainerGateOpen:
 		switch rec := c.Image; {
 		case rec == nil:
@@ -409,9 +429,16 @@ func devImageCheck(in Input) *Check {
 // what was observed and the operator action that fixes it — and says how
 // many more there are.
 func preflightProblem(g instance.ContainerGate) string {
-	fs := g.Preflight.Failures
+	return failuresProblem("The container preflight failed: ", g.Preflight.Failures)
+}
+
+// failuresProblem words a failed preflight's failures — the container
+// preflight's or the nested one's — as prefix plus the first failure's
+// observation and operator action, and how many more there are; with no
+// failure at all, the prefix alone as a sentence.
+func failuresProblem(prefix string, fs []podmanx.Failure) string {
 	if len(fs) == 0 {
-		return "The container preflight failed."
+		return sentence(prefix, "")
 	}
 	reason := fs[0].Detail
 	if fs[0].Hint != "" {
@@ -420,7 +447,7 @@ func preflightProblem(g instance.ContainerGate) string {
 	if more := len(fs) - 1; more > 0 {
 		reason += fmt.Sprintf(" — and %d more", more)
 	}
-	return sentence("The container preflight failed: ", reason)
+	return sentence(prefix, reason)
 }
 
 // importsCheck mirrors what a spawn does with the repo's read-only imports:

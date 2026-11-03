@@ -115,6 +115,15 @@ type repoResponse struct {
 	// is always digest-pinned (reposvc pins it on save). Meaningless while the
 	// effective Runner is "host", same as the container limits above.
 	ImageRef *string `json:"image_ref"`
+	// NestedContainers is the repo's Nested containers pin (issue #115 /
+	// ADR-0086): true or false when the repo pins one — false is a real pin,
+	// never folded into null — null when it inherits the global
+	// nested_containers_default setting (every new repo starts null). Like
+	// Runner it is the repo's own LAYER, not the effective value: the spawn
+	// resolves null live, and POST /repos/{id}/inherited answers what null
+	// resolves to. Meaningless while the effective Runner is "host", same as
+	// image_ref and the container limits above.
+	NestedContainers *bool `json:"nested_containers"`
 	// Summary is what lab knows about the repo right now without asking
 	// anyone (issue #61): the claimable and open-issue counts as last known
 	// (null = not known yet) and the readiness report. Read-only and
@@ -176,6 +185,7 @@ func repoJSON(r store.Repo, afkPromptEffective string, summary readiness.Summary
 		ContainerPids:        r.ContainerPids,
 		ContainerNofile:      r.ContainerNofile,
 		ImageRef:             r.ImageRef,
+		NestedContainers:     r.NestedContainers,
 		Summary:              summary,
 	}
 	if r.LastOpenedAt != nil {
@@ -503,6 +513,13 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			// reposvc.UpdateSettings (a parse/resolve failure → 400, its message
 			// naming the ref).
 			u.ImageRef, err = patchNullableString(raw, key)
+		case "nested_containers":
+			// Tri-state (issue #115 / ADR-0086), the remote_default shape: null
+			// clears the pin (inherit the global nested_containers_default),
+			// true/false pin the repo — false included, which must beat a
+			// global true. Decoded strictly: a string or number is a 400
+			// naming this field, never coerced.
+			u.NestedContainers, err = patchNullableBool(raw, key)
 		default:
 			err = fmt.Errorf("unknown field %q", key)
 		}
@@ -515,6 +532,13 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeRepoError(w, "updating repo", err)
 		return
+	}
+	// Saved a Nested containers pin of on (issue #115 / ADR-0086): kick the
+	// nested preflight, which startup skipped if nested was on nowhere then,
+	// so this repo's first nested spawn finds a verdict instead of a retry.
+	// Non-blocking and idempotent (a no-op once kicked); never an error.
+	if v := u.NestedContainers; v.Set && v.Value != nil && *v.Value && s.nested != nil {
+		s.nested.Kick()
 	}
 	s.writeRepo(w, r, http.StatusOK, "updating repo", repo)
 }

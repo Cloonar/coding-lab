@@ -51,18 +51,63 @@ const (
 	// none of its three layers is set (errors.Is(Err, ErrNoDevImage)), or the
 	// dev_image_default setting could not be read.
 	ContainerGateNoDevImage
+
+	// The Nested containers stages (ADR-0086, issue #115), checked after
+	// every stage above and reached only by a repo whose plain container run
+	// could start: see ContainerGate for why they come last.
+
+	// ContainerGateNestedUnresolved: the repo inherits the global Nested
+	// containers default and that setting cannot be resolved (absent,
+	// unreadable, or neither true nor false); Err is the resolver's own
+	// actionable text (EffectiveNestedContainers).
+	ContainerGateNestedUnresolved
+	// ContainerGateNestedUnavailable: the effective knob is on, but this
+	// server has no nested containers runtime wired (Options.Nested nil).
+	ContainerGateNestedUnavailable
+	// ContainerGateNestedPending: the effective knob is on and the nested
+	// preflight has not published a verdict yet — never kicked, or still
+	// running; retry. refuseContainerSpawn kicks it.
+	ContainerGateNestedPending
+	// ContainerGateNestedFailed: the effective knob is on and the nested
+	// preflight failed; ContainerGate.NestedFailures holds every failure.
+	ContainerGateNestedFailed
 )
+
+// NestedRuntime is the slice of the Nested containers runtime (ADR-0086,
+// issue #115; cmd/lab wires *nested.Service) the spawn path needs: the
+// nested preflight's verdict for the gate, the kick a pending verdict
+// triggers, and the two host paths a nested run's argv names.
+type NestedRuntime interface {
+	// Verdict is the published nested preflight verdict — (failures, true)
+	// once finished, nil failures meaning nested runs may start; (nil,
+	// false) while not kicked or still running.
+	Verdict() (failures []podmanx.Failure, done bool)
+	// Kick starts the nested preflight if it never started; idempotent and
+	// non-blocking.
+	Kick()
+	// SeccompPath is the lab-generated seccomp profile, "" when it could not
+	// be written (the nested preflight then fails naming it).
+	SeccompPath() string
+	// SharedStore is the shared image store's path when it exists, else "".
+	SharedStore() string
+}
 
 // ContainerGate is the container-mode spawn gate's verdict for one provider
 // on one repo. Stage says where it stopped; Err is the actionable refusal
 // (nil exactly when Stage is ContainerGateOpen); Image is the effective dev
 // image of an open gate; Preflight is the finished verdict behind a
-// ContainerGatePreflightFailed.
+// ContainerGatePreflightFailed. Nested is the repo's effective Nested
+// containers value (ADR-0086) — true on an open gate means the run gets the
+// nested shape, and it is true on the three nested stages that follow a
+// resolved knob; NestedFailures is the finished nested verdict behind a
+// ContainerGateNestedFailed.
 type ContainerGate struct {
-	Stage     ContainerGateStage
-	Image     string
-	Preflight podmanx.Result
-	Err       error
+	Stage          ContainerGateStage
+	Image          string
+	Preflight      podmanx.Result
+	Nested         bool
+	NestedFailures []podmanx.Failure
+	Err            error
 }
 
 // ContainerGate evaluates the container-mode spawn gate (issue #205) for a
@@ -88,6 +133,22 @@ type ContainerGate struct {
 // refused naming all THREE knobs when none is set, since any one fixes it,
 // and refused naming dev_image_default when that setting cannot be read
 // (never a silent drop to the flag image).
+//
+// Then Nested containers (ADR-0086, issue #115), resolved by the one
+// resolver, EffectiveNestedContainers — here and only here, so a host-runner
+// spawn (which never reaches this gate) never reads the knob, and a broken
+// nested_containers_default can never block one. The nested stages come
+// LAST, after the dev image, for three reasons: they are an opt-in layered on
+// a plain container run, so a repo whose plain run cannot start has a more
+// basic problem to fix first and is told that one, exactly as before the
+// knob existed; every stage above keeps its order and its text for every
+// repo, nested or not; and a pending nested verdict is only worth kicking
+// (refuseContainerSpawn) for a repo that would otherwise start. In order: an
+// unresolvable inherited default → the resolver's text; the knob on with no
+// nested runtime wired → unavailable; no nested verdict yet → retry; a
+// failed one → every failure with its check, detail and hint, like the main
+// preflight's message. An open gate carries Nested, which Launch turns into
+// the nested argv and the worktree notes' section.
 func (s *Service) ContainerGate(ctx context.Context, providerID string, repo store.Repo) ContainerGate {
 	if s.containerPreflight == nil {
 		return ContainerGate{Stage: ContainerGateNotConfigured,
@@ -113,7 +174,39 @@ func (s *Service) ContainerGate(ctx context.Context, providerID string, repo sto
 	if err != nil {
 		return ContainerGate{Stage: ContainerGateNoDevImage, Err: err}
 	}
-	return ContainerGate{Stage: ContainerGateOpen, Image: image}
+	nested, err := EffectiveNestedContainers(ctx, s.store, repo)
+	if err != nil {
+		return ContainerGate{Stage: ContainerGateNestedUnresolved, Err: err}
+	}
+	if !nested {
+		return ContainerGate{Stage: ContainerGateOpen, Image: image}
+	}
+	if s.nested == nil {
+		return ContainerGate{Stage: ContainerGateNestedUnavailable, Nested: true,
+			Err: fmt.Errorf("nested containers are on for repo %s, but this server has no nested containers support — turn Nested containers off in the repo's Runner settings (or the global Nested containers default in Settings → Runner)", repo.Name)}
+	}
+	failures, done := s.nested.Verdict()
+	if !done {
+		return ContainerGate{Stage: ContainerGateNestedPending, Nested: true,
+			Err: errors.New("nested containers preflight has not finished — retry in a moment")}
+	}
+	if len(failures) > 0 {
+		return ContainerGate{Stage: ContainerGateNestedFailed, Nested: true, NestedFailures: failures,
+			Err: errors.New(nestedPreflightError(failures))}
+	}
+	return ContainerGate{Stage: ContainerGateOpen, Image: image, Nested: true}
+}
+
+// nestedPreflightError renders a failed nested verdict into one refusal, in
+// podmanx.Result.Error's shape and for its reason — every failure, so the
+// operator fixes the host once: "nested containers preflight failed: <check>:
+// <detail> (<hint>); …".
+func nestedPreflightError(failures []podmanx.Failure) string {
+	parts := make([]string, len(failures))
+	for i, f := range failures {
+		parts[i] = fmt.Sprintf("%s: %s (%s)", f.Check, f.Detail, f.Hint)
+	}
+	return "nested containers preflight failed: " + strings.Join(parts, "; ")
 }
 
 // refuseContainerSpawn is the container-mode spawn gate (issue #205) as
@@ -135,13 +228,49 @@ func (s *Service) ContainerGate(ctx context.Context, providerID string, repo sto
 // you asked for, this deployment cannot spawn". An unreadable
 // dev_image_default follows the same mapping as an unresolvable
 // runner_default (Launch's EffectiveRunner refusal): a 400 whose text names
-// the setting, refused before the claim.
-func (s *Service) refuseContainerSpawn(ctx context.Context, providerID string, repo store.Repo) (image string, err error) {
+// the setting, refused before the claim. So do the nested stages (issue
+// #115): an unresolvable nested_containers_default, the knob on without a
+// nested runtime, a pending and a failed nested preflight are all 400s
+// before the claim.
+//
+// Its one side effect over the pure gate: a ContainerGateNestedPending
+// refusal kicks the nested preflight (NestedRuntime.Kick, idempotent). At
+// startup cmd/lab runs the nested checks only when nested containers are on
+// somewhere, so a knob turned on afterwards by a path that kicks nothing
+// meets an unkicked runtime here — and its first spawn attempt starts the
+// checks and is refused with "retry in a moment", the retry finding a
+// verdict. The gate itself never kicks: the readiness report reads it per
+// page view, and a page view must not start a probe container.
+//
+// On success it returns the open gate: the effective dev image and whether
+// the run is nested.
+func (s *Service) refuseContainerSpawn(ctx context.Context, providerID string, repo store.Repo) (ContainerGate, error) {
 	g := s.ContainerGate(ctx, providerID, repo)
-	if g.Err != nil {
-		return "", badRequestf("%s", g.Err)
+	if g.Stage == ContainerGateNestedPending {
+		s.nested.Kick()
 	}
-	return g.Image, nil
+	if g.Err != nil {
+		return ContainerGate{}, badRequestf("%s", g.Err)
+	}
+	return g, nil
+}
+
+// nestedSpec is a run pane's podmanx.RunSpec.Nested for the gate's Nested
+// answer: nil when the run is not nested (today's argv, byte for byte),
+// else the nested runtime's seccomp profile and shared store — the store
+// only when its directory exists, as RunSpec requires — and the service
+// user's ids for the entry program to drop to. Reached with nested true only
+// past an open gate, which proved the runtime non-nil.
+func (s *Service) nestedSpec(nested bool) *podmanx.NestedSpec {
+	if !nested {
+		return nil
+	}
+	return &podmanx.NestedSpec{
+		SeccompProfile: s.nested.SeccompPath(),
+		SharedStore:    s.nested.SharedStore(),
+		UID:            s.serviceUID,
+		GID:            s.serviceGID,
+	}
 }
 
 // DevImage is EffectiveDevImage over this service's own store and its copy of

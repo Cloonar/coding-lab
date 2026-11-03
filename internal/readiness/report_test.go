@@ -410,6 +410,7 @@ func TestAgentLoginCheck(t *testing.T) {
 func TestDevImageCheck(t *testing.T) {
 	runnerFix := repoFix("runner", "runner")
 	imageFix := repoFix("runner", "image_ref")
+	nestedFix := repoFix("runner", "nested_containers")
 	const image = "ghcr.io/acme/dev:1@sha256:0123"
 	container := func(g instance.ContainerGate, rec *ImageRecord) func(*Input) {
 		return func(in *Input) {
@@ -461,6 +462,33 @@ func TestDevImageCheck(t *testing.T) {
 		{"an unreadable default dev image setting", container(instance.ContainerGate{
 			Stage: instance.ContainerGateNoDevImage, Err: errors.New("the dev_image_default setting could not be read")}, nil),
 			want{state: Failing, fix: imageFix, detail: "The default dev image setting could not be read."}},
+		// The Nested containers stages (issue #115): pending settles by
+		// itself; every failing one points at the repo's nested_containers
+		// field.
+		{"an unresolvable inherited nested default points at the nested field", container(instance.ContainerGate{
+			Stage: instance.ContainerGateNestedUnresolved, Err: errors.New("cannot resolve Nested containers")}, nil),
+			want{state: Failing, fix: nestedFix,
+				detail: "This repository inherits the global Nested containers default, which is not set to on or off."}},
+		{"nested on without nested support on this server", container(instance.ContainerGate{
+			Stage: instance.ContainerGateNestedUnavailable, Nested: true, Err: errors.New("no nested containers support")}, nil),
+			want{state: Failing, fix: nestedFix, detail: "Nested containers are on, but this server does not support them."}},
+		{"the nested preflight has not finished: pending, nothing to fix", container(instance.ContainerGate{
+			Stage: instance.ContainerGateNestedPending, Nested: true, Err: errors.New("retry in a moment")}, nil),
+			want{state: Pending, detail: "The nested containers preflight has not finished yet."}},
+		{"a failed nested preflight names its first actionable failure", container(instance.ContainerGate{
+			Stage: instance.ContainerGateNestedFailed, Nested: true,
+			NestedFailures: []podmanx.Failure{
+				{Check: podmanx.CheckNestedTun, Detail: "/dev/net/tun does not exist", Hint: "modprobe tun"},
+				{Check: podmanx.CheckNestedProbe, Detail: "the nested self-test failed", Hint: "check crun"},
+			}}, nil),
+			want{state: Failing, fix: nestedFix,
+				detail: "The nested containers preflight failed: /dev/net/tun does not exist (modprobe tun) — and 1 more."}},
+		{"a failed nested preflight without failures still reads as a sentence", container(instance.ContainerGate{
+			Stage: instance.ContainerGateNestedFailed, Nested: true}, nil),
+			want{state: Failing, fix: nestedFix, detail: "The nested containers preflight failed."}},
+		{"an open nested gate reports the image like any other", container(instance.ContainerGate{
+			Stage: instance.ContainerGateOpen, Image: image, Nested: true}, &ImageRecord{OK: true}),
+			want{state: Passing, detail: "The dev image is present on this server."}},
 		{"an open gate with the image never ensured is left out", container(open, nil), want{absent: true}},
 		{"an open gate with the image present passes", container(open, &ImageRecord{OK: true}),
 			want{state: Passing, detail: "The dev image is present on this server."}},

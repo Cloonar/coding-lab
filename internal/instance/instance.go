@@ -234,6 +234,13 @@ type Options struct {
 	// inode; see agentapi.SocketDir). Also the anchor of the container-side
 	// LAB_URL rewrite: a container always talks over this mounted socket.
 	AgentSockDir string
+	// Nested is the Nested containers runtime (ADR-0086, issue #115) —
+	// cmd/lab's *nested.Service, wired whenever container config is
+	// present. nil means nested containers are unavailable on this server:
+	// a container spawn whose effective knob is on is refused
+	// (ContainerGateNestedUnavailable), and every other spawn is unchanged.
+	// Must be a true nil, never a typed nil pointer, when absent.
+	Nested NestedRuntime
 
 	// --- OneCLI credential-gateway wiring (issue #24 / ADR-0067). All
 	// optional, and the same shape as the container block above: with OneCLI
@@ -362,6 +369,11 @@ type Service struct {
 	containerPreflight   func() (podmanx.Result, bool)
 	imageEnsured         func(repoID, ref string, err error) // nil = not reported
 	agentSockDir         string
+	// nested is Options.Nested (nil = unavailable); serviceUID/serviceGID
+	// are the ids a nested run's entry program drops to — os.Getuid and
+	// os.Getgid, set in New, pinned by tests.
+	nested                 NestedRuntime
+	serviceUID, serviceGID int
 
 	// OneCLI credential-gateway wiring (issue #24 / ADR-0067; see the Options
 	// fields). onecli nil or oneCLIGatewayURL empty = the integration is off.
@@ -494,6 +506,9 @@ func New(o Options) (*Service, error) {
 		containerPreflight:   o.ContainerPreflight,
 		imageEnsured:         o.ImageEnsured,
 		agentSockDir:         o.AgentSockDir,
+		nested:               o.Nested,
+		serviceUID:           os.Getuid(),
+		serviceGID:           os.Getgid(),
 
 		onecli:           o.OneCLI,
 		oneCLIGatewayURL: o.OneCLIGatewayURL,

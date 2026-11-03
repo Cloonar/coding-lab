@@ -35,6 +35,7 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/instancehome"
 	"git.cloonar.com/Cloonar/coding-lab/internal/logx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/metrics"
+	"git.cloonar.com/Cloonar/coding-lab/internal/nested"
 	"git.cloonar.com/Cloonar/coding-lab/internal/onecli"
 	"git.cloonar.com/Cloonar/coding-lab/internal/podmanx"
 	"git.cloonar.com/Cloonar/coding-lab/internal/presence"
@@ -573,6 +574,14 @@ func run() int {
 	// restart needed. Repeat verdicts log only when the failure set changes;
 	// a steady-state outage stays one warning, not one per minute.
 	var containerPreflight func() (podmanx.Result, bool)
+	// The Nested containers runtime (issue #115 / ADR-0086), built inside the
+	// same container-config branch: nestedRuntime and nestedHooks stay a TRUE
+	// nil on a host-only deployment (never a typed nil *nested.Service), so
+	// instance and httpapi see "unavailable" and change nothing.
+	var (
+		nestedRuntime instance.NestedRuntime
+		nestedHooks   httpapi.NestedHooks
+	)
 	if cfg.ContainerImage != "" || len(cfg.ContainerToolsImages) > 0 {
 		// lab OWNS the container runtime env (ADR-0060): rootless podman's
 		// systemd cgroup manager reaches the lab user's user@<uid>.service
@@ -648,6 +657,50 @@ func run() int {
 				}
 			}
 		}()
+
+		// Nested containers (issue #115 / ADR-0086). The seccomp profile is
+		// written at every startup, nested or not — a few kilobytes, and a
+		// knob turned on later must find it; a failed write is logged and
+		// reported again by the nested probe, which every nested spawn is then
+		// refused on. The nested checks run only when nested containers are on
+		// somewhere (EnabledAnywhere), so a host on which nobody uses them pays
+		// nothing; they wait for the main preflight above to pass (they probe
+		// with the tools image it pulls) and publish their verdict once, after
+		// which OnVerdict announces the container repos exactly as the main
+		// preflight does. An unknowable answer (a broken
+		// nested_containers_default with no repo pinned on) is logged and
+		// kicked anyway: an inheriting spawn is refused on such a default
+		// regardless, and the probe makes the verdict ready the moment the
+		// operator repairs it. Later knob changes kick through the settings
+		// and repo PATCH hooks, and a spawn that finds no verdict kicks too.
+		// The shared image store is refreshed once at startup — best effort,
+		// a no-op on the seeded empty list — and again on every save of it.
+		nestedSvc := nested.New(ctx, nested.Config{
+			PodmanBin:   cfg.PodmanBin,
+			StateDir:    cfg.StateDir,
+			ToolsImages: cfg.ContainerToolsImages,
+			Settings:    st,
+			Run:         podmanx.ExecRunner(),
+			Deps:        podmanx.RealDeps(),
+			Preflight:   gate.Result,
+			Log:         logger,
+			OnVerdict:   func() { announceContainerRepos(ctx, st, readinessRec) },
+		})
+		if err := nestedSvc.WriteSeccomp(); err != nil {
+			logger.Error("writing the nested containers seccomp profile", "component", "main", "err", err)
+		}
+		go func() {
+			on, err := nestedSvc.EnabledAnywhere(ctx)
+			if err != nil {
+				logger.Warn("cannot tell whether nested containers are on anywhere; running the nested checks anyway",
+					"component", "main", "err", err)
+			}
+			if on || err != nil {
+				nestedSvc.Kick()
+			}
+			nestedSvc.RefreshCache()
+		}()
+		nestedRuntime, nestedHooks = nestedSvc, nestedSvc
 	}
 
 	// Previews (issue #105): `labctl expose <name> <port>` in a run tunnels
@@ -811,6 +864,10 @@ func run() int {
 			ContainerToolsImages: cfg.ContainerToolsImages,
 			ContainerPreflight:   containerPreflight,
 			AgentSockDir:         agentapi.SocketDir(cfg.StateDir),
+			// Nested containers (issue #115): the gate's nested stages and a
+			// nested run's seccomp profile and shared store. nil on host-only
+			// deployments.
+			Nested: nestedRuntime,
 			// The readiness recorder learns whether a dev image is present
 			// from the spawn that pulled it (issue #61) — the only place
 			// image presence is ever checked.
@@ -1191,6 +1248,10 @@ func run() int {
 		// The deployed fallback dev image (issue #55 / ADR-0071), reported
 		// read-only in the settings response as dev_image_fallback.
 		DevImageFallback: cfg.ContainerImage,
+		// The Nested containers save hooks (issue #115): kick the nested
+		// preflight, refresh the shared image store. nil on host-only
+		// deployments.
+		Nested: nestedHooks,
 		// The session cookie's Domain (issue #26): "" in every deployment but
 		// --onecli-dashboard=subdomain, which needs the parent domain so lab's
 		// session reaches onecli.<domain> and forward-auth can see it.
