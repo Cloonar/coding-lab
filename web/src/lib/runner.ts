@@ -23,3 +23,14 @@ export function runnerName(value: string | null | undefined): string | null {
   if (value === 'host') return 'Host';
   return null;
 }
+
+/**
+ * The Nested containers help (issue #115, ADR-0086), word for word on both
+ * pages: the repo's own pick (repo-settings › Runner) and the global default
+ * (settings › Runner). The field's label says "Nested containers".
+ */
+export const NESTED_CONTAINERS_HINT =
+  "Lets a run start its own rootless podman containers (ddev, docker compose, buildx). Widens the run's kernel surface and adds several gigabytes of per-run storage.";
+
+/** Said wherever Nested containers shows while the effective Runner is host. */
+export const NESTED_HOST_NOTE = 'Ignored under the host runner.';

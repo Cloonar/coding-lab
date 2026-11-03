@@ -1067,6 +1067,21 @@ describe('settings endpoints', () => {
     expect(normalizeSettings({ max_instances: 6 })).not.toHaveProperty('dialog_timeout_minutes');
   });
 
+  it('normalizeSettings keeps the nested containers settings (issue #115)', () => {
+    expect(
+      normalizeSettings({
+        nested_containers_default: 'true', // TEXT column tolerance
+        nested_image_cache: 'docker.io/library/debian:trixie\nghcr.io/acme/dev:1',
+      }),
+    ).toEqual({
+      nested_containers_default: true,
+      nested_image_cache: 'docker.io/library/debian:trixie\nghcr.io/acme/dev:1',
+    });
+    expect(normalizeSettings({ nested_containers_default: false, nested_image_cache: '' })).toEqual(
+      { nested_containers_default: false, nested_image_cache: '' },
+    );
+  });
+
   it('normalizeSettings tolerates the {settings} envelope and non-objects', () => {
     expect(normalizeSettings({ settings: { max_instances: 4 } })).toEqual({ max_instances: 4 });
     expect(normalizeSettings(null)).toEqual({});

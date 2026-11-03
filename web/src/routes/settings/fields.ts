@@ -69,6 +69,9 @@ export interface GlobalDrafts {
   container_memory: string;
   container_pids: string;
   container_nofile: string;
+  nested_containers_default: boolean;
+  /** The image list as typed: one ref per line. */
+  nested_image_cache: string;
   // General
   git_author_name: string;
   git_author_email: string;
@@ -124,6 +127,25 @@ const required =
   (message: string) =>
   (draft: string): string | null =>
     draft.trim() === '' ? message : null;
+
+/** The refs of an image list as the server stores them: trimmed, no blank lines. */
+export function imageListLines(draft: string): string[] {
+  return draft
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+}
+
+/**
+ * The server's one rule for the image list (issue #115): one ref per line, so
+ * a line with whitespace inside it is refused. Checked here first, naming the
+ * line as the operator counts them.
+ */
+export function validateImageList(draft: string): string | null {
+  const lines = draft.split('\n');
+  const bad = lines.findIndex((line) => /\s/.test(line.trim()));
+  return bad === -1 ? null : `Line ${bad + 1} contains a space. Put one image ref on each line.`;
+}
 
 // --- wire helpers -------------------------------------------------------------
 
@@ -352,6 +374,24 @@ export const GLOBAL_FIELDS: {
     section: 'runner',
     label: 'Open files',
     min: 1,
+  }),
+  // A plain bool, seeded false server-side (issue #115, ADR-0086): an absent
+  // key reads off. The bottom layer of every repo's Nested containers.
+  nested_containers_default: field('nested_containers_default', {
+    section: 'runner',
+    label: 'Nested containers',
+    seed: (s) => s.nested_containers_default === true,
+    wire: same,
+  }),
+  // One image ref per line, seeded "". Sent the way the server stores it
+  // (trimmed lines, blanks dropped), so a stray blank line or indent is no
+  // change — and the dirty check compares exactly that.
+  nested_image_cache: field('nested_image_cache', {
+    section: 'runner',
+    label: 'Nested image cache',
+    seed: (s) => text(s.nested_image_cache),
+    wire: (draft) => imageListLines(draft).join('\n'),
+    validate: validateImageList,
   }),
   // --- General ------------------------------------------------------------------
   git_author_name: field('git_author_name', {

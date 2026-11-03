@@ -112,6 +112,8 @@ export function baseSettings(): Record<string, unknown> {
     container_memory: '8g',
     container_pids: 4096,
     container_nofile: 16384,
+    nested_containers_default: false,
+    nested_image_cache: '',
   };
 }
 
@@ -236,6 +238,15 @@ export function stubApi(): void {
         const next = { ...h.settingsOnServer, ...patch };
         const ref = patch.dev_image_default;
         if (typeof ref === 'string' && ref.trim() !== '') next.dev_image_default = ref + PINNED;
+        // The image list is stored normalized: trimmed lines, no blank ones.
+        const cache = patch.nested_image_cache;
+        if (typeof cache === 'string') {
+          next.nested_image_cache = cache
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line !== '')
+            .join('\n');
+        }
         h.settingsOnServer = next;
         return jsonResponse(200, { settings: { ...next } });
       }

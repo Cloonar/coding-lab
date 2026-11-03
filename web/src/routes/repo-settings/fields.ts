@@ -63,6 +63,8 @@ export interface RepoDrafts {
   container_memory: string;
   container_pids: string;
   container_nofile: string;
+  /** Tri-state as a string: '' = inherit, 'true' / 'false' = an explicit pick. */
+  nested_containers: string;
   // Autoland
   autoland_enabled: boolean;
   auto_merge: boolean;
@@ -321,6 +323,15 @@ export const REPO_FIELDS: { [K in keyof Required<RepoPatch>]: RepoFieldSpec<K> }
     seed: (r) => (r.container_nofile === null ? '' : String(r.container_nofile)),
     wire: normInt,
     validate: optionalWholeNumber(1),
+    inherit: '',
+  }),
+  // Tri-state (issue #115), like the remote controls: null inherits the
+  // global nested_containers_default, false is an explicit off.
+  nested_containers: field('nested_containers', {
+    section: 'runner',
+    label: 'Nested containers',
+    seed: (r) => boolDraft(r.nested_containers),
+    wire: normBool,
     inherit: '',
   }),
   // --- Autoland -----------------------------------------------------------------

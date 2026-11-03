@@ -94,6 +94,15 @@ export const TEXT_SETTING_KEYS = [
    */
   'dev_image_fallback',
   /**
+   * The nested image cache (issue #115, ADR-0086): multi-line text, one image
+   * ref per line, seeded "". Lab pulls each ref into the shared read-only
+   * store nested runs use, at startup and whenever the list is saved — best
+   * effort, a failed pull is logged and never refuses a spawn. The server
+   * normalizes on save (trims each line, drops blank ones) and refuses a line
+   * that contains whitespace with a 400 naming this field.
+   */
+  'nested_image_cache',
+  /**
    * Read-only, server-injected (issue #52): the built-in seed-prompt template
    * with literal <N>/<BRANCH> tokens un-interpolated. Listed here only so
    * normalizeSettings' loop below picks it up for Settings.tsx to read as the
@@ -118,11 +127,17 @@ export const TEXT_SETTING_KEYS = [
  * whether a merge deletes the PR/CR head branch on origin. It has no inherit
  * state (no per-repo override), so unlike the AFK override it is never null on
  * the wire. Edited in global Settings › General.
+ *
+ * `nested_containers_default` (issue #115, ADR-0086) is a plain global bool
+ * seeded false: the Nested containers value of every repo whose own
+ * `nested_containers` is null. It is the bottom layer, never null on the wire.
+ * Edited in global Settings › Runner.
  */
 export const BOOL_SETTING_KEYS = [
   'spawn_remote_default',
   'spawn_remote_default_afk',
   'merge_delete_head',
+  'nested_containers_default',
 ] as const;
 
 export type IntSettingKey = (typeof INT_SETTING_KEYS)[number];

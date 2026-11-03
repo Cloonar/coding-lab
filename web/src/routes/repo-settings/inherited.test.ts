@@ -41,6 +41,7 @@ const ANSWER: RepoInherited = {
   container_memory: '8g',
   container_pids: 4096,
   container_nofile: 16384,
+  nested_containers: false,
 };
 
 const text = (
