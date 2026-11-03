@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,8 +63,14 @@ type RegistryEntry struct {
 	// StatusUpdatedAt is when Status last changed (unix millis). Read for the
 	// record only: the status is event-driven, not a heartbeat, so lab applies
 	// NO age bound (issue #79 decision 3) — a dead CLI is caught by its pid
-	// (pidAlive) and tmux liveness, never by a stale timestamp.
+	// (entryAlive) and tmux liveness, never by a stale timestamp.
 	StatusUpdatedAt int64 `json:"statusUpdatedAt"`
+	// PidDomain names the pid namespace PID is valid in, written by the CLI
+	// since 2.1.284 as linux:<machine-id>:pid:[<pidns inode>] (compat §2). A
+	// container run's claude writes its in-container pid, which means nothing
+	// on the host; entryAlive compares the namespace half against the lab
+	// process's own /proc/self/ns/pid and probes the pid only when they match.
+	PidDomain string `json:"pidDomain"`
 }
 
 // BridgeURL renders the claude.ai deep link for a bridge session id. The
@@ -107,7 +114,7 @@ func newestLiveEntry(registryDir, dir string, want func(RegistryEntry) bool) (Re
 		if json.Unmarshal(b, &e) != nil {
 			continue // malformed sibling never poisons the scan
 		}
-		if !want(e) || e.Cwd != dir || !pidAlive(e.PID) {
+		if !want(e) || e.Cwd != dir || !entryAlive(e, selfPidNamespace()) {
 			continue
 		}
 		if !found || e.StartedAt > best.StartedAt {
@@ -128,7 +135,7 @@ func bridgeURLForDir(registryDir, dir string) string {
 }
 
 // registryEntryForDir is the chat surface's registry pass: the entry of the
-// newest live claude process in dir that carries a sessionId. Unlike the deep
+// newest live (entryAlive) claude process in dir that carries a sessionId. Unlike the deep
 // link, sessionId is present from process start (it is the transcript
 // filename), so it needs no bridge-connect wait. LocateTranscript (the
 // transcript identity) and ReadChat (the status overlay) both select through
@@ -138,9 +145,62 @@ func registryEntryForDir(registryDir, dir string) (RegistryEntry, bool) {
 	return newestLiveEntry(registryDir, dir, func(e RegistryEntry) bool { return e.SessionID != "" })
 }
 
-// pidAlive reports whether pid is a live process. Signal 0 probes
-// existence without delivering anything; EPERM still proves liveness (the
-// pid exists, just owned by someone else).
+// entryAlive reports whether the claude process behind a registry entry is
+// still running, as far as lab can tell from the host. self is the lab
+// process's own pid-namespace token (selfPidNamespace). The entry's pid is a
+// fact of the pid namespace the CLI wrote it in, so a kill -0 against it is
+// meaningful only when that namespace is lab's own:
+//
+//   - same namespace (the host runner): probe the pid — a SIGKILLed
+//     predecessor's leftover file in a reused worktree must still lose;
+//   - another namespace (a container run, whose claude is pid 2 under --init
+//     or pid 9 or so under the nested-containers entry program), or no
+//     parsable pidDomain at all (an older CLI): live. The host pid of the
+//     same number is a different process, so probing it is noise either
+//     way; a dead container CLI is caught by tmux liveness, and --rm tears
+//     the container down with the HOME holding its registry. Absent means
+//     "cannot check", never "dead", so an older CLI does not regress;
+//   - self unknown (/proc/self/ns/pid unreadable): probe every entry, which
+//     is exactly the pre-pidDomain behaviour.
+func entryAlive(e RegistryEntry, self string) bool {
+	if self == "" {
+		return pidAlive(e.PID)
+	}
+	ns, ok := pidNamespaceOf(e.PidDomain)
+	if !ok || ns != self {
+		return true
+	}
+	return pidAlive(e.PID)
+}
+
+// pidNamespaceOf extracts the pid-namespace token ("pid:[<inode>]") from a
+// registry pidDomain of the form linux:<machine-id>:pid:[<inode>]. Only that
+// token is compared: a container carries its own /etc/machine-id, so the
+// machine-id half differs between a container run and the host even though
+// the host is the same machine. Anything without the token is unparsable.
+func pidNamespaceOf(domain string) (string, bool) {
+	i := strings.LastIndex(domain, ":pid:[")
+	if i < 0 || !strings.HasSuffix(domain, "]") {
+		return "", false
+	}
+	return domain[i+1:], true
+}
+
+// selfPidNamespace is the lab process's own pid-namespace token, the target
+// of readlink /proc/self/ns/pid ("pid:[<inode>]" — the same spelling the CLI
+// embeds in pidDomain), resolved once. "" when the link cannot be read, which
+// makes entryAlive fall back to probing every entry.
+var selfPidNamespace = sync.OnceValue(func() string {
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return ""
+	}
+	return ns
+})
+
+// pidAlive reports whether pid is a live process in lab's own pid namespace.
+// Signal 0 probes existence without delivering anything; EPERM still proves
+// liveness (the pid exists, just owned by someone else).
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false

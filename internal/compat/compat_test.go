@@ -133,8 +133,11 @@ func TestCompat_RegistryFixtures284_parse(t *testing.T) {
 
 // registryRig is a run's private instance HOME holding ONE live session
 // registry entry built from a 2.1.284 capture (compat §2): pid rewritten to
-// this test process (so the pidAlive filter passes), cwd to a temp worktree,
-// plus any overrides. A sibling `<pid>.<sha256>.key` file — the CLI's peer
+// this test process and cwd to a temp worktree, plus any overrides. The
+// capture's pidDomain names the capturing host's pid namespace, so the entry
+// passes the liveness filter either way — as a foreign-namespace entry
+// (always live) or, on a host whose own namespace happens to share the
+// inode, as a live same-namespace pid. A sibling `<pid>.<sha256>.key` file — the CLI's peer
 // token, which sits beside the entry on 2.1.284 — carries a JSON body that
 // would select a different, louder entry if lab ever read it: only `*.json`
 // is read. The provider is the real claudecode.New one.
@@ -727,6 +730,52 @@ func TestCompat_ClearRotation_missingTranscript(t *testing.T) {
 	}
 	if _, err := r.p.ReadChat(provider.ReadSpec{RunID: "run_1", Worktree: r.wt, TranscriptPath: fresh}); !errors.Is(err, provider.ErrTranscriptGone) {
 		t.Errorf("ended read of the missing transcript err = %v; want ErrTranscriptGone", err)
+	}
+}
+
+// A container run's registry entry (compat.md §2, container-namespace rule):
+// the CLI inside the container writes its in-container pid — 9 under the
+// nested-containers entry program (ADR-0086), 2 under --init — with a
+// pidDomain naming the container's pid namespace. That pid means nothing on
+// the host (no such process, or a kernel thread), so lab must not probe it:
+// the entry is selected for the transcript and the status exactly as a host
+// entry is, through the real LocateTranscript and ReadChat. Two such entries
+// in one worktree resolve to the newest startedAt. The shape is the one
+// observed live on 2026-11-03 (lab 0.1.0+fa79864a, CLI 2.1.284):
+// {"pid":9,"pidDomain":"linux:<container machine-id>:pid:[<inode>]"}.
+func TestCompat_RegistryContainerEntry_selected(t *testing.T) {
+	const containerDomain = "linux:ea8e7833ea8e7833ea8e7833ea8e7833:pid:[4026533686]"
+	// pid 1<<30 exceeds pid_max, so it exists in NO host namespace: the only
+	// way this entry is selected is by not probing it.
+	r := newRegistryRig(t, "registry-busy-2.1.284.json",
+		map[string]any{"pid": 1 << 30, "pidDomain": containerDomain})
+	if got := filepath.Base(r.locate(t)); got != "33333333-3333-4333-8333-333333333333.jsonl" {
+		t.Fatalf("LocateTranscript on a container entry = %q; want the entry's sessionId transcript", got)
+	}
+	chat := r.read(t, fixtureLines(t, "transcript-asyncagent-live-2.1.204.jsonl", -1))
+	if chat.State != provider.StateWorking {
+		t.Errorf("container entry's busy status = %q; want working (the registry status is read, not dropped)", chat.State)
+	}
+
+	// A second container entry for the same worktree (a SIGKILLed predecessor
+	// whose file survived, or the newer CLI after it): newest startedAt wins,
+	// the pid still never consulted.
+	b, err := os.ReadFile(filepath.Join("testdata", "registry-idle-2.1.284.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newer map[string]any
+	if err := json.Unmarshal(b, &newer); err != nil {
+		t.Fatal(err)
+	}
+	newer["pid"], newer["pidDomain"], newer["cwd"] = 9, containerDomain, r.wt
+	newer["startedAt"] = int64(1791550934220) + 1 // one ms after the busy capture
+	nb, _ := json.Marshal(newer)
+	if err := os.WriteFile(filepath.Join(r.home, ".claude", "sessions", "9.json"), nb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Base(r.locate(t)); got != "11111111-1111-4111-8111-111111111111.jsonl" {
+		t.Errorf("LocateTranscript with two container entries = %q; want the newest startedAt's transcript", got)
 	}
 }
 
