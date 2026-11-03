@@ -9,9 +9,13 @@
 //   - the nested preflight verdict (Kick, Verdict): podmanx.NestedPreflight
 //     run once in the background and published atomically, the way
 //     podmanx.Gate publishes the main preflight;
-//   - the shared read-only image store (SharedStore, RefreshCache): the
-//     directory nested runs mount and the best-effort pulls of the
-//     nested_image_cache list into it.
+//   - the image archives (ImageArchives, RefreshCache, issue #124): the
+//     best-effort pulls of the nested_image_cache list into lab's host-side
+//     pull cache, a docker-archive per ref saved from it into the archives
+//     directory nested runs mount read-only, and the prune of archives no
+//     longer listed. The image's start-nested-podman helper imports every
+//     archive into the run's own storage, so the run's podman applies its
+//     own id mapping (a graphroot shared across mappings does not).
 //
 // The gate on all of it is the caller's. cmd/lab kicks the checks at startup
 // only when nested containers are on anywhere (EnabledAnywhere), so a host on
@@ -26,8 +30,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -53,11 +59,12 @@ type Settings interface {
 // OnVerdict is required in production; tests set what they exercise.
 type Config struct {
 	// PodmanBin is the podman binary (--podman): the nested probe's and the
-	// shared-store pulls'.
+	// image-cache refresh's (pull, inspect, save).
 	PodmanBin string
-	// StateDir is lab's state dir: the seccomp profile and the shared
-	// store live under <state>/containers (podmanx.NestedSeccompPath,
-	// podmanx.SharedStorePath).
+	// StateDir is lab's state dir: the seccomp profile, the pull cache and
+	// the image archives live under <state>/containers
+	// (podmanx.NestedSeccompPath, podmanx.PullCachePath,
+	// podmanx.ImageArchivesPath).
 	StateDir string
 	// ToolsImages is --container-tools-image (provider id → ref). The probe
 	// runs the first non-empty ref in sorted provider order: every
@@ -66,8 +73,8 @@ type Config struct {
 	ToolsImages map[string]string
 	// Settings is the store (see the interface).
 	Settings Settings
-	// Run is the exec seam the shared-store pulls run through
-	// (podmanx.ExecRunner in production, a recorder in tests).
+	// Run is the exec seam the image-cache refresh's podman commands run
+	// through (podmanx.ExecRunner in production, a recorder in tests).
 	Run podmanx.CmdRunner
 	// Deps are NestedPreflight's probes (podmanx.RealDeps in production).
 	Deps podmanx.Deps
@@ -113,7 +120,7 @@ type Service struct {
 	kicked  atomic.Bool
 	verdict atomic.Pointer[[]podmanx.Failure]
 
-	// The shared-store refresh's coalescing state (RefreshCache).
+	// The image-cache refresh's coalescing state (RefreshCache).
 	refreshMu      sync.Mutex
 	refreshing     bool
 	refreshPending bool
@@ -158,30 +165,32 @@ func (s *Service) SeccompPath() string {
 	return ""
 }
 
-// SharedStore is the shared image store's host path when that directory
-// exists, else "". A nested run mounts it only when it exists (podman
-// refuses a bind whose source is missing — RunSpec.Nested's SharedStore
-// doc), and it exists from the first Kick on, so in practice every nested
-// run gets the mount: an empty store is a stable mount that simply caches
-// nothing. Checked per call, never cached: it is a stat on the spawn path.
-func (s *Service) SharedStore() string {
-	dir := podmanx.SharedStorePath(s.cfg.StateDir)
+// ImageArchives is the image archives directory's host path when that
+// directory exists, else "". A nested run mounts it only when it exists
+// (podman refuses a bind whose source is missing — RunSpec.Nested's
+// ImageArchives doc), and it exists from the first Kick on, so in practice
+// every nested run gets the mount: an empty directory is a stable mount
+// that simply imports nothing. Checked per call, never cached: it is a stat
+// on the spawn path.
+func (s *Service) ImageArchives() string {
+	dir := podmanx.ImageArchivesPath(s.cfg.StateDir)
 	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 		return dir
 	}
 	return ""
 }
 
-// SharedStoreRunRoot is the podman --runroot of the shared-store pulls:
-// <state>/containers/shared-store-run, beside the store itself (ADR-0086:
-// "a --runroot beside it"). A runroot holds podman's locks and transient
-// container state for one graphroot; the pulls need their own, because
-// pairing the shared --root with the service user's default runroot would
-// mix two stores' state in one directory. On disk rather than under
-// /run/user/<uid>: it serves only lab's pulls, which mount nothing, so
-// nothing in it outlives a pull that a reboot would need to clear.
-func SharedStoreRunRoot(stateDir string) string {
-	return podmanx.SharedStorePath(stateDir) + "-run"
+// PullCacheRunRoot is the podman --runroot of the pull cache:
+// <state>/containers/shared-store-run, beside the pull cache's graphroot
+// (ADR-0086: "a --runroot beside it"). A runroot holds podman's locks and
+// transient container state for one graphroot; the refresh needs its own,
+// because pairing the pull cache's --root with the service user's default
+// runroot would mix two stores' state in one directory. On disk rather than
+// under /run/user/<uid>: it serves only lab's pulls and saves, which mount
+// nothing, so nothing in it outlives a command that a reboot would need to
+// clear.
+func PullCacheRunRoot(stateDir string) string {
+	return podmanx.PullCachePath(stateDir) + "-run"
 }
 
 // EnabledAnywhere reports whether nested containers are on for any repo or
@@ -226,13 +235,14 @@ func (s *Service) EnabledAnywhere(ctx context.Context) (bool, error) {
 // trigger may simply call it: startup, the settings and repo PATCH hooks,
 // and a spawn the gate refused as pending.
 //
-// The first call creates the shared store's directory first — nested
-// containers are now on somewhere, and the store must exist for the run's
-// read-only mount to be stable even while the nested_image_cache list is
-// empty (ADR-0086) — logging a failure, which only costs nested runs the
-// mount. Then, in the background, it waits for an OK main preflight (Config.
-// Preflight), runs podmanx.NestedPreflight once, publishes the verdict,
-// logs each failure (or the pass) and calls OnVerdict.
+// The first call creates the pull cache and image archives directories
+// first — nested containers are now on somewhere, and the archives
+// directory must exist for the run's read-only mount to be stable even while
+// the nested_image_cache list is empty (ADR-0086) — logging a failure, which
+// only costs nested runs the mount. Then, in the background, it waits for an
+// OK main preflight (Config.Preflight), runs podmanx.NestedPreflight once,
+// publishes the verdict, logs each failure (or the pass) and calls
+// OnVerdict.
 //
 // A verdict is final until restart: both checks report host state — the tun
 // device, systemd mode's cgroup handoff, crun, the tools image's labctl —
@@ -244,7 +254,7 @@ func (s *Service) Kick() {
 		return
 	}
 	if err := s.ensureStoreDir(); err != nil {
-		s.log.Warn("creating the nested shared image store", "component", "nested", "err", err)
+		s.log.Warn("creating the nested image cache directories", "component", "nested", "err", err)
 	}
 	s.bg.Go(func() {
 		if !s.awaitMainPreflight() {
@@ -320,35 +330,53 @@ func (s *Service) toolsImage() string {
 	return ""
 }
 
-// ensureStoreDir creates the shared store's directory, 0700 like the
-// <state>/containers dir around it (podmanx.WriteNestedSeccomp's reasons:
-// only the service user reads it, as lab and as the rootless podman of every
-// nested run, which runs under the same uid with keep-id).
+// ensureStoreDir creates the pull cache's graphroot and the image archives
+// directory, 0700 like the <state>/containers dir around them
+// (podmanx.WriteNestedSeccomp's reasons: only the service user reads them,
+// as lab and as the rootless podman of every nested run, which runs under
+// the same uid with keep-id).
 func (s *Service) ensureStoreDir() error {
-	return os.MkdirAll(podmanx.SharedStorePath(s.cfg.StateDir), 0o700)
+	if err := os.MkdirAll(podmanx.PullCachePath(s.cfg.StateDir), 0o700); err != nil {
+		return err
+	}
+	return os.MkdirAll(podmanx.ImageArchivesPath(s.cfg.StateDir), 0o700)
 }
 
-// RefreshCache pulls every ref of the nested_image_cache list into the
-// shared image store, in the background, and returns at once. Called at
-// startup and after every settings save that included the list.
+// RefreshCache brings the image archives in line with the
+// nested_image_cache list, in the background, and returns at once. Called
+// at startup and after every settings save that included the list.
 //
-// Best effort, all the way: an unreadable list, a store directory that
-// cannot be created, and every failed pull are LOGGED (component "nested",
-// a pull failure naming its ref) and never returned or turned into a
-// refusal — a ref missing from the cache only means a nested run pulls it
-// into its own storage (ADR-0086). An empty list pulls nothing and creates
-// nothing: the store directory is Kick's to create when nested containers
-// are on, and an operator who lists refs has asked for the directory too.
+// One pass (refreshOnce) handles every listed ref in list order, as the
+// service user, with the pull cache as graphroot (podmanx.PullCachePath,
+// runroot PullCacheRunRoot):
 //
-// Each pull is `<podman> --root <store> --runroot <store>-run pull <ref>`
-// as the service user: --root makes the shared store the pull's graphroot
-// (podmanx.SharedStorePath), and the runroot beside it is
-// SharedStoreRunRoot's. Pulls run one ref at a time, in list order.
+//  1. `<podman> --root <cache> --runroot <cache>-run pull <ref>` — the pull
+//     cache keeps unchanged layers, so only changed ones are downloaded;
+//  2. `… image inspect --format {{.Id}} <ref>` — the pulled image's id;
+//  3. when that id differs from the ref's sidecar (archiveNames), `… save
+//     --format docker-archive -o <archives>/<name>.tar.tmp <ref>`, then a
+//     rename onto <name>.tar and an atomic write of the id into the
+//     sidecar — so a run's helper never sees a partial archive, one tag
+//     never lives in two archives, and an unchanged image is never
+//     rewritten (a restart does not re-save gigabytes).
+//
+// A pass that ran to completion then prunes the archives directory: every
+// archive, sidecar or temp file that belongs to no listed ref is removed
+// (pruneArchives). An emptied list therefore removes every archive.
+//
+// Best effort, all the way: an unreadable list, a directory that cannot be
+// created, and every failed pull, inspect, save or removal are LOGGED
+// (component "nested", naming the ref or file) and never returned or turned
+// into a refusal — a ref missing from the archives only means a nested run
+// pulls it into its own storage (ADR-0086). An empty list pulls nothing and
+// creates nothing: the directories are Kick's to create when nested
+// containers are on, and an operator who lists refs has asked for them too.
 //
 // Serialized and coalesced: a call while a refresh is running schedules
 // exactly one more refresh after it, however many calls arrive meanwhile,
 // and that refresh re-reads the list — so the last saved list is always
-// pulled, and two refreshes never write the store at once.
+// archived, and two refreshes never write the pull cache or the archives at
+// once.
 func (s *Service) RefreshCache() {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
@@ -372,30 +400,48 @@ func (s *Service) RefreshCache() {
 	})
 }
 
-// refreshOnce is one pass of RefreshCache: read the list, create the store
-// directory, pull each ref.
+// Archive file suffixes in the image archives directory: <name>.tar is the
+// docker-archive the run's helper imports (it loads *.tar only), <name>.id
+// the sidecar holding the saved image id, and tmpSuffix marks a file being
+// written (<name>.tar.tmp, <name>.id.tmp), renamed into place when complete.
+const (
+	archiveSuffix = ".tar"
+	sidecarSuffix = ".id"
+	tmpSuffix     = ".tmp"
+)
+
+// refreshOnce is one pass of RefreshCache: read the list, create the
+// directories, archive each ref, prune what is no longer listed.
 func (s *Service) refreshOnce() {
 	key := store.SettingNestedImageCache
 	raw, err := s.cfg.Settings.GetSetting(s.ctx, key)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			s.log.Warn("reading the nested image cache list", "component", "nested", "setting", key, "err", err)
-		}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		raw = "" // never saved: the empty list
+	case err != nil:
+		// An unknown list must not prune: the archives may all still be
+		// listed.
+		s.log.Warn("reading the nested image cache list", "component", "nested", "setting", key, "err", err)
 		return
 	}
 	refs := cacheRefs(raw)
+	archives := podmanx.ImageArchivesPath(s.cfg.StateDir)
 	if len(refs) == 0 {
+		// Nothing to pull and nothing to create, but archives of refs the
+		// operator just removed must still go.
+		if dirExists(archives) {
+			s.pruneArchives(archives, nil)
+		}
 		return
 	}
 	if err := s.ensureStoreDir(); err != nil {
-		s.log.Warn("creating the nested shared image store", "component", "nested", "err", err)
+		s.log.Warn("creating the nested image cache directories", "component", "nested", "err", err)
 		return
 	}
-	root := podmanx.SharedStorePath(s.cfg.StateDir)
-	runRoot := SharedStoreRunRoot(s.cfg.StateDir)
+	keep := make(map[string]bool, len(refs)) // archive base names of listed refs
 	for _, ref := range refs {
 		if s.ctx.Err() != nil {
-			return
+			return // cut short: an incomplete pass never prunes
 		}
 		if strings.HasPrefix(ref, "-") {
 			// The settings PATCH refuses such a line; a row written around
@@ -403,13 +449,163 @@ func (s *Service) refreshOnce() {
 			s.log.Warn("skipping a nested image cache entry that is not an image ref", "component", "nested", "ref", ref)
 			continue
 		}
-		if _, err := s.cfg.Run(s.ctx, s.cfg.PodmanBin, "--root", root, "--runroot", runRoot, "pull", ref); err != nil {
-			s.log.Warn("pulling into the nested shared image store failed; nested runs pull this image themselves", "component", "nested",
-				"ref", ref, "err", err)
+		name := archiveName(ref)
+		if keep[name] {
+			s.log.Warn("skipping a nested image cache entry whose archive name an earlier entry already uses", "component", "nested",
+				"ref", ref, "archive", name+archiveSuffix)
 			continue
 		}
-		s.log.Info("pulled into the nested shared image store", "component", "nested", "ref", ref)
+		// Kept even when the pull or save below fails: a stale archive of
+		// a still-listed ref still saves a run most of its pull.
+		keep[name] = true
+		s.archiveRef(archives, name, ref)
 	}
+	if s.ctx.Err() != nil {
+		return
+	}
+	s.pruneArchives(archives, keep)
+}
+
+// archiveRef pulls ref into the pull cache and, when the pulled image's id
+// differs from the one recorded in <name>.id (or the archive is missing),
+// saves it to <archives>/<name>.tar via a temp file and records the new id.
+// Every failure is logged naming the ref; nothing is returned.
+func (s *Service) archiveRef(archives, name, ref string) {
+	root := podmanx.PullCachePath(s.cfg.StateDir)
+	podman := func(args ...string) ([]byte, error) {
+		return s.cfg.Run(s.ctx, s.cfg.PodmanBin, append([]string{"--root", root, "--runroot", PullCacheRunRoot(s.cfg.StateDir)}, args...)...)
+	}
+	fail := func(msg string, err error) {
+		s.log.Warn(msg+"; the archive stays as it was (a nested run lacking it pulls the image itself)", "component", "nested", "ref", ref, "err", err)
+	}
+
+	if _, err := podman("pull", ref); err != nil {
+		fail("pulling into the nested image pull cache failed", err)
+		return
+	}
+	out, err := podman("image", "inspect", "--format", "{{.Id}}", ref)
+	id := strings.TrimSpace(string(out))
+	if err == nil && id == "" {
+		err = errors.New("podman image inspect printed no image id")
+	}
+	if err != nil {
+		fail("reading the pulled nested image's id failed", err)
+		return
+	}
+
+	tarPath := filepath.Join(archives, name+archiveSuffix)
+	idPath := filepath.Join(archives, name+sidecarSuffix)
+	if old, err := os.ReadFile(idPath); err == nil && strings.TrimSpace(string(old)) == id && fileExists(tarPath) {
+		return // archived already: no write at all
+	}
+
+	tmp := tarPath + tmpSuffix
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fail("removing a stale nested image archive temp file failed", err)
+		return
+	}
+	if _, err := podman("save", "--format", "docker-archive", "-o", tmp, ref); err != nil {
+		_ = os.Remove(tmp)
+		fail("saving the nested image archive failed", err)
+		return
+	}
+	if err := os.Rename(tmp, tarPath); err != nil {
+		_ = os.Remove(tmp)
+		fail("renaming the nested image archive into place failed", err)
+		return
+	}
+	// The archive is in place; a sidecar that fails to write only costs
+	// the next pass a re-save.
+	if err := writeFileAtomic(idPath, []byte(id+"\n")); err != nil {
+		fail("recording the nested image archive's id failed", err)
+		return
+	}
+	s.log.Info("saved the nested image archive", "component", "nested", "ref", ref, "id", id, "archive", tarPath)
+}
+
+// pruneArchives removes every regular file in the archives directory that
+// is an archive or sidecar (by suffix) of no name in keep — refs dropped
+// from the list — and every leftover temp file, listed ref or not: the pass
+// that calls this has finished, and every write it made renamed or removed
+// its own temp file, so one still present is a crash's or a failed
+// removal's remnant. Only that directory's direct entries with those
+// suffixes are touched; anything else in it is left alone. Each removal and
+// each failure is logged.
+func (s *Service) pruneArchives(archives string, keep map[string]bool) {
+	entries, err := os.ReadDir(archives)
+	if err != nil {
+		s.log.Warn("listing the nested image archives for pruning failed", "component", "nested", "dir", archives, "err", err)
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		file := e.Name()
+		base, ok := archiveBase(file)
+		if !ok || (keep[base] && !strings.HasSuffix(file, tmpSuffix)) {
+			continue
+		}
+		path := filepath.Join(archives, file)
+		if err := os.Remove(path); err != nil {
+			s.log.Warn("removing a nested image archive file no listed ref uses failed", "component", "nested", "file", path, "err", err)
+			continue
+		}
+		s.log.Info("removed a nested image archive file no listed ref uses", "component", "nested", "file", path)
+	}
+}
+
+// archiveBase is the archive base name a file in the archives directory
+// belongs to — <base>.tar, <base>.id, <base>.tar.tmp, <base>.id.tmp — and
+// whether the file is one of those at all.
+func archiveBase(file string) (string, bool) {
+	file = strings.TrimSuffix(file, tmpSuffix)
+	for _, suf := range []string{archiveSuffix, sidecarSuffix} {
+		if base, ok := strings.CutSuffix(file, suf); ok && base != "" {
+			return base, true
+		}
+	}
+	return "", false
+}
+
+// archiveName is the fixed archive base name of ref: every character
+// outside [A-Za-z0-9._-] replaced by "_", e.g.
+// docker.io/ddev/ddev-webserver:v1.25.5 → docker.io_ddev_ddev-webserver_v1.25.5
+// (archive <name>.tar, sidecar <name>.id). Fixed per ref so a tag never
+// lives in two archives. Distinct refs can collide (a/b:c and a_b:c);
+// refreshOnce archives the first and skips the later ones with a warning.
+func archiveName(ref string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		}
+		return '_'
+	}, ref)
+}
+
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// writeFileAtomic writes data to path via <path>.tmp and a rename, 0600.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + tmpSuffix
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // cacheRefs splits a stored nested_image_cache value into its refs. The

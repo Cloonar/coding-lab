@@ -174,20 +174,23 @@ const (
 	// naming this key — never a silent fall back to off. Its answer only
 	// matters while the effective Runner is container. With
 	// Store.AnyRepoNestedContainers it also forms the "nested is on anywhere"
-	// gate for the startup preflight checks and the shared image store.
+	// gate for the startup preflight checks and the image archives.
 	SettingNestedContainersDefault = "nested_containers_default"
 
-	// Shared image store list (issue #115 / ADR-0086): the image refs lab
-	// pulls, best effort, into <state>/containers/shared-store — the store a
-	// nested run mounts read-only and lists under additionalimagestores, so
-	// a ref cached here is not pulled per run. One ref per line; the settings
+	// Image archives list (issue #115 / #124, ADR-0086): the image refs lab
+	// pulls, best effort, into its host-side pull cache
+	// (<state>/containers/shared-store) and saves as docker-archives into
+	// <state>/containers/image-archives — the directory a nested run mounts
+	// read-only and whose archives the image's start-nested-podman helper
+	// imports into the run's own storage, so a ref cached here is not pulled
+	// from the registry per run. One ref per line; the settings
 	// PATCH normalizes it (lines trimmed, blank lines dropped, joined with
 	// "\n") and refuses a line with whitespace inside it, so a stored value
 	// splits on "\n" into clean refs. Seeded "" (an empty list: nothing
 	// cached, every nested run pulls its own images) on the insert-if-absent
-	// footing, so an operator's list survives re-seeding. A failed pull is
-	// logged naming the ref and never refuses a spawn — a cache miss only
-	// costs the run a pull.
+	// footing, so an operator's list survives re-seeding. A failed pull
+	// or save is logged naming the ref and never refuses a spawn — a cache
+	// miss only costs the run a pull.
 	SettingNestedImageCache = "nested_image_cache"
 )
 

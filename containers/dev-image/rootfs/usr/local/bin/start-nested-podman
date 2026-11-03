@@ -15,23 +15,35 @@
 #   1. Creates the runtime dir, ${XDG_RUNTIME_DIR:-/tmp/lab-nested/run}, mode
 #      0700. Podman keeps its locks, state and run root there, and the outer
 #      argv may or may not set XDG_RUNTIME_DIR.
-#   2. Writes ~/.config/containers/storage.conf: the overlay driver and, when
-#      LAB_SHARED_STORE names an existing directory, that directory as a
-#      read-only additional image store (lab's shared image cache, mounted at
-#      its host-identical path). A user storage.conf replaces the system one
-#      entirely, so it stays this small.
-#   3. Starts `podman system service` on $XDG_RUNTIME_DIR/podman.sock, unless
+#   2. Writes ~/.config/containers/storage.conf with the overlay driver and
+#      nothing else. A user storage.conf replaces the system one entirely, so
+#      it stays this small.
+#   3. Imports lab's image archives, when LAB_IMAGE_ARCHIVES names an
+#      existing directory: every *.tar in it, in name order, with
+#      `podman load -i`, one after the other, before anything is printed on
+#      stdout (a background import would race a `ddev start` pulling the same
+#      tag). Lab writes one docker-archive per ref of its nested_image_cache
+#      list into <state>/containers/image-archives and mounts that directory
+#      read-only at its host-identical path. Archives, not a shared image
+#      store: this run's own podman applies this run's uid mapping as it
+#      imports, so every file owner comes out right; a store written by
+#      lab's podman carries lab's mapping, which a nested run does not share.
+#      Each import and each failure is logged on stderr; a failed load is
+#      skipped, never fatal. There is no skip logic: loading an image that
+#      is already present costs about a second, so a re-run stays cheap.
+#      Unset, or naming a missing directory, nothing is imported.
+#   4. Starts `podman system service` on $XDG_RUNTIME_DIR/podman.sock, unless
 #      that socket already answers.
-#   4. Starts the healthcheck runner, unless it is already running. Podman
+#   5. Starts the healthcheck runner, unless it is already running. Podman
 #      schedules healthchecks only through systemd timers and a run has no
 #      systemd, so without it every container with a healthcheck stays
 #      `starting` forever — and ddev gives up "waiting for containers" after
 #      60 s. Once a second it runs `podman healthcheck run` for every running
 #      container that defines a healthcheck.
-#   5. When ddev is installed, writes its global config: the router on 8080
+#   6. When ddev is installed, writes its global config: the router on 8080
 #      and 8443 (an unprivileged uid cannot bind 80/443) and the image's own
 #      buildx (`--docker-buildx-version=system`) instead of a download.
-#   6. Prints `export XDG_RUNTIME_DIR=...` and, as its LAST stdout line,
+#   7. Prints `export XDG_RUNTIME_DIR=...` and, as its LAST stdout line,
 #      `export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman.sock`. The runtime
 #      dir export is there because a plain `podman` in the agent's shell must
 #      use the service's runtime dir, or podman refuses with a database
@@ -60,7 +72,7 @@ log() { echo "start-nested-podman: $*" >&2; }
 die() { log "$*"; exit 1; }
 
 # The runner's body, run as `start-nested-podman __healthcheck-loop` by the
-# detached process step 4 starts. podman ps's health filter matches only a
+# detached process step 5 starts. podman ps's health filter matches only a
 # container whose healthcheck status is one of the given values; one without
 # a healthcheck has an empty status and never matches, so it is skipped (a
 # `podman healthcheck run` on it would only fail with "has no defined
@@ -117,24 +129,41 @@ mkdir -p "${conf_dir}"
   echo "# Written by start-nested-podman (ADR-0086); rewritten on every run."
   echo "[storage]"
   echo 'driver = "overlay"'
-  if [ -n "${LAB_SHARED_STORE:-}" ]; then
-    case "${LAB_SHARED_STORE}" in
-      *'"'* | *\\*)
-        log "LAB_SHARED_STORE '${LAB_SHARED_STORE}' holds a quote or backslash — not used" ;;
-      *)
-        if [ -d "${LAB_SHARED_STORE}" ]; then
-          echo ""
-          echo "[storage.options]"
-          echo "additionalimagestores = [\"${LAB_SHARED_STORE}\"]"
-        else
-          log "LAB_SHARED_STORE '${LAB_SHARED_STORE}' is not a directory — no shared image store"
-        fi ;;
-    esac
-  fi
 } >"${conf_dir}/storage.conf.tmp"
 mv -f "${conf_dir}/storage.conf.tmp" "${conf_dir}/storage.conf"
 
-# 3. API service.
+# 3. Image archives. This runs before the API service starts, so the service
+# and everything after it see the images from the start; a plain podman
+# client is all it needs, and it shares the service's storage and runtime
+# dir (XDG_RUNTIME_DIR is exported above), so the database configuration is
+# the same either way. podman load's own stdout ("Loaded image: ...") goes
+# to stderr: stdout carries only the exports.
+ms() { date +%s%3N; }
+if [ -z "${LAB_IMAGE_ARCHIVES:-}" ]; then
+  log "LAB_IMAGE_ARCHIVES unset — no image archives imported"
+elif [ ! -d "${LAB_IMAGE_ARCHIVES}" ]; then
+  log "LAB_IMAGE_ARCHIVES '${LAB_IMAGE_ARCHIVES}' is not a directory — no image archives imported"
+else
+  imported=0
+  failed=0
+  # A glob that matches nothing stays the literal pattern, which -f rejects.
+  for archive in "${LAB_IMAGE_ARCHIVES}"/*.tar; do
+    [ -f "${archive}" ] || continue
+    log "importing ${archive}"
+    t0="$(ms)"
+    if podman load -i "${archive}" </dev/null >&2; then
+      t="$(($(ms) - t0))"
+      log "imported ${archive} in $((t / 1000)).$((t % 1000 / 100)) s"
+      imported=$((imported + 1))
+    else
+      log "FAILED to import ${archive} (podman load exit $?) — skipped"
+      failed=$((failed + 1))
+    fi
+  done
+  log "image archives from ${LAB_IMAGE_ARCHIVES}: ${imported} imported, ${failed} failed"
+fi
+
+# 4. API service.
 if answers; then
   log "podman API service already answering on ${sock}"
 else
@@ -154,7 +183,7 @@ else
   log "podman API service started on ${sock} (pid $(cat "${svc_pid}"))"
 fi
 
-# 4. Healthcheck runner.
+# 5. Healthcheck runner.
 if alive "${hc_pid}" __healthcheck-loop; then
   log "healthcheck runner already running (pid $(cat "${hc_pid}"))"
 else
@@ -163,7 +192,7 @@ else
   log "healthcheck runner started (pid $(cat "${hc_pid}"))"
 fi
 
-# 5. ddev's global config. It prints the whole config, so stdout goes to
+# 6. ddev's global config. It prints the whole config, so stdout goes to
 # stderr with the rest of the chatter.
 if command -v ddev >/dev/null 2>&1; then
   DOCKER_HOST="unix://${sock}" ddev config global \
@@ -175,6 +204,6 @@ fi
 
 log "ready — logs in ${rt}"
 
-# 6. The exports; DOCKER_HOST last.
+# 7. The exports; DOCKER_HOST last.
 echo "export XDG_RUNTIME_DIR=${rt}"
 echo "export DOCKER_HOST=unix://${sock}"

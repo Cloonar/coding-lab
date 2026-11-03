@@ -23,14 +23,14 @@ type fakeNested struct {
 	failures []podmanx.Failure
 	done     bool
 	seccomp  string
-	store    string
+	archives string
 	kicks    atomic.Int32
 }
 
 func (n *fakeNested) Verdict() ([]podmanx.Failure, bool) { return n.failures, n.done }
 func (n *fakeNested) Kick()                              { n.kicks.Add(1) }
 func (n *fakeNested) SeccompPath() string                { return n.seccomp }
-func (n *fakeNested) SharedStore() string                { return n.store }
+func (n *fakeNested) ImageArchives() string              { return n.archives }
 
 // nestedTunFailure is a representative failed nested check.
 var nestedTunFailure = podmanx.Failure{
@@ -41,7 +41,7 @@ var nestedTunFailure = podmanx.Failure{
 
 const (
 	testNestedSeccomp = "/var/lib/lab-test/containers/nested-seccomp.json"
-	testSharedStore   = "/var/lib/lab-test/containers/shared-store"
+	testImageArchives = "/var/lib/lab-test/containers/image-archives"
 	testServiceUID    = 990
 	testServiceGID    = 991
 )
@@ -65,8 +65,8 @@ func (f *fixture) pinNested(on bool) {
 }
 
 // wireNested wires a green nested runtime and pins the service ids.
-func (f *fixture) wireNested(sharedStore string) *fakeNested {
-	n := &fakeNested{done: true, seccomp: testNestedSeccomp, store: sharedStore}
+func (f *fixture) wireNested(imageArchives string) *fakeNested {
+	n := &fakeNested{done: true, seccomp: testNestedSeccomp, archives: imageArchives}
 	f.svc.nested = n
 	f.svc.serviceUID, f.svc.serviceGID = testServiceUID, testServiceGID
 	return n
@@ -121,17 +121,18 @@ func (f *fixture) wantContainerArgv(runID string, nested *podmanx.NestedSpec) []
 
 // A container run whose effective knob is on gets the nested pane argv — the
 // same RunSpec as a plain run plus Nested with the runtime's seccomp profile
-// and shared store and the service ids — and the "## Nested containers"
-// notes section. Both the pin and the inherited default turn it on. With no
-// shared store directory the bind and LAB_SHARED_STORE are left out.
+// and image archives directory and the service ids — and the "## Nested
+// containers" notes section. Both the pin and the inherited default turn it
+// on. With no archives directory the bind and LAB_IMAGE_ARCHIVES are left
+// out. The retired graphroot contract (issue #124) never renders.
 func TestStart_nestedRun_paneArgvAndNotes(t *testing.T) {
 	cases := []struct {
-		name  string
-		store string
-		on    func(f *fixture)
+		name     string
+		archives string
+		on       func(f *fixture)
 	}{
-		{"pinned on, with the shared store", testSharedStore, func(f *fixture) { f.pinNested(true) }},
-		{"inherited on, without the shared store", "", func(f *fixture) {
+		{"pinned on, with the image archives", testImageArchives, func(f *fixture) { f.pinNested(true) }},
+		{"inherited on, without the image archives", "", func(f *fixture) {
 			f.setSetting(store.SettingNestedContainersDefault, "true")
 		}},
 	}
@@ -139,12 +140,12 @@ func TestStart_nestedRun_paneArgvAndNotes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			f.enableContainer(t)
-			n := f.wireNested(tc.store)
+			n := f.wireNested(tc.archives)
 			tc.on(f)
 
 			argv, notes, runID := f.startedPane(t)
 			want := f.wantContainerArgv(runID, &podmanx.NestedSpec{
-				SeccompProfile: testNestedSeccomp, SharedStore: tc.store, UID: testServiceUID, GID: testServiceGID,
+				SeccompProfile: testNestedSeccomp, ImageArchives: tc.archives, UID: testServiceUID, GID: testServiceGID,
 			})
 			if !slices.Equal(argv, want) {
 				t.Errorf("nested pane argv =\n  %q\nwant\n  %q", argv, want)
@@ -161,9 +162,16 @@ func TestStart_nestedRun_paneArgvAndNotes(t *testing.T) {
 			if slices.Contains(argv, "--init") {
 				t.Error("nested pane argv carries --init")
 			}
-			bind := testSharedStore + ":" + testSharedStore + ":ro"
-			if got := slices.Contains(argv, bind); got != (tc.store != "") {
-				t.Errorf("shared store bind present = %v, want %v", got, tc.store != "")
+			bind := testImageArchives + ":" + testImageArchives + ":ro"
+			if got := slices.Contains(argv, bind); got != (tc.archives != "") {
+				t.Errorf("image archives bind present = %v, want %v", got, tc.archives != "")
+			}
+			env := "LAB_IMAGE_ARCHIVES=" + testImageArchives
+			if got := slices.Contains(argv, env); got != (tc.archives != "") {
+				t.Errorf("%s present = %v, want %v", env, got, tc.archives != "")
+			}
+			if strings.Contains(joined, "LAB_SHARED_STORE") || strings.Contains(joined, "shared-store") {
+				t.Errorf("nested pane argv carries the retired store:\n  %s", joined)
 			}
 			if !strings.Contains(notes, "## Nested containers") {
 				t.Errorf("nested run's notes lack the Nested containers section:\n%s", notes)
@@ -193,7 +201,7 @@ func TestStart_nestedOff_unchanged(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			f.enableContainer(t)
-			f.wireNested(testSharedStore)
+			f.wireNested(testImageArchives)
 			tc.off(f)
 
 			argv, notes, runID := f.startedPane(t)
@@ -222,7 +230,7 @@ func TestStart_nestedRefusals(t *testing.T) {
 			name: "pending: refused and kicked",
 			wire: func(f *fixture) *fakeNested {
 				f.pinNested(true)
-				n := f.wireNested(testSharedStore)
+				n := f.wireNested(testImageArchives)
 				n.done = false
 				return n
 			},
@@ -233,7 +241,7 @@ func TestStart_nestedRefusals(t *testing.T) {
 			name: "failed: refused with every failure",
 			wire: func(f *fixture) *fakeNested {
 				f.pinNested(true)
-				n := f.wireNested(testSharedStore)
+				n := f.wireNested(testImageArchives)
 				n.failures = []podmanx.Failure{nestedTunFailure,
 					{Check: podmanx.CheckNestedProbe, Detail: "the nested self-test failed: fail: cgroup: read-only", Hint: "check crun"}}
 				return n
@@ -255,14 +263,14 @@ func TestStart_nestedRefusals(t *testing.T) {
 			name: "unresolvable inherited default",
 			wire: func(f *fixture) *fakeNested {
 				f.setSetting(store.SettingNestedContainersDefault, "maybe")
-				return f.wireNested(testSharedStore)
+				return f.wireNested(testImageArchives)
 			},
 			wantMsg: []string{"cannot resolve Nested containers for repo proj", `holds "maybe"`, "Settings → Runner"},
 		},
 		{
 			name: "unreadable inherited default",
 			wire: func(f *fixture) *fakeNested {
-				n := f.wireNested(testSharedStore)
+				n := f.wireNested(testImageArchives)
 				f.breakSettingRead(f.t, store.SettingNestedContainersDefault)
 				return n
 			},

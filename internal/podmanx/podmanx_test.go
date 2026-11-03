@@ -114,14 +114,15 @@ func goldenRunSpec() RunSpec {
 }
 
 // TestRunArgvNestedGolden pins the nested-containers run shape (ADR-0086,
-// issue #115) flag by flag, with and without the shared image store. Every
+// issue #115) flag by flag, with and without the image archives (issue
+// #124). Every
 // difference from TestRunArgvGolden is marked; everything unmarked is the
 // default shape verbatim — the caps, keep-id, the pasta and add-host pins,
 // the tools mount, the whole bind inventory, -w and the env discipline.
 func TestRunArgvNestedGolden(t *testing.T) {
 	const (
-		seccomp = "/var/lib/lab/containers/nested-seccomp.json"
-		store   = "/var/lib/lab/containers/shared-store"
+		seccomp  = "/var/lib/lab/containers/nested-seccomp.json"
+		archives = "/var/lib/lab/containers/image-archives"
 	)
 	head := []string{
 		"/usr/bin/podman", "--cgroup-manager=systemd", "run", "--rm", "-it",
@@ -172,27 +173,28 @@ func TestRunArgvNestedGolden(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "with the shared store",
-			nested: NestedSpec{SeccompProfile: seccomp, SharedStore: store, UID: 990, GID: 991},
+			name:   "with the image archives",
+			nested: NestedSpec{SeccompProfile: seccomp, ImageArchives: archives, UID: 990, GID: 991},
 			want: cat(head, []string{
-				// The store: read-only, host-identical, after the imports.
-				"-v", store + ":" + store + ":ro",
+				// The archives: read-only, host-identical, after the
+				// imports.
+				"-v", archives + ":" + archives + ":ro",
 				"-w", "/var/lib/lab/worktrees/myrepo-1",
 				"--env", "PATH=" + PATH,
 				"--env", "HOME=/home/agent",
 				"--env", "LAB_URL=unix:///var/lib/lab/agent/agent.sock",
 				// Named to the image's helper, after the caller's K=V env.
-				"--env", "LAB_SHARED_STORE=" + store,
+				"--env", "LAB_IMAGE_ARCHIVES=" + archives,
 				"--env", "LAB_TOKEN",
 				"--env", "GIT_ASKPASS",
 			}, tail),
 		},
 		{
-			// The store dir does not exist yet (the caller passes ""):
-			// neither its bind nor LAB_SHARED_STORE renders — podman would
-			// refuse a missing bind source, and the helper then writes a
-			// storage.conf without an additional store.
-			name:   "without the shared store",
+			// The archives dir does not exist yet (the caller passes ""):
+			// neither its bind nor LAB_IMAGE_ARCHIVES renders — podman
+			// would refuse a missing bind source, and the helper then
+			// imports nothing.
+			name:   "without the image archives",
 			nested: NestedSpec{SeccompProfile: seccomp, UID: 990, GID: 991},
 			want: cat(head, []string{
 				"-w", "/var/lib/lab/worktrees/myrepo-1",
@@ -214,13 +216,19 @@ func TestRunArgvNestedGolden(t *testing.T) {
 				if a == "--init" || strings.Contains(a, "/dev/fuse") {
 					t.Errorf("nested argv carries %q: %q", a, got)
 				}
+				// The retired graphroot contract (issue #124): an old
+				// helper reading it would list a directory of tars as an
+				// additional image store, and the pull cache is host-only.
+				if strings.Contains(a, "LAB_SHARED_STORE") || strings.Contains(a, "shared-store") {
+					t.Errorf("nested argv carries the retired store %q: %q", a, got)
+				}
 			}
 		})
 	}
 }
 
 // TestRunArgvNestedOnlyAddsItsPins: the nested shape is the default shape
-// with --init swapped for nestedFlags at the same position, the store
+// with --init swapped for nestedFlags at the same position, the archives
 // bind and env added, and the entry program prefixed to the provider argv —
 // nothing else. Removing exactly those from the nested argv must give back
 // the default argv, so a future default-shape pin cannot silently go
@@ -233,7 +241,7 @@ func TestRunArgvNestedOnlyAddsItsPins(t *testing.T) {
 		def := RunArgv(base)
 
 		nested := base
-		nested.Nested = &NestedSpec{SeccompProfile: "/s.json", SharedStore: "/store", UID: 7, GID: 8}
+		nested.Nested = &NestedSpec{SeccompProfile: "/s.json", ImageArchives: "/archives", UID: 7, GID: 8}
 		got := RunArgv(nested)
 
 		i := slices.Index(def, "--init")
@@ -245,8 +253,8 @@ func TestRunArgvNestedOnlyAddsItsPins(t *testing.T) {
 			t.Fatalf("nested argv at --init's slot = %q, want nestedFlags %q", got[i:i+len(flags)], flags)
 		}
 		stripped := slices.Concat(got[:i], got[i+len(flags):])
-		stripped = removeSeq(t, stripped, "-v", "/store:/store:ro")
-		stripped = removeSeq(t, stripped, "--env", "LAB_SHARED_STORE=/store")
+		stripped = removeSeq(t, stripped, "-v", "/archives:/archives:ro")
+		stripped = removeSeq(t, stripped, "--env", "LAB_IMAGE_ARCHIVES=/archives")
 		stripped = removeSeq(t, stripped, EntryBin, "container-entry", "--uid", "7", "--gid", "8", "--")
 		withoutInit := slices.Concat(def[:i], def[i+1:])
 		assertArgv(t, stripped, withoutInit)
@@ -284,20 +292,23 @@ func TestRunArgvNilNestedIsDefault(t *testing.T) {
 		}
 	}
 	for _, a := range got {
-		if strings.HasPrefix(a, "LAB_SHARED_STORE") || a == "/sys:/sys" {
+		if strings.HasPrefix(a, "LAB_IMAGE_ARCHIVES") || a == "/sys:/sys" {
 			t.Errorf("default argv carries nested-only %q: %q", a, got)
 		}
 	}
 }
 
-// TestNestedPaths pins the two state-dir paths the nested shape and its
-// preflight agree on.
+// TestNestedPaths pins the state-dir paths the nested shape, its preflight
+// and the image-cache refresh agree on.
 func TestNestedPaths(t *testing.T) {
 	if got, want := NestedSeccompPath("/var/lib/lab"), "/var/lib/lab/containers/nested-seccomp.json"; got != want {
 		t.Errorf("NestedSeccompPath = %q, want %q", got, want)
 	}
-	if got, want := SharedStorePath("/var/lib/lab"), "/var/lib/lab/containers/shared-store"; got != want {
-		t.Errorf("SharedStorePath = %q, want %q", got, want)
+	if got, want := PullCachePath("/var/lib/lab"), "/var/lib/lab/containers/shared-store"; got != want {
+		t.Errorf("PullCachePath = %q, want %q", got, want)
+	}
+	if got, want := ImageArchivesPath("/var/lib/lab"), "/var/lib/lab/containers/image-archives"; got != want {
+		t.Errorf("ImageArchivesPath = %q, want %q", got, want)
 	}
 	if EntryBin != "/opt/lab/bin/labctl" {
 		t.Errorf("EntryBin = %q, want /opt/lab/bin/labctl", EntryBin)

@@ -405,10 +405,11 @@ func (p *PreviewRef) publicPort() int {
 //     filtering on `^export ` keeps any other stdout the helper may print
 //     out of the shell. There is no Docker daemon — compose and buildx talk
 //     to the same podman socket through DOCKER_HOST;
-//   - the cost: images are pulled per run unless the operator cached them in
-//     the shared read-only image store, and the first `ddev start` pulls
-//     about 2 GB and takes about two minutes, so a long silent command is
-//     not a hang;
+//   - the cost: `start-nested-podman` imports the images the operator listed
+//     in lab's image cache (image archives, ADR-0086), which takes a while
+//     the first time; any other image is pulled per run, and the first
+//     `ddev start` of an uncached ddev pulls about 2 GB and takes about two
+//     minutes, so a long silent command is not a hang;
 //   - the ports: ddev's router listens on 8080 (HTTP) and 8443, because the
 //     session user cannot bind 80 or 443;
 //   - showing a site: `labctl expose web 8080 &`, then the preview hostname
@@ -448,9 +449,10 @@ func appendNestedSection(buf *bytes.Buffer, p *PreviewRef) {
 	buf.WriteString("    eval \"$(start-nested-podman | grep '^export ')\"\n\n")
 	buf.WriteString("There is no Docker daemon: `docker`, `docker compose` and `docker buildx`\n")
 	buf.WriteString("talk to the podman socket named by `DOCKER_HOST`.\n\n")
-	buf.WriteString("Images are pulled per run unless the operator cached them in the shared\n")
-	buf.WriteString("image store. The first `ddev start` pulls about 2 GB and takes about two\n")
-	buf.WriteString("minutes — wait for it.\n\n")
+	buf.WriteString("`start-nested-podman` imports the images the operator listed in lab's image\n")
+	buf.WriteString("cache, which takes a while the first time (wait for it); any other image is\n")
+	buf.WriteString("pulled per run. A `ddev start` that has to pull ddev's images downloads\n")
+	buf.WriteString("about 2 GB and takes about two minutes — wait for that too.\n\n")
 	buf.WriteString("ddev's router listens on 8080 (HTTP) and 8443, because the session user\n")
 	buf.WriteString("cannot bind 80 or 443.\n\n")
 	if p != nil {

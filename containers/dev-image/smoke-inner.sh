@@ -155,20 +155,88 @@ v="${v#v}"
   || fail "buildx ${v} is older than 0.17, which ddev refuses"
 docker compose version >/dev/null || fail "docker compose version"
 
-step "start-nested-podman, twice"
+step "start-nested-podman, twice, without image archives"
+unset LAB_IMAGE_ARCHIVES
 rt="${XDG_RUNTIME_DIR:-/tmp/lab-nested/run}"
 want="export DOCKER_HOST=unix://${rt}/podman.sock"
-# On failure, show the service log: it dies with this container.
-svc_fail() { cat "${rt}/podman-service.log" >&2 2>/dev/null || true; fail "$*"; }
-out="$(start-nested-podman)" || svc_fail "start-nested-podman"
-[ "$(echo "${out}" | tail -n 1)" = "${want}" ] || fail "start-nested-podman's last line is not '${want}': ${out}"
+conf="${HOME}/.config/containers/storage.conf"
+err="${HOME}/start-nested-podman.err"
+# On failure, show the helper's stderr and the service log: both die with
+# this container.
+svc_fail() {
+  cat "${err}" >&2 2>/dev/null || true
+  cat "${rt}/podman-service.log" >&2 2>/dev/null || true
+  fail "$*"
+}
+# exports_only <stdout>: the helper printed exactly the two export lines,
+# DOCKER_HOST last — everything else must have gone to stderr.
+exports_only() {
+  [ "$1" = "$(printf 'export XDG_RUNTIME_DIR=%s\n%s' "${rt}" "${want}")" ] \
+    || svc_fail "start-nested-podman's stdout is not exactly the two export lines ending in '${want}': ${1}"
+}
+# The storage config is the overlay driver alone: no additional image store.
+driver_only() {
+  [ "$(grep -v '^#' "${conf}")" = "$(printf '[storage]\ndriver = "overlay"')" ] \
+    || fail "storage.conf is not the overlay driver alone: $(cat "${conf}")"
+}
+out="$(start-nested-podman 2>"${err}")" || svc_fail "start-nested-podman"
+exports_only "${out}"
+grep -qF "LAB_IMAGE_ARCHIVES unset — no image archives imported" "${err}" \
+  || svc_fail "start-nested-podman did not say that LAB_IMAGE_ARCHIVES is unset"
+driver_only
 pids="$(cat "${rt}/podman-service.pid" "${rt}/healthcheck.pid")"
-out="$(start-nested-podman)" || svc_fail "start-nested-podman is not re-runnable"
-[ "$(echo "${out}" | tail -n 1)" = "${want}" ] || fail "second run's last line is not '${want}': ${out}"
+out="$(start-nested-podman 2>"${err}")" || svc_fail "start-nested-podman is not re-runnable"
+exports_only "${out}"
 [ "$(cat "${rt}/podman-service.pid" "${rt}/healthcheck.pid")" = "${pids}" ] \
   || fail "the second run started another service or healthcheck runner"
 for p in ${pids}; do kill -0 "${p}" 2>/dev/null || fail "pid ${p} from start-nested-podman is gone"; done
 eval "${out}"
+
+step "start-nested-podman imports image archives"
+# A one-file image with root-owned files, built offline and saved the way lab
+# saves a ref (docker-archive, fixed name), then removed from local storage so
+# only the helper's import can bring it back. podman runs here with a single-
+# uid mapping (no subuid line), which covers an image owned entirely by root.
+# The archives dir lives in the container's /tmp, not in the host-side HOME:
+# it is made read-only like lab's mount, and the host must still delete HOME.
+tag="docker.io/lab-smoke/archive:1"
+archives="/tmp/lab-image-archives"
+plog="${HOME}/podman-archive.log"
+quiet() { "$@" >>"${plog}" 2>&1 || { cat "${plog}" >&2; fail "$*"; }; }
+mkdir -p "${HOME}/archive-src" "${archives}"
+echo "lab smoke" >"${HOME}/archive-src/hello"
+quiet tar -C "${HOME}/archive-src" --owner=0 --group=0 --numeric-owner -cf "${HOME}/archive-rootfs.tar" hello
+quiet podman import "${HOME}/archive-rootfs.tar" "${tag}"
+quiet podman save --format docker-archive -o "${archives}/docker.io_lab-smoke_archive_1.tar" "${tag}"
+quiet podman rmi "${tag}"
+if podman image exists "${tag}"; then fail "${tag} still present before the import"; fi
+# Junk named to sort last: a failed load must be logged and skipped.
+echo "not an image archive" >"${archives}/zz-broken.tar"
+chmod a-w "${archives}" "${archives}"/*
+for run in first second; do
+  out="$(LAB_IMAGE_ARCHIVES="${archives}" start-nested-podman 2>"${err}")" \
+    || svc_fail "start-nested-podman with image archives (${run} run) — a broken archive must not fail it"
+  exports_only "${out}"
+  podman image exists "${tag}" || svc_fail "${tag} not present after the ${run} import"
+  grep -qF "imported ${archives}/docker.io_lab-smoke_archive_1.tar in " "${err}" \
+    || svc_fail "the ${run} run did not log the archive's import"
+  grep -qF "FAILED to import ${archives}/zz-broken.tar" "${err}" \
+    || svc_fail "the ${run} run did not log the broken archive's failure"
+  grep -qF "1 imported, 1 failed" "${err}" || svc_fail "the ${run} run's import summary is wrong"
+  driver_only
+  [ "$(cat "${rt}/podman-service.pid" "${rt}/healthcheck.pid")" = "${pids}" ] \
+    || fail "the ${run} archive run started another service or healthcheck runner"
+done
+out="$(LAB_IMAGE_ARCHIVES=/tmp/no-such-archives start-nested-podman 2>"${err}")" \
+  || svc_fail "start-nested-podman with a missing archives directory"
+exports_only "${out}"
+grep -qF "LAB_IMAGE_ARCHIVES '/tmp/no-such-archives' is not a directory — no image archives imported" "${err}" \
+  || svc_fail "start-nested-podman did not say the archives directory is missing"
+for p in ${pids}; do kill -0 "${p}" 2>/dev/null || fail "pid ${p} from start-nested-podman is gone"; done
+# The import left the image's layer in the session's storage under HOME, and
+# rootless podman makes a layer's diff/ directory read-only (0555), so the
+# host's plain rm -rf of HOME would fail on it. podman removes it cleanly.
+quiet podman rmi "${tag}"
 
 step "podman as the session user"
 got="$(podman info --format '{{.Host.CgroupManager}} {{.Host.NetworkBackend}}')" || fail "podman info (output above)"

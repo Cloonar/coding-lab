@@ -673,8 +673,8 @@ func run() int {
 		// regardless, and the probe makes the verdict ready the moment the
 		// operator repairs it. Later knob changes kick through the settings
 		// and repo PATCH hooks, and a spawn that finds no verdict kicks too.
-		// The shared image store is refreshed once at startup — best effort,
-		// a no-op on the seeded empty list — and again on every save of it.
+		// The image archives are refreshed once at startup — best effort, a
+		// no-op on the seeded empty list — and again on every save of it.
 		nestedSvc := nested.New(ctx, nested.Config{
 			PodmanBin:   cfg.PodmanBin,
 			StateDir:    cfg.StateDir,
@@ -865,7 +865,7 @@ func run() int {
 			ContainerPreflight:   containerPreflight,
 			AgentSockDir:         agentapi.SocketDir(cfg.StateDir),
 			// Nested containers (issue #115): the gate's nested stages and a
-			// nested run's seccomp profile and shared store. nil on host-only
+			// nested run's seccomp profile and image archives. nil on host-only
 			// deployments.
 			Nested: nestedRuntime,
 			// The readiness recorder learns whether a dev image is present
@@ -1249,7 +1249,7 @@ func run() int {
 		// read-only in the settings response as dev_image_fallback.
 		DevImageFallback: cfg.ContainerImage,
 		// The Nested containers save hooks (issue #115): kick the nested
-		// preflight, refresh the shared image store. nil on host-only
+		// preflight, refresh the image archives. nil on host-only
 		// deployments.
 		Nested: nestedHooks,
 		// The session cookie's Domain (issue #26): "" in every deployment but

@@ -390,9 +390,10 @@ describe('Runner: nested image cache', () => {
     expect(textarea('nested_image_cache').value).toBe(REFS);
     const hint = fieldHint('nested_image_cache');
     expect(hint).toContain('One image ref per line.');
-    expect(hint).toContain('shared read-only store that nested runs use');
-    expect(hint).toContain('Saving the list starts a pull.');
-    expect(hint).toContain('a failed pull is logged and never blocks a run');
+    expect(hint).toContain('saves them as image archives that each nested run imports');
+    expect(hint).toContain('start-nested-podman');
+    expect(hint).toContain('Saving the list starts a refresh.');
+    expect(hint).toContain('a failure is logged and never blocks a run');
     // The hint describes the control.
     expect(textarea('nested_image_cache').getAttribute('aria-describedby')).toBe(
       'rs-nested_image_cache-hint',

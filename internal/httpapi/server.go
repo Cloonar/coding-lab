@@ -230,7 +230,7 @@ type Options struct {
 	// on, or a settings PATCH that saves nested_containers_default "true",
 	// kicks the nested preflight, so the checks a startup with the knob off
 	// skipped run before the first nested spawn; a settings PATCH that saves
-	// nested_image_cache refreshes the shared image store. Both calls return
+	// nested_image_cache refreshes the image archives. Both calls return
 	// at once and report nothing — a side effect never turns a persisted save
 	// into an error. nil (host-only deployments, most tests) makes both no-ops.
 	// Must be a true nil, never a typed nil pointer, when absent.
