@@ -15,9 +15,12 @@
 # database server, and checks the nested-container stack (ADR-0086) as far
 # as it works without lab's nested argv: the binaries, the newuidmap /
 # newgidmap file capabilities, podman's config, and start-nested-podman's
-# API service. Nested containers themselves need the outer flags only lab's
-# nested runs carry, so running one is left to the maintainer's end-to-end
-# check. Requires the image build.sh produces.
+# API service and its image-archive import (once with LAB_IMAGE_ARCHIVES
+# unset, once with a read-only directory holding a small docker-archive the
+# inner script saves from an offline-built image, plus a broken one that
+# must be skipped). Nested containers themselves need the outer flags only
+# lab's nested runs carry, so running one is left to the maintainer's
+# end-to-end check. Requires the image build.sh produces.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

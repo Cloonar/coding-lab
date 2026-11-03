@@ -70,7 +70,7 @@ func EffectiveRunner(ctx context.Context, settings RunnerSettings, repo store.Re
 
 // EffectiveNestedContainers resolves whether a run of repo gets the Nested
 // containers shape (issue #115 / ADR-0086) — the run pane's nested podman
-// argv, the nested preflight gate, the shared image store mount and the
+// argv, the nested preflight gate, the image archives mount and the
 // worktree notes' section — and is the ONE place that answer is computed:
 // EffectiveRunner's twin for the nested tri-state, following ADR-0071
 // exactly. No consumer reads repo.NestedContainers or the setting directly.

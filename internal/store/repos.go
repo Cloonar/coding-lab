@@ -310,7 +310,7 @@ func (s *Store) RepoByID(ctx context.Context, id string) (Repo, error) {
 // the "nested is on anywhere" gate — the other half is the global
 // nested_containers_default setting, which the caller reads itself — that
 // decides whether startup runs the nested preflight checks and creates the
-// shared image store, so a host that never uses the knob pays nothing for
+// image archives directory, so a host that never uses the knob pays nothing for
 // it. NULL rows (inherit) and FALSE pins never count: an inheriting repo is
 // covered by the default half, and the runner is deliberately not consulted
 // — a host-runner repo with the pin on still counts, because switching its

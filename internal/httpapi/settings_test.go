@@ -1127,7 +1127,7 @@ func TestAPI_SettingsNestedImageCache(t *testing.T) {
 // The settings PATCH's Nested containers side effects (issue #115 /
 // ADR-0086): saving nested_containers_default "true" kicks the nested
 // preflight (saving "false" does not); saving nested_image_cache — any
-// value, the empty list included — refreshes the shared image store; a
+// value, the empty list included — refreshes the image archives; a
 // PATCH of other keys and a rejected PATCH trigger neither.
 func TestAPI_SettingsNestedHooks(t *testing.T) {
 	hooks := &fakeNestedHooks{}

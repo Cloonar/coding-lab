@@ -46,8 +46,8 @@ const afkPromptMaxBytes = 16 << 10
 
 // nestedImageCacheMaxBytes caps a stored nested_image_cache list (issue #115
 // / ADR-0086), measured after normalization. Every ref in it is pulled into
-// the shared image store at startup and on every save, so the cap bounds that
-// work as much as the row: 16 KiB is a few hundred refs, far past any real
+// the pull cache and saved as an image archive at startup and on every save,
+// so the cap bounds that work as much as the row: 16 KiB is a few hundred refs, far past any real
 // ddev/compose stack, yet small enough that a pasted log never becomes a
 // pull queue.
 const nestedImageCacheMaxBytes = 16 << 10
@@ -371,7 +371,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				devImageRef = &v
 			}
 		case store.SettingNestedImageCache:
-			// The shared image store list (issue #115 / ADR-0086): one image ref
+			// The image archives list (issue #115 / #124, ADR-0086): one image ref
 			// per line, stored normalized so its reader only splits on "\n".
 			// Refs are NOT resolved or pinned here — the list is a best-effort
 			// cache, a ref that fails to pull is logged then, never refused now.
@@ -433,7 +433,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	// ADR-0086), keyed off updates — the canonical values just stored: a
 	// default saved "true" kicks the nested preflight (startup skipped it if
 	// nested was on nowhere then), and a saved image cache list — any save,
-	// even an unchanged or emptied one — refreshes the shared store. Both
+	// even an unchanged or emptied one — refreshes the image archives. Both
 	// return at once and report nothing: a failed pull is logged by the
 	// refresh, never an error response for a persisted save.
 	if s.nested != nil {
@@ -510,7 +510,7 @@ func parseSettingBool(raw json.RawMessage, key string, nullable bool) (string, e
 }
 
 // normalizeNestedImageCache canonicalizes a nested_image_cache value (issue
-// #115 / ADR-0086) to the form the store holds and the shared-store refresh
+// #115 / ADR-0086) to the form the store holds and the image-cache refresh
 // reads: each line trimmed (so CRLF pastes and indentation vanish), blank
 // lines dropped, the rest joined with "\n" — "" is the empty list. It refuses,
 // naming the 1-based line, a line with whitespace INSIDE it (two refs pasted

@@ -201,13 +201,13 @@ type NestedSpec struct {
 	// profile, NestedSeccompPath(stateDir) as WriteNestedSeccomp wrote it
 	// at startup; passed as --security-opt seccomp=<path>.
 	SeccompProfile string
-	// SharedStore is the host path of the shared read-only image store,
-	// SharedStorePath(stateDir). "" renders neither its bind nor
-	// LAB_SHARED_STORE: the caller passes it only when the directory
+	// ImageArchives is the host path of the image archives directory,
+	// ImageArchivesPath(stateDir). "" renders neither its bind nor
+	// LAB_IMAGE_ARCHIVES: the caller passes it only when the directory
 	// exists, because podman refuses to start a container whose bind
-	// source is missing, and a run without the cache still works — its
+	// source is missing, and a run without the archives still works — its
 	// nested podman pulls what it needs into the run's own storage.
-	SharedStore string
+	ImageArchives string
 	// UID and GID are the service user's ids, handed to the entry program
 	// as `--uid`/`--gid`: the ids it writes the subuid/subgid lines for,
 	// chowns the run's cgroup to, and drops to before starting the
@@ -240,7 +240,7 @@ func nestedFlags(seccompPath string) []string {
 // (NoTTY); see RunSpec for the three shapes and the run shape's nested
 // variant (Nested non-nil, ADR-0086). With Nested nil the argv is exactly
 // the default shape below; the nested variant swaps --init for the nested
-// block (nestedFlags) at the same position, adds the shared store's bind
+// block (nestedFlags) at the same position, adds the image archives' bind
 // and env var, and prefixes the provider argv with the entry program —
 // every other flag, the whole mount inventory and the env discipline are
 // identical in both. Flag rationale, in argv order:
@@ -393,16 +393,16 @@ func nestedFlags(seccompPath string) []string {
 //     the inventory's binds, one `:ro` bind each in the caller's order. -w
 //     prefers Workdir, falls back to WorktreeDir, and vanishes when both
 //     are empty.
-//   - the shared image store (Nested non-nil with SharedStore set, after
-//     the import binds): `-v <store>:<store>:ro`, read-only at its
-//     host-identical path, so the path lab names in LAB_SHARED_STORE (the
+//   - the image archives (Nested non-nil with ImageArchives set, after
+//     the import binds): `-v <dir>:<dir>:ro`, read-only at its
+//     host-identical path, so the path lab names in LAB_IMAGE_ARCHIVES (the
 //     env, below) is the path the image's start-nested-podman helper finds
-//     inside and lists under additionalimagestores. Read-only because every
-//     nested run shares it: a run may read cached images, never alter
-//     another run's.
+//     inside and imports every archive from with `podman load`. Read-only
+//     because every nested run shares it: a run may import cached images,
+//     never alter another run's.
 //
-// Then --env K=V per Env entry, --env LAB_SHARED_STORE=<store> when the
-// store is mounted (after the caller's Env, so a lab-owned pin is never
+// Then --env K=V per Env entry, --env LAB_IMAGE_ARCHIVES=<dir> when the
+// archives are mounted (after the caller's Env, so a lab-owned pin is never
 // shadowed by a K=V entry), --env K per ForwardEnv entry (order preserved —
 // later entries win under podman just as with exec env), the image, and the
 // provider argv verbatim. In the nested shape the command is the entry
@@ -453,8 +453,8 @@ func RunArgv(s RunSpec) []string {
 	for _, d := range s.ImportDirs {
 		args = append(args, "-v", d+":"+d+":ro")
 	}
-	if s.Nested != nil && s.Nested.SharedStore != "" {
-		args = append(args, "-v", s.Nested.SharedStore+":"+s.Nested.SharedStore+":ro")
+	if s.Nested != nil && s.Nested.ImageArchives != "" {
+		args = append(args, "-v", s.Nested.ImageArchives+":"+s.Nested.ImageArchives+":ro")
 	}
 	if s.Workdir != "" {
 		args = append(args, "-w", s.Workdir)
@@ -464,8 +464,8 @@ func RunArgv(s RunSpec) []string {
 	for _, kv := range s.Env {
 		args = append(args, "--env", kv)
 	}
-	if s.Nested != nil && s.Nested.SharedStore != "" {
-		args = append(args, "--env", "LAB_SHARED_STORE="+s.Nested.SharedStore)
+	if s.Nested != nil && s.Nested.ImageArchives != "" {
+		args = append(args, "--env", "LAB_IMAGE_ARCHIVES="+s.Nested.ImageArchives)
 	}
 	for _, k := range s.ForwardEnv {
 		args = append(args, "--env", k)

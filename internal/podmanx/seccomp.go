@@ -82,12 +82,28 @@ func NestedSeccompPath(stateDir string) string {
 	return filepath.Join(stateDir, "containers", "nested-seccomp.json")
 }
 
-// SharedStorePath is the shared read-only image store of nested runs
-// (ADR-0086): <state>/containers/shared-store, beside the seccomp profile.
-// Lab populates it with podman --root; RunArgv mounts it read-only at this
-// same host path and names it in LAB_SHARED_STORE.
-func SharedStorePath(stateDir string) string {
+// PullCachePath is lab's host-side pull cache for the nested_image_cache
+// list (ADR-0086, issue #124): <state>/containers/shared-store, beside the
+// seccomp profile. Lab pulls every listed ref into it with podman --root, so
+// a refresh re-downloads only changed layers, and saves each image from it
+// into ImageArchivesPath. Host-only: it is never mounted into a run — its
+// layers are owned through the lab user's rootless mapping, which a nested
+// run's podman does not share. The directory name predates the archives
+// (it was once the graphroot nested runs mounted) and is kept so an upgrade
+// needs no migration.
+func PullCachePath(stateDir string) string {
 	return filepath.Join(stateDir, "containers", "shared-store")
+}
+
+// ImageArchivesPath is the image archives directory of nested runs
+// (ADR-0086, issue #124): <state>/containers/image-archives, one
+// docker-archive file per listed ref, written by lab from the pull cache.
+// RunArgv mounts it read-only at this same host path and names it in
+// LAB_IMAGE_ARCHIVES; the image's start-nested-podman helper imports every
+// archive into the run's own storage, so the run's podman applies its own
+// id mapping.
+func ImageArchivesPath(stateDir string) string {
+	return filepath.Join(stateDir, "containers", "image-archives")
 }
 
 // NestedSeccompProfile returns the nested-containers seccomp profile: the
@@ -105,11 +121,11 @@ func NestedSeccompProfile() ([]byte, error) {
 // that carries a refreshed upstream copy reaches the file at its next
 // start.
 //
-// <state>/containers is created 0700: everything in it — this profile and
-// the shared image store — is read only by the service user, as lab itself
-// and as the rootless podman it runs (the same uid), and cmd/lab already
-// creates the state dir itself 0700, so a group or world bit here would
-// grant nothing anyone uses. MkdirAll leaves an existing directory's mode
+// <state>/containers is created 0700: everything in it — this profile, the
+// pull cache and the image archives — is read only by the service user, as
+// lab itself and as the rootless podman it runs (the same uid), and cmd/lab
+// already creates the state dir itself 0700, so a group or world bit here
+// would grant nothing anyone uses. MkdirAll leaves an existing directory's mode
 // alone. The file is 0644: it is upstream data plus a public delta, nothing
 // secret; the directory is the access boundary. The write is atomic
 // (fsx.WriteFileAtomic: same-directory temp file, fsync, rename), so a

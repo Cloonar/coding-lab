@@ -45,7 +45,7 @@ const RUNNER_PICKS = [
 
 /** What the image list is for, under its field. */
 export const NESTED_IMAGE_CACHE_HINT =
-  'One image ref per line. Lab pulls these into a shared read-only store that nested runs use, so a run does not pull them itself. Saving the list starts a pull. Best effort: a failed pull is logged and never blocks a run.';
+  'One image ref per line. Lab pulls these and saves them as image archives that each nested run imports when it runs start-nested-podman, so a run does not pull them from the network. Saving the list starts a refresh. Best effort: a failure is logged and never blocks a run.';
 
 /** "3 repos inherit this default." — the line under the Runner pick. */
 export function inheritLine(count: number): string {

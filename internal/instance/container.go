@@ -88,8 +88,9 @@ type NestedRuntime interface {
 	// SeccompPath is the lab-generated seccomp profile, "" when it could not
 	// be written (the nested preflight then fails naming it).
 	SeccompPath() string
-	// SharedStore is the shared image store's path when it exists, else "".
-	SharedStore() string
+	// ImageArchives is the image archives directory's path when it exists,
+	// else "".
+	ImageArchives() string
 }
 
 // ContainerGate is the container-mode spawn gate's verdict for one provider
@@ -257,17 +258,17 @@ func (s *Service) refuseContainerSpawn(ctx context.Context, providerID string, r
 
 // nestedSpec is a run pane's podmanx.RunSpec.Nested for the gate's Nested
 // answer: nil when the run is not nested (today's argv, byte for byte),
-// else the nested runtime's seccomp profile and shared store — the store
-// only when its directory exists, as RunSpec requires — and the service
-// user's ids for the entry program to drop to. Reached with nested true only
-// past an open gate, which proved the runtime non-nil.
+// else the nested runtime's seccomp profile and image archives directory —
+// the archives only when their directory exists, as RunSpec requires — and
+// the service user's ids for the entry program to drop to. Reached with
+// nested true only past an open gate, which proved the runtime non-nil.
 func (s *Service) nestedSpec(nested bool) *podmanx.NestedSpec {
 	if !nested {
 		return nil
 	}
 	return &podmanx.NestedSpec{
 		SeccompProfile: s.nested.SeccompPath(),
-		SharedStore:    s.nested.SharedStore(),
+		ImageArchives:  s.nested.ImageArchives(),
 		UID:            s.serviceUID,
 		GID:            s.serviceGID,
 	}
