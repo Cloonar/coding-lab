@@ -164,6 +164,15 @@ type Opts struct {
 	// nil leaves the render exactly as it was, which is how "no listener, no
 	// section" is made structural at this boundary.
 	Preview *PreviewRef
+
+	// Nested is true exactly when the run's effective Nested containers value
+	// is on AND its effective runner is container (issue #115, ADR-0086);
+	// internal/instance decides, the seeder only renders. True makes
+	// renderContextFile append a "Nested containers" section (after Previews,
+	// whose real URL shape it reuses when Preview is non-nil); false — the
+	// zero value — leaves the render exactly as it was, which is how "knob
+	// off, no section" is made structural at this boundary.
+	Nested bool
 }
 
 // SeedWorkspace seeds worktree for a run on repo, driven by the provider's
@@ -186,5 +195,5 @@ func (s *Seeder) SeedWorkspace(worktree string, repo store.Repo, meta provider.S
 	if err := seedSkills(worktree, meta.SkillsDir); err != nil {
 		return err
 	}
-	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Bastion, opts.Imports, opts.Preview)
+	return seedContextFile(worktree, repo, meta, opts.Secrets, opts.Gateway, opts.Bastion, opts.Imports, opts.Preview, opts.Nested)
 }

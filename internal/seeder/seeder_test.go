@@ -212,7 +212,7 @@ func TestSeedWorkspace_claudeLocalSections(t *testing.T) {
 }
 
 func TestRenderContextFile_forgeBinding(t *testing.T) {
-	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil, nil, nil, nil)
+	body, err := renderContextFile(forgeRepo, claudeGoldenMeta, nil, nil, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestRenderContextFile_claudeGoldenByteIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil, nil, nil, nil)
+			got, err := renderContextFile(tc.repo, claudeGoldenMeta, nil, nil, nil, nil, nil, false)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -475,7 +475,7 @@ func TestSeedWorkspace_nonNativeAppendsSkillsIndex(t *testing.T) {
 // native-discovery-WITH-skills absence is asserted in the golden test above.)
 func TestRenderContextFile_noIndexWithoutSkillsDir(t *testing.T) {
 	meta := provider.SeedMeta{ContextFileName: "AGENTS.local.md", NativeSkillDiscovery: false}
-	got, err := renderContextFile(builtinRepo, meta, nil, nil, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, meta, nil, nil, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil, nil, nil, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, secrets, nil, nil, nil, nil, false)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -514,7 +514,7 @@ func TestRenderContextFile_zeroSecretsByteIdentical(t *testing.T) {
 // and the `labctl secret list` pointer. Byte-pinned against a NEW golden
 // (contextfile-claude-builtin-secrets.golden) captured for this shape.
 func TestRenderContextFile_withSecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, nil, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 			"empty": {},
 		} {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
-				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, imports, nil)
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, imports, nil, false)
 				if err != nil {
 					t.Fatalf("renderContextFile: %v", err)
 				}
@@ -580,7 +580,7 @@ func TestRenderContextFile_zeroImportsByteIdentical(t *testing.T) {
 // (contextfile-claude-builtin-imports.golden) captured for this shape, the
 // same way TestRenderContextFile_withSecrets pins the secrets shape.
 func TestRenderContextFile_withImports(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, testImports, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, testImports, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestRenderContextFile_withImports(t *testing.T) {
 // section comes FIRST — repo-driven content before the provider-driven tail
 // (the append order documented on appendSecretsSection).
 func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, nil, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestRenderContextFile_nonNativeWithSecretsBothSectionsOrdered(t *testing.T)
 // extended with the imports section per the ordering documented on
 // appendSecretsSection and appendImportsSection).
 func TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, testImports, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, testSecrets, nil, nil, testImports, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestRenderContextFile_nilGatewayByteIdentical(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, nil, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, nil, nil, nil, nil, false)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -736,7 +736,7 @@ func TestRenderContextFile_nilGatewayByteIdentical(t *testing.T) {
 // legacy teaching is gone, which is an explicit issue #24 acceptance
 // criterion, not a nicety.
 func TestRenderContextFile_withGateway(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -789,7 +789,7 @@ func TestRenderContextFile_gatewayWithoutServices(t *testing.T) {
 		"empty": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: services}, nil, nil, nil)
+			got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, &GatewayRef{Services: services}, nil, nil, nil, false)
 			if err != nil {
 				t.Fatalf("renderContextFile: %v", err)
 			}
@@ -824,7 +824,7 @@ func TestRenderContextFile_gatewayWithoutServices(t *testing.T) {
 // repo_secrets rows keep existing until #27 — so this is the case that has to
 // be pinned, not assumed.
 func TestRenderContextFile_gatewayReplacesLegacySecrets(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, &GatewayRef{Services: testGatewayServices}, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, testSecrets, &GatewayRef{Services: testGatewayServices}, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -853,7 +853,7 @@ func TestRenderContextFile_gatewayReplacesLegacySecrets(t *testing.T) {
 // CONTENT never reshuffles the file (mirrors
 // TestRenderContextFile_nonNativeWithSecretsAndImportsOrdered).
 func TestRenderContextFile_nonNativeWithGatewayAndImportsOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, testImports, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, nil, testImports, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -937,7 +937,7 @@ func TestRenderContextFile_noBastionByteIdentical(t *testing.T) {
 			},
 		} {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
-				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, tc.gateway, bastion, tc.imports, nil)
+				got, err := renderContextFile(builtinRepo, claudeGoldenMeta, tc.secrets, tc.gateway, bastion, tc.imports, nil, false)
 				if err != nil {
 					t.Fatalf("renderContextFile: %v", err)
 				}
@@ -957,7 +957,7 @@ func TestRenderContextFile_noBastionByteIdentical(t *testing.T) {
 // (contextfile-claude-builtin-ssh.golden), the same way the gateway and
 // imports shapes are.
 func TestRenderContextFile_withBastion(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, &BastionRef{Targets: testSSHTargets}, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, &BastionRef{Targets: testSSHTargets}, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -992,7 +992,7 @@ func TestRenderContextFile_withBastion(t *testing.T) {
 // every repo-driven section ahead of the provider-driven tail, so adding the
 // bastion never reshuffles the file.
 func TestRenderContextFile_nonNativeWithEverySectionOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports, nil)
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -1069,7 +1069,7 @@ func TestPreviewRef_URL(t *testing.T) {
 // --preview-addr — no existing golden shape changes and no Previews section
 // appears, for claude's native shape and a non-native one alike.
 func TestRenderContextFile_noPreviewNoSection(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, nil)
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -1079,7 +1079,7 @@ func TestRenderContextFile_noPreviewNoSection(t *testing.T) {
 	if bytes.Contains(got, []byte("## Previews")) {
 		t.Error("render with a nil preview carries a Previews section")
 	}
-	got, err = renderContextFile(forgeRepo, codexMeta, testSecrets, nil, &BastionRef{Targets: testSSHTargets}, testImports, nil)
+	got, err = renderContextFile(forgeRepo, codexMeta, testSecrets, nil, &BastionRef{Targets: testSSHTargets}, testImports, nil, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -1092,7 +1092,7 @@ func TestRenderContextFile_noPreviewNoSection(t *testing.T) {
 // byte-pinned against a NEW golden (contextfile-claude-builtin-preview.golden,
 // listener port 8081 so the URL's ":8081" suffix shows).
 func TestRenderContextFile_withPreview(t *testing.T) {
-	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: 8081})
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: 8081}, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -1122,7 +1122,7 @@ func TestRenderContextFile_withPreview(t *testing.T) {
 	// Default HTTPS port: no suffix in the URL, and the Vite line still names
 	// the port HMR must use — 443, which the bare URL leaves implicit.
 	for _, port := range []int{443, 0} {
-		got, err = renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: port})
+		got, err = renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: port}, false)
 		if err != nil {
 			t.Fatalf("renderContextFile: %v", err)
 		}
@@ -1138,7 +1138,7 @@ func TestRenderContextFile_withPreview(t *testing.T) {
 // Every section together, in the documented order: template body → Secrets →
 // SSH targets → Previews → Read-only imports → Seeded skills.
 func TestRenderContextFile_nonNativeWithPreviewOrdered(t *testing.T) {
-	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports, &PreviewRef{Domain: "lab.internal", Port: 8081})
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports, &PreviewRef{Domain: "lab.internal", Port: 8081}, false)
 	if err != nil {
 		t.Fatalf("renderContextFile: %v", err)
 	}
@@ -1170,5 +1170,131 @@ func TestSeedWorkspace_onDiskWithPreviewMatchesGolden(t *testing.T) {
 	}
 	if want := readGolden(t, "contextfile-claude-builtin-preview.golden"); !bytes.Equal(got, want) {
 		t.Errorf("on-disk CLAUDE.local.md with a preview != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// A nested run's render carries the Nested containers section with the key
+// lines (issue #115); with a preview ref the expose step names the REAL
+// preview hostname and URL, and the Previews section precedes it.
+func TestRenderContextFile_nested(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "preview.example", Port: 8081}, true)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+	for _, want := range []string{
+		"\n## Nested containers\n",
+		"Run `start-nested-podman` first",
+		`    eval "$(start-nested-podman | grep '^export ')"`,
+		"`XDG_RUNTIME_DIR` for plain `podman`, `DOCKER_HOST` for",
+		"There is no Docker daemon",
+		"`docker compose` and `docker buildx`",
+		"unless the operator cached them",
+		"about 2 GB",
+		"about two\nminutes",
+		"router listens on 8080 (HTTP) and 8443",
+		"cannot bind 80 or 443",
+		"    labctl expose web 8080 &",
+		`additional_fqdns: ["web.preview.example"]`,
+		".ddev/config.local.yaml",
+		"    ddev restart",
+		"`https://web.preview.example:8081`",
+		"Never write into the worktree as root from a nested container",
+		"lab can neither diff nor delete",
+		"memory and pid caps include every nested container",
+	} {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("Nested containers section missing %q", want)
+		}
+	}
+	if strings.Contains(gotStr, "Previews are not available") {
+		t.Error("a preview-wired render says previews are unavailable")
+	}
+	if strings.Index(gotStr, "## Previews") > strings.Index(gotStr, "## Nested containers") {
+		t.Error("Nested containers precedes Previews")
+	}
+}
+
+// Without a preview listener the section drops the expose step, says previews
+// are unavailable, and offers the in-run curl check instead.
+func TestRenderContextFile_nestedWithoutPreview(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+	for _, want := range []string{
+		"## Nested containers",
+		"start-nested-podman",
+		"Previews are not available on this lab",
+		"curl -H 'Host: <project>.ddev.site' http://127.0.0.1:8080/",
+		"Never write into the worktree as root",
+	} {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("section missing %q", want)
+		}
+	}
+	for _, bad := range []string{"labctl expose web", "additional_fqdns", "## Previews"} {
+		if strings.Contains(gotStr, bad) {
+			t.Errorf("preview-less nested render mentions %q", bad)
+		}
+	}
+}
+
+// Nested false (the zero value) leaves the render byte-identical to the
+// golden, with and without a preview; the section never leaks.
+func TestRenderContextFile_notNestedUnchanged(t *testing.T) {
+	got, err := renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, nil, false)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if bytes.Contains(got, []byte("Nested containers")) || bytes.Contains(got, []byte("start-nested-podman")) {
+		t.Error("render with nested=false mentions nested containers")
+	}
+	got, err = renderContextFile(builtinRepo, claudeGoldenMeta, nil, nil, nil, nil, &PreviewRef{Domain: "lab.internal", Port: 8081}, false)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	if want := readGolden(t, "contextfile-claude-builtin-preview.golden"); !bytes.Equal(got, want) {
+		t.Errorf("nested=false preview render != golden\n%s", byteDiff(got, want))
+	}
+}
+
+// Every section together, in the documented order: Previews → Nested
+// containers → Read-only imports → Seeded skills.
+func TestRenderContextFile_nestedOrdered(t *testing.T) {
+	got, err := renderContextFile(forgeRepo, codexMeta, nil, &GatewayRef{Services: testGatewayServices}, &BastionRef{Targets: testSSHTargets}, testImports, &PreviewRef{Domain: "lab.internal", Port: 8081}, true)
+	if err != nil {
+		t.Fatalf("renderContextFile: %v", err)
+	}
+	gotStr := string(got)
+	order := []string{"## Tracker binding", "## Secrets", "## SSH targets", "## Previews", "## Nested containers", "## Read-only imports", "## Seeded skills"}
+	last := -1
+	for _, heading := range order {
+		idx := strings.Index(gotStr, heading)
+		if idx == -1 {
+			t.Fatalf("missing %s section", heading)
+		}
+		if idx <= last {
+			t.Errorf("%s (offset %d) out of order; want the order %q", heading, idx, order)
+		}
+		last = idx
+	}
+}
+
+// The full seed path threads Opts.Nested to the file on disk.
+func TestSeedWorkspace_onDiskNested(t *testing.T) {
+	for _, nested := range []bool{true, false} {
+		wt, _ := newWorktree(t)
+		if err := New().SeedWorkspace(wt, builtinRepo, claudeGoldenMeta, Opts{Nested: nested}); err != nil {
+			t.Fatalf("SeedWorkspace: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(wt, "CLAUDE.local.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has := bytes.Contains(got, []byte("## Nested containers")); has != nested {
+			t.Errorf("Nested=%v: section present = %v", nested, has)
+		}
 	}
 }
