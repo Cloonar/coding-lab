@@ -134,18 +134,26 @@ func TestNestedPreflight(t *testing.T) {
 			name: "self-test fails: detail carries every fail line",
 			mutate: func(f *pfFixture, _ *NestedPreflightConfig) {
 				f.runner.script[probeKey] = cmdResult{
-					out: "ok: cgroup-child\nfail: cgroup-limits: /sys/fs/cgroup/memory.max is writable\nok: procfs-mount\nok: uts-hostname\nok: dev-net-tun\nfail: sys-rw: /sys is mounted read-only\nfail: newuidmap: not found\n",
+					out: "ok: cgroup-child\nfail: cgroup-limits: write of the current value to /sys/fs/cgroup/memory.max was accepted\nok: procfs-mount\nok: uts-hostname\nok: dev-net-tun\nfail: sys-rw: /sys is mounted read-only\nfail: newuidmap: not found\n",
 					err: errors.New("exit status 1"),
 				}
 			},
 			wantChecks: []string{CheckNestedProbe},
 			after: func(t *testing.T, f *pfFixture, fs []Failure) {
-				want := "fail: cgroup-limits: /sys/fs/cgroup/memory.max is writable; fail: sys-rw: /sys is mounted read-only; fail: newuidmap: not found"
+				want := "fail: cgroup-limits: write of the current value to /sys/fs/cgroup/memory.max was accepted; fail: sys-rw: /sys is mounted read-only; fail: newuidmap: not found"
 				if d := fs[0].Detail; !strings.Contains(d, want) {
 					t.Errorf("detail %q does not carry the fail lines %q", d, want)
 				}
-				if h := fs[0].Hint; !strings.Contains(h, "--systemd=always") || !strings.Contains(h, "crun") || !strings.Contains(h, "docs/ops.md") || !strings.Contains(h, "Nested containers") {
+				h := fs[0].Hint
+				if !strings.Contains(h, "--systemd=always") || !strings.Contains(h, "crun") || !strings.Contains(h, "docs/ops.md") || !strings.Contains(h, "Nested containers") {
 					t.Errorf("hint %q is not actionable", h)
+				}
+				// The cap protection is the kernel's nsdelegate rule at the
+				// run's own cgroup namespace, so the hint names both.
+				for _, sub := range []string{"nsdelegate", "own cgroup namespace", "cgroupns=private", "Delegate=yes"} {
+					if !strings.Contains(h, sub) {
+						t.Errorf("hint %q does not name %q", h, sub)
+					}
 				}
 				last := f.runner.calls[len(f.runner.calls)-1]
 				assertArgv(t, last, []string{"podman", "rm", "--force", "--ignore", "--time", "0", nestedProbeName})

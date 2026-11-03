@@ -103,7 +103,7 @@ func (r *recorder) probeRuns() int {
 func greenDeps(run *recorder) podmanx.Deps {
 	run.handle = func(argv []string) ([]byte, error) {
 		if slices.Contains(argv, "--self-test") {
-			return []byte("ok: cgroup writable\nok: cgroup limits root-owned\n"), nil
+			return []byte("ok: cgroup-child\nok: cgroup-limits\n"), nil
 		}
 		return nil, nil
 	}

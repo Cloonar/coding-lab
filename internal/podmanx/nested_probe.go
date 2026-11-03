@@ -46,11 +46,12 @@ const nestedProbeName = "lab-preflight-nested-probe"
 
 // The nested probe's caps. The memory cap matters beyond thrift: with it
 // the probe's scope cgroup carries a memory.max, which the self-test's
-// cgroup-limits check then asserts the session cannot open for writing —
-// the probe mirrors a run, whose caps are always set. 64 tasks fits the
-// self-test with ample room: two Go processes at most at any time (labctl
-// and the one namespace probe it re-executes), a dozen threads each, and
-// every thread counts against pids.max.
+// cgroup-limits check then asserts the session cannot raise (a write of
+// the current value back is refused under nsdelegate) — the probe mirrors
+// a run, whose caps are always set. 64 tasks fits the self-test with ample
+// room: two Go processes at most at any time (labctl and the one namespace
+// probe it re-executes), a dozen threads each, and every thread counts
+// against pids.max.
 const (
 	nestedProbeMemory = "64m"
 	nestedProbePids   = "64"
@@ -63,11 +64,14 @@ const nestedTunHint = "load the tun module (`modprobe tun`; on NixOS it is avail
 
 // nestedProbeHint is CheckNestedProbe's operator action. The probe is what
 // proves the cgroup handoff — a writable, namespaced cgroup for the session
-// while the limit files stay root-owned, the "no silently absent caps"
-// honesty ADR-0052 demanded — so the hint points at the pieces that make
-// it: systemd mode, crun, the user manager's delegation, and an entry
-// program new enough to run.
-const nestedProbeHint = "the nested shape needs podman's systemd mode (--systemd=always) to hand the run a writable, namespaced cgroup while memory.max and pids.max stay root-owned: check that the OCI runtime is crun (engine.runtime in containers.conf), that the lab user's user@.service delegates its cgroup (Delegate=yes, systemd's default for user@.service), and that the agent-tools image carries a labctl with `container-entry` (issue #114); run the self-test by hand as docs/ops.md § Nested containers (\"Checking a host by hand\") shows"
+// whose caps it still cannot raise, the "no silently absent caps" honesty
+// ADR-0052 demanded. The caps hold by the kernel's nsdelegate rule, not by
+// file ownership (the session uid owns the limit files under keep-id): the
+// host's cgroup2 mount must carry nsdelegate and the run must get its own
+// cgroup namespace. So the hint points at the pieces that make it: systemd
+// mode, crun, the user manager's delegation, nsdelegate, the private cgroup
+// namespace, and an entry program new enough to run.
+const nestedProbeHint = "the nested shape needs podman's systemd mode (--systemd=always) to hand the run a writable, namespaced cgroup whose memory.max and pids.max the session still cannot raise: check that the host's cgroup2 mount carries nsdelegate (systemd's default; see /proc/self/mountinfo), that the run gets its own cgroup namespace (podman's cgroupns=private, its default on cgroup v2), that the OCI runtime is crun (engine.runtime in containers.conf), that the lab user's user@.service delegates its cgroup (Delegate=yes, systemd's default for user@.service), and that the agent-tools image carries a labctl with `container-entry` (issue #114); run the self-test by hand as docs/ops.md § Nested containers (\"Checking a host by hand\") shows"
 
 // NestedPreflight runs the two nested-containers checks and returns their
 // failures — nil when nested runs may start. Like Preflight it never
