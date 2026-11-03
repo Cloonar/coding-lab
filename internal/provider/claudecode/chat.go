@@ -117,7 +117,8 @@ const (
 
 // registryStatus reads the usable registry status for the session in worktree
 // under home: the status and waitingFor of the very entry LocateTranscript
-// selects (registryEntryForDir — cwd match, live pid, newest startedAt), so
+// selects (registryEntryForDir — cwd match, live per entryAlive, newest
+// startedAt), so
 // state and transcript come from one session (issue #79 decision 3). Unusable
 // — ok false — when home or worktree is "" (an ended read never consults the
 // registry), no live entry matches, or the status is empty or outside

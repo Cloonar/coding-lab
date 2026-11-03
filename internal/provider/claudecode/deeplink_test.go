@@ -38,6 +38,24 @@ func deadPID(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
+// ownDomain renders the pidDomain a 2.1.284 CLI running in THIS test
+// process's pid namespace would write (compat §2:
+// linux:<machine-id>:pid:[<inode>]). The machine-id half is deliberately
+// made up: only the namespace token decides, because a container carries its
+// own /etc/machine-id.
+func ownDomain(t *testing.T) string {
+	t.Helper()
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		t.Skipf("/proc/self/ns/pid unreadable: %v", err)
+	}
+	return "linux:ffffffffffffffffffffffffffffffff:" + ns
+}
+
+// foreignDomain is a pidDomain naming a pid namespace that is not this test
+// process's — what a container run's claude writes, seen from the host.
+const foreignDomain = "linux:ea8e7833ea8e7833ea8e7833ea8e7833:pid:[1]"
+
 // Transcribed v0 contract: registry_test.go TestBridgeURLForDir
 // (complete, 8 subtests).
 func TestBridgeURLForDir(t *testing.T) {
@@ -79,7 +97,7 @@ func TestBridgeURLForDir(t *testing.T) {
 	t.Run("stale file of a dead process is ignored", func(t *testing.T) {
 		dir := t.TempDir()
 		writeRegistryEntry(t, dir, "1.json", RegistryEntry{
-			PID: deadPID(t), Cwd: "/work/a", StartedAt: 9, BridgeSessionID: "cse_stale",
+			PID: deadPID(t), Cwd: "/work/a", StartedAt: 9, BridgeSessionID: "cse_stale", PidDomain: ownDomain(t),
 		})
 		writeRegistryEntry(t, dir, "2.json", RegistryEntry{
 			PID: alive, Cwd: "/work/a", StartedAt: 1, BridgeSessionID: "cse_live",
@@ -120,6 +138,84 @@ func TestBridgeURLForDir(t *testing.T) {
 			t.Errorf("bridgeURLForDir on missing dir = %q; want empty", got)
 		}
 	})
+}
+
+// Liveness is decided per entry by pidDomain (issue: nested runs read as an
+// empty chat). A container run's claude writes its in-container pid — 2 under
+// --init, 9 or so under the nested-containers entry program — which on the
+// host is a kernel thread or nothing at all; probing it answers about a
+// different process. So an entry in another pid namespace is live regardless
+// of its pid, an entry in lab's own namespace is probed as before, and an
+// entry without a parsable pidDomain (an older CLI) is live: absent means
+// "cannot check", never "dead".
+func TestEntryAlive_byPidDomain(t *testing.T) {
+	self, dead := ownDomain(t), deadPID(t)
+	ns, _ := pidNamespaceOf(self)
+	cases := []struct {
+		name   string
+		e      RegistryEntry
+		self   string
+		alive  bool
+		reason string
+	}{
+		{"own namespace, live pid", RegistryEntry{PID: os.Getpid(), PidDomain: self}, ns, true, "a running CLI on the host"},
+		{"own namespace, dead pid", RegistryEntry{PID: dead, PidDomain: self}, ns, false, "a SIGKILLed host CLI's leftover must lose"},
+		{"foreign namespace, dead host pid", RegistryEntry{PID: dead, PidDomain: foreignDomain}, ns, true, "a container pid means nothing on the host"},
+		{"foreign namespace, pid absent on host", RegistryEntry{PID: 1 << 30, PidDomain: foreignDomain}, ns, true, "nested runs: pid 9 does not exist on the host"},
+		{"foreign namespace, host machine-id", RegistryEntry{PID: dead, PidDomain: "linux:ffffffffffffffffffffffffffffffff:pid:[1]"}, ns, true, "only the namespace token decides, not the machine id"},
+		{"no pidDomain, dead pid", RegistryEntry{PID: dead}, ns, true, "an older CLI writes no pidDomain: cannot check, not dead"},
+		{"unparsable pidDomain, dead pid", RegistryEntry{PID: dead, PidDomain: "windows:whatever"}, ns, true, "unparsable is cannot check"},
+		{"self unknown, dead pid", RegistryEntry{PID: dead, PidDomain: foreignDomain}, "", false, "/proc/self/ns/pid unreadable: probe every entry as before"},
+		{"self unknown, live pid", RegistryEntry{PID: os.Getpid()}, "", true, "/proc/self/ns/pid unreadable: probe every entry as before"},
+	}
+	for _, tc := range cases {
+		if got := entryAlive(tc.e, tc.self); got != tc.alive {
+			t.Errorf("%s: entryAlive(%+v, %q) = %v; want %v (%s)", tc.name, tc.e, tc.self, got, tc.alive, tc.reason)
+		}
+	}
+}
+
+func TestPidNamespaceOf(t *testing.T) {
+	cases := map[string]struct {
+		ns string
+		ok bool
+	}{
+		"linux:92c69de892c69de892c69de892c69de8:pid:[4026531836]": {"pid:[4026531836]", true},
+		"linux:ea8e7833ea8e7833ea8e7833ea8e7833:pid:[4026533686]": {"pid:[4026533686]", true},
+		"":                         {"", false},
+		"linux:abc":                {"", false},
+		"linux:abc:pid:[":          {"", false},
+		"linux:abc:pid:4026531836": {"", false},
+	}
+	for in, want := range cases {
+		ns, ok := pidNamespaceOf(in)
+		if ns != want.ns || ok != want.ok {
+			t.Errorf("pidNamespaceOf(%q) = (%q, %v); want (%q, %v)", in, ns, ok, want.ns, want.ok)
+		}
+	}
+	// The resolved self token has the same spelling the CLI embeds, so the two
+	// compare equal for a host-runner entry.
+	if self := selfPidNamespace(); self != "" {
+		if ns, ok := pidNamespaceOf("linux:0123:" + self); !ok || ns != self {
+			t.Errorf("own token %q does not round-trip through pidNamespaceOf: (%q, %v)", self, ns, ok)
+		}
+	}
+}
+
+// The registry pass selects a foreign-namespace entry for the deep link
+// whatever its pid, and two such entries resolve to the newest startedAt —
+// the dead-CLI signal in a container is tmux liveness, not the pid.
+func TestBridgeURLForDir_foreignNamespace(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, "9.json", RegistryEntry{
+		PID: 1 << 30, Cwd: "/work/a", StartedAt: 1, BridgeSessionID: "cse_older", PidDomain: foreignDomain,
+	})
+	writeRegistryEntry(t, dir, "12.json", RegistryEntry{
+		PID: deadPID(t), Cwd: "/work/a", StartedAt: 2, BridgeSessionID: "cse_newer", PidDomain: foreignDomain,
+	})
+	if got, want := bridgeURLForDir(dir, "/work/a"), "https://claude.ai/code/session_newer"; got != want {
+		t.Errorf("bridgeURLForDir = %q; want %q (foreign-namespace entries are live; newest startedAt wins)", got, want)
+	}
 }
 
 // Transcribed v0 contract: the bridge connects seconds after spawn, so

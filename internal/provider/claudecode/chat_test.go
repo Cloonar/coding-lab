@@ -175,7 +175,7 @@ func TestLocateTranscript_registryMatch(t *testing.T) {
 func TestLocateTranscript_returnsPathBeforeFileExists(t *testing.T) {
 	home := t.TempDir()
 	worktree := "/home/op/state/worktrees/proj-manual-1"
-	writeHomeEntry(t, home, "1.json", liveEntry(worktree, "fresh-after-clear", "idle", "", 1))
+	writeHomeEntry(t, home, "1.json", liveEntry(t, worktree, "fresh-after-clear", "idle", "", 1))
 
 	got, err := chatProvider(t).LocateTranscript(context.Background(), "proj~manual-1", worktree, home)
 	if err != nil {
@@ -201,29 +201,31 @@ func writeHomeEntry(t *testing.T, home, name string, e RegistryEntry) {
 	writeRegistryEntry(t, dir, name, e)
 }
 
-// liveEntry renders a registry entry owned by THIS test process (os.Getpid,
-// so pidAlive passes) with the 2.1.284 status fields (issue #79).
-func liveEntry(cwd, sessionID, status, waitingFor string, startedAt int64) RegistryEntry {
+// liveEntry renders a registry entry owned by THIS test process (os.Getpid in
+// its own pid namespace, so entryAlive probes it and passes) with the 2.1.284
+// status fields (issue #79).
+func liveEntry(t *testing.T, cwd, sessionID, status, waitingFor string, startedAt int64) RegistryEntry {
+	t.Helper()
 	return RegistryEntry{
 		PID: os.Getpid(), Cwd: cwd, StartedAt: startedAt, SessionID: sessionID,
-		Status: status, WaitingFor: waitingFor, StatusUpdatedAt: startedAt + 1,
+		Status: status, WaitingFor: waitingFor, StatusUpdatedAt: startedAt + 1, PidDomain: ownDomain(t),
 	}
 }
 
 // Entry selection (issue #79 decision 3): transcript identity and status come
-// from ONE entry — cwd match, live pid, newest startedAt, non-empty sessionId.
+// from ONE entry — cwd match, live per entryAlive, newest startedAt, non-empty sessionId.
 // A dead pid's leftover, a sibling cwd, and a sessionId-less entry are all
 // skipped even when they are newer or carry a louder status.
 func TestRegistryEntryForDir_selection(t *testing.T) {
 	home := t.TempDir()
 	const wt = "/wt/run"
-	writeHomeEntry(t, home, "a.json", liveEntry(wt, "older", "busy", "", 100))
-	writeHomeEntry(t, home, "b.json", liveEntry(wt, "newest-live", "idle", "", 200))
-	dead := liveEntry(wt, "dead-leftover", "waiting", "input needed", 900)
+	writeHomeEntry(t, home, "a.json", liveEntry(t, wt, "older", "busy", "", 100))
+	writeHomeEntry(t, home, "b.json", liveEntry(t, wt, "newest-live", "idle", "", 200))
+	dead := liveEntry(t, wt, "dead-leftover", "waiting", "input needed", 900)
 	dead.PID = deadPID(t)
 	writeHomeEntry(t, home, "c.json", dead)
-	writeHomeEntry(t, home, "d.json", liveEntry("/wt/other", "wrong-cwd", "waiting", "dialog open", 950))
-	writeHomeEntry(t, home, "e.json", liveEntry(wt, "", "busy", "", 999)) // no sessionId yet
+	writeHomeEntry(t, home, "d.json", liveEntry(t, "/wt/other", "wrong-cwd", "waiting", "dialog open", 950))
+	writeHomeEntry(t, home, "e.json", liveEntry(t, wt, "", "busy", "", 999)) // no sessionId yet
 	if err := os.WriteFile(filepath.Join(registryDirUnder(home), "f.json"), []byte("{garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +313,7 @@ func TestReadChat_missingTranscript(t *testing.T) {
 	}
 	// … and so does the registry status.
 	home := t.TempDir()
-	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "busy", "", 1))
+	writeHomeEntry(t, home, "1.json", liveEntry(t, wt, "sess-live", "busy", "", 1))
 	chat, err = p.ReadChat(provider.ReadSpec{RunID: "run_1", RuntimeDir: t.TempDir(), Home: home, Worktree: wt, TranscriptPath: absent})
 	if err != nil || chat.State != provider.StateWorking {
 		t.Errorf("active absent + registry busy = %+v, %v; want StateWorking", chat, err)
@@ -499,7 +501,7 @@ func TestReadChat_registryPrecedence(t *testing.T) {
 			transcript := transcriptPathFor(home, wt, "sess-live")
 			writeTranscript(t, transcript, tc.fold)
 			if tc.status != "-" {
-				writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", tc.status, tc.waitingFor, 1))
+				writeHomeEntry(t, home, "1.json", liveEntry(t, wt, "sess-live", tc.status, tc.waitingFor, 1))
 			}
 			if tc.spool {
 				writeSpool(t, dir, dialogsSubdir, "run_1", prePayload)
@@ -532,7 +534,7 @@ func TestReadChat_endedReadIgnoresRegistry(t *testing.T) {
 	const wt = "/wt/run"
 	transcript := transcriptPathFor(home, wt, "sess-live")
 	writeTranscript(t, transcript, foldNeedsInputTail)
-	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "waiting", "input needed", 1))
+	writeHomeEntry(t, home, "1.json", liveEntry(t, wt, "sess-live", "waiting", "input needed", 1))
 	chat, err := p.ReadChat(provider.ReadSpec{RunID: "run_1", Worktree: wt, TranscriptPath: transcript})
 	if err != nil {
 		t.Fatalf("ReadChat: %v", err)
@@ -830,7 +832,7 @@ func TestReadChat_liveSignalsOutrankPendingHold(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, dialogsSubdir, "run_1.json")); err != nil {
 		t.Fatal(err)
 	}
-	writeHomeEntry(t, home, "1.json", liveEntry(wt, "sess-live", "waiting", "permission request", 1))
+	writeHomeEntry(t, home, "1.json", liveEntry(t, wt, "sess-live", "waiting", "permission request", 1))
 	chat, err = p.ReadChat(spec)
 	if err != nil {
 		t.Fatalf("ReadChat(registry waiting): %v", err)

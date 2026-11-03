@@ -551,9 +551,10 @@ Provenance legend:
   and value shapes verbatim). live.
 - Fields lab reads: `pid` (int), `cwd` (absolute string, kernel-reported),
   `startedAt` (unix millis int64), `bridgeSessionId` (string), `sessionId`
-  (the transcript stem, §5 — read since ADR-0016) and, since issue #79,
-  `status`, `waitingFor` and `statusUpdatedAt` (below). All other keys are
-  ignored. live; parse pinned by `TestCompat_RegistryFixture_parses` (2.1.198
+  (the transcript stem, §5 — read since ADR-0016), since issue #79
+  `status`, `waitingFor` and `statusUpdatedAt` (below), and since 2026-11-03
+  `pidDomain` (the pid's namespace, container-namespace rule below). All
+  other keys are ignored. live; parse pinned by `TestCompat_RegistryFixture_parses` (2.1.198
   shape) and `TestCompat_RegistryFixtures284_parse` (2.1.284 shape).
 - **Session status (issue #79) — live 2.1.284, 2026-10-09.** One anonymized
   capture per observed status in `testdata/registry-{busy,idle,waiting,waiting-question,shell}-2.1.284.json`
@@ -604,10 +605,10 @@ Provenance legend:
     the pending-work hold.
   - **No age bound** on `statusUpdatedAt`: the status is event-driven, not a
     heartbeat (an idle session legitimately keeps a minutes-old timestamp); a
-    dead CLI is caught by the pid filter and tmux liveness, never by a stale
-    timestamp.
+    dead CLI is caught by the pid filter (same namespace only, below) and
+    tmux liveness, never by a stale timestamp.
   - **Entry selection** = the very entry `LocateTranscript` uses
-    (`registryEntryForDir`: cwd match, live pid, newest `startedAt`, non-empty
+    (`registryEntryForDir`: cwd match, live (container-namespace rule below), newest `startedAt`, non-empty
     `sessionId`), so transcript and state always come from one session. Only
     the ACTIVE read consults it (`ReadSpec.Home` set); an ended run is
     transcript-only. `SpoolSig` digests every `*.json` under the sessions dir
@@ -625,13 +626,30 @@ Provenance legend:
     over it → needs_input; waiting → needs_input + `"permission prompt"`;
     waiting-question with no spool → needs_input + `"input needed"`; shell →
     the fold alone; the status-less first write → the fold).
-  - **Container-namespace note (recorded, NOT fixed — issue #79 Notes).**
-    `pidAlive` (`deeplink.go`) runs `kill -0` on the host against the entry's
-    `pid`; for a container run that pid lives in the container's PID
-    namespace (observed `pid:2`) and happens to match a host kernel thread,
-    so the check passes by accident. Harmless because each run has its own
-    HOME and therefore its own registry dir; `pidDomain` (new on 2.1.284)
-    names the namespace if this ever needs fixing.
+  - **Container-namespace rule (fixed 2026-11-03; was "recorded, NOT fixed"
+    from issue #79).** `pidDomain` (2.1.284+) names the pid namespace the
+    entry's `pid` is valid in. Observed shape, live on 2.1.284:
+    `linux:<machine-id>:pid:[<pidns inode>]` — the `pid:[…]` token is exactly
+    `readlink /proc/self/ns/pid` of the writing process (host-runner entry:
+    `linux:92c69de8…:pid:[4026531836]`, equal to the lab process's own;
+    nested-container entry `sessions/9.json`: `linux:ea8e7833…:pid:[4026533686]`,
+    the container's own `/etc/machine-id` and pid namespace). A container
+    run's claude writes its in-container pid — 2 under `--init` (host
+    `kthreadd`, so the old `kill -0` passed by accident), 9 or so under the
+    nested-containers entry program (ADR-0086; no such host process, so the
+    old check dropped the entry and the run read as an empty idle chat).
+    **Lab's rule** (`entryAlive`, `deeplink.go`): compare the `pid:[…]`
+    token only — never the machine-id half — against the lab process's own
+    `/proc/self/ns/pid` (resolved once). Same namespace → `kill -0` as
+    before (a SIGKILLed host predecessor's leftover still loses); another
+    namespace, or `pidDomain` absent or unparsable (an older CLI) → live,
+    the pid is never probed (a dead container CLI is caught by tmux liveness
+    and `--rm` removing the HOME with its registry). If lab cannot read its
+    own namespace link, every entry is probed as before. Lab does NOT
+    translate container pids (`/proc/<pid>/status NSpid`, `podman exec`):
+    the provider knows nothing about the container (ADR-0069/0053). Pinned
+    by `TestEntryAlive_byPidDomain`, `TestBridgeURLForDir_foreignNamespace`
+    and, through the real provider, `TestCompat_RegistryContainerEntry_selected`.
 - `bridgeSessionId` arrives already `session_`-prefixed on 2.1.198 (live);
   the `cse_` → `session_` normalization is kept for tolerance (claude's
   own `toCompatSessionId`; transcripts carry the `cse_` spelling).
@@ -643,8 +661,8 @@ Provenance legend:
 - History pin: claude stopped printing the remote-control deep link into
   the terminal between 2.1.156 and 2.1.170 — the pane-scrape source is
   dead; the registry is the only source. Registry files are removed on
-  graceful exit only (SIGKILL leaves stale files ⇒ pid-alive +
-  newest-startedAt filtering).
+  graceful exit only (SIGKILL leaves stale files ⇒ pid-alive where the
+  namespace allows + newest-startedAt filtering).
 
 ## 3. Auth status + login flow — status live (2.1.198), URL shape fixture (2.1.150); status re-probed on 2.1.221 + 2.1.265 (2026-09-09) + 2.1.280 (2026-09-23) + 2.1.284 (2026-09-29)
 
