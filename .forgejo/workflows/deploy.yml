@@ -38,7 +38,7 @@
 # them, so the gate ordering is unchanged: nothing reaches Cloonar/nixos
 # until every default ref resolves and test-configuration is green.
 #
-# The pin-file contract (issue #1). The pin is the single line
+# The pin-file contract (the 2026-11-03 stale-pin incident). The pin is the single line
 # `rev = "<40 hex>";` in hosts/dev/modules/coding-lab/pin.nix of
 # Cloonar/nixos — the file nixos ADR-0037 moved it to so that the native lab
 # and the lab-superbros guest share one rev. The idempotency check reads that
@@ -150,7 +150,7 @@ jobs:
           # in this file, or the pin has moved or changed shape and this
           # workflow must follow it. Failing here is the point: a blind sed
           # plus `git diff --quiet` reported "pin already current" for two
-          # weeks after the pin moved out of default.nix (issue #1).
+          # weeks after the pin moved out of default.nix (2026-10-21 to 2026-11-03).
           PIN_FILE=hosts/dev/modules/coding-lab/pin.nix
           if [ ! -f "$PIN_FILE" ]; then
             echo "::error::${PIN_FILE} does not exist in Cloonar/nixos — the coding-lab pin moved; update this workflow to follow it"
