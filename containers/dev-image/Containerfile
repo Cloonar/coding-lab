@@ -4,9 +4,10 @@
 # ADR-0053). The module's default dev image is a stock Debian scm image with
 # no language toolchains; this one is the opposite trade: large, and already
 # carrying what sessions keep reaching for — Go, Node, Python and PHP
-# toolchains, a browser for screenshots, database servers for tests, and the
-# usual shell tools. Nothing selects it by default: a repo opts in through
-# its Dev image field, a host through `services.lab.container.defaultImage`.
+# toolchains, a browser for screenshots, database servers for tests, a
+# nested-container stack, and the usual shell tools. Nothing selects it by
+# default: a repo opts in through its Dev image field, a host through
+# `services.lab.container.defaultImage`.
 #
 # What the container runner forces on this file (docs/ops.md § "The full dev
 # image" is the user-facing version):
@@ -27,6 +28,19 @@
 #     data directories.
 #   * /opt/lab is lab's mount point (the agent-tools image) — never bake
 #     content there.
+#
+# Nested containers (ADR-0086). The image also carries rootless podman, the
+# Docker CLI with buildx, ddev and mkcert, so a session can run ddev,
+# `docker compose` or `docker buildx` itself. The stack is inert until lab
+# starts a run in the nested argv shape (a repo with Nested containers on):
+# in an ordinary run the container runner's sandbox stops any nested
+# container from starting. In a nested run the session user prepares the run
+# once with `eval "$(start-nested-podman)"` — the helper starts podman's API
+# service and a healthcheck runner and writes ddev's global config, much as
+# the start-* helpers bring up a database. Two image-side facts make it work
+# and are explained where they are set up below: newuidmap/newgidmap carry
+# file capabilities instead of setuid, and the image ships no /etc/subuid or
+# /etc/subgid (lab's entry program writes the run's one line at run start).
 #
 # No ARG defaults: build.sh passes every pin from versions.env, and a missing
 # one must fail the build (an empty image tag) rather than silently build
@@ -160,17 +174,130 @@ RUN set -eux; \
     npm cache clean --force; \
     rm -rf /root/.npm /root/.cache /var/lib/apt/lists/* /tmp/*
 
-# The image's own files: the per-session database starters, the Chromium
-# container flags, and the apt-only sudo rule (each file explains itself).
-# visudo proves the rule parses — a sudoers syntax error would otherwise only
+# ---- Nested containers (ADR-0086) -------------------------------------------
+# These layers come after every other apt step on purpose: the capability
+# swap and the subid removal below must be the last word on those files.
+
+# Debian packages for rootless podman and the Docker-side tools, all named
+# explicitly because recommends stay off: podman with its OCI runtime (crun),
+# monitor (conmon), network stack (netavark, aardvark-dns, and passt for
+# pasta, the rootless network) and pause-process init (catatonit); uidmap for
+# newuidmap/newgidmap; nftables, without which netavark fails with "unable
+# to execute nft"; libcap2-bin for setcap/getcap; mkcert, without which ddev
+# warns on every start (HTTPS inside the run is not needed — lab's preview
+# front door terminates TLS — but the warning is noise).
+#
+# The Docker CLI is Debian's docker-cli, from the release's own archive like
+# everything else here, so it floats with the security updates. Its
+# Recommends is docker-buildx, which recommends-off keeps out — just as well,
+# since trixie's 0.13 is too old for ddev; buildx comes from upstream below.
+# Docker's own apt repository would also have a current buildx, but it means
+# a second third-party archive and keyring, and swapping docker-cli for
+# docker-ce-cli, all for one static binary. docker-compose is Debian's Go
+# build of Compose v2: it installs the `docker compose` CLI plugin, so a
+# compose user gets the same socket as ddev (which bundles its own compose).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      podman crun conmon netavark aardvark-dns passt catatonit \
+      uidmap nftables libcap2-bin mkcert docker-cli docker-compose; \
+    rm -rf /var/lib/apt/lists/*
+
+# newuidmap/newgidmap as file capabilities, not setuid — Fedora's layout, and
+# what quay.io/podman/stable ships. Debian's setuid-root binaries fail inside
+# a run with "write to uid_map failed: Operation not permitted": a root writer
+# must hold CAP_SYS_ADMIN over the child namespace (the kernel's map_write),
+# and container root has none. With a file capability the binary keeps the
+# caller's euid, the namespace-owner rule applies instead, and the mapping
+# succeeds with no extra privilege. The capability xattr written here at
+# build time is honored in every nested namespace. chmod comes first: a mode
+# change keeps file capabilities, but there is no reason to rely on it.
+#
+# No /etc/subuid or /etc/subgid (nor their `-` backups). The session uid is
+# unknown at build time, and podman sums every line matching the user by
+# name or by numeric uid into one map, so a baked-in line plus the run's own
+# would give overlapping extents and "newuidmap: write to uid_map failed:
+# Invalid argument". The one correct line is a per-run fact, written at run
+# start by lab's entry program. Nothing after this layer installs a package.
+RUN set -eux; \
+    chmod u-s /usr/bin/newuidmap /usr/bin/newgidmap; \
+    setcap cap_setuid+ep /usr/bin/newuidmap; \
+    setcap cap_setgid+ep /usr/bin/newgidmap; \
+    [ ! -u /usr/bin/newuidmap ]; \
+    [ ! -u /usr/bin/newgidmap ]; \
+    [ "$(getcap /usr/bin/newuidmap)" = "/usr/bin/newuidmap cap_setuid=ep" ]; \
+    [ "$(getcap /usr/bin/newgidmap)" = "/usr/bin/newgidmap cap_setgid=ep" ]; \
+    rm -f /etc/subuid /etc/subuid- /etc/subgid /etc/subgid-
+
+# Declared here rather than with the stage's other ARGs: a build argument's
+# value is part of the cache key of every RUN after its declaration, so a
+# buildx or ddev bump rebuilds only these last layers.
+ARG BUILDX_VERSION
+ARG DDEV_VERSION
+
+# docker buildx from its GitHub release, verified against the release's
+# checksums.txt, installed as a system-wide CLI plugin. ddev 1.25.1+ refuses
+# a buildx older than 0.17. /usr/libexec/docker/cli-plugins is one of the
+# Docker CLI's built-in plugin directories and the one Debian's own
+# docker-buildx package uses. linux-amd64: the architecture the workflow
+# builds. `buildx version` needs no daemon.
+RUN set -eux; \
+    base="https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}"; \
+    asset="buildx-v${BUILDX_VERSION}.linux-amd64"; \
+    mkdir /tmp/buildx; \
+    cd /tmp/buildx; \
+    curl -fsSLo "${asset}" "${base}/${asset}"; \
+    curl -fsSLo checksums.txt "${base}/checksums.txt"; \
+    awk -v f="${asset}" '$2 == f || $2 == "*" f' checksums.txt | sha256sum -c -; \
+    install -D -m 0755 "${asset}" /usr/libexec/docker/cli-plugins/docker-buildx; \
+    cd /; \
+    rm -rf /tmp/buildx; \
+    docker buildx version | grep -F " v${BUILDX_VERSION} "; \
+    rm -rf /root/.docker
+
+# ddev from its GitHub release (the asset name carries the tag; there is no
+# unversioned "latest" asset), verified against the release's checksums.txt.
+# The tarball also carries a mkcert; Debian's, above, is the one installed.
+# ddev-hostname is ddev's /etc/hosts helper, which it expects beside itself.
+# No `ddev version` here: ddev refuses to run as root, and the smoke test
+# runs it as the session user instead.
+RUN set -eux; \
+    base="https://github.com/ddev/ddev/releases/download/v${DDEV_VERSION}"; \
+    tarball="ddev_linux-amd64.v${DDEV_VERSION}.tar.gz"; \
+    mkdir /tmp/ddev; \
+    cd /tmp/ddev; \
+    curl -fsSLo "${tarball}" "${base}/${tarball}"; \
+    curl -fsSLo checksums.txt "${base}/checksums.txt"; \
+    awk -v f="${tarball}" '$2 == f || $2 == "*" f' checksums.txt | sha256sum -c -; \
+    tar -xzf "${tarball}" ddev ddev-hostname; \
+    install -m 0755 ddev ddev-hostname /usr/local/bin/; \
+    cd /; \
+    rm -rf /tmp/ddev
+
+# ddev asks whether it may send usage statistics on the first container-
+# starting command after an upgrade — and every run's HOME is fresh, so that
+# is every run. In an interactive pane the question blocks; with
+# DDEV_NONINTERACTIVE it answers yes by default. Neither is right for a lab
+# session, so the image turns ddev's instrumentation off outright (a
+# session that wants it can unset this).
+ENV DDEV_NO_INSTRUMENTATION=true
+
+# The image's own files: the per-session database starters and
+# start-nested-podman, the Chromium container flags, podman's system config
+# for nested runs, and the apt-only sudo rule (each file explains itself).
+# The two podman files are named one by one and land beside the policy.json
+# Debian's containers-common ships in /etc/containers (a directory copy with
+# --chmod=0644 could leave that directory itself untraversable). visudo
+# proves the rule parses — a sudoers syntax error would otherwise only
 # surface as sudo refusing to run at all, inside a session.
 COPY --chmod=0755 rootfs/usr/local/bin/ /usr/local/bin/
 COPY --chmod=0644 rootfs/etc/chromium.d/lab-container /etc/chromium.d/lab-container
+COPY --chmod=0644 rootfs/etc/containers/containers.conf rootfs/etc/containers/registries.conf /etc/containers/
 COPY --chmod=0440 rootfs/etc/sudoers.d/lab-apt /etc/sudoers.d/lab-apt
 RUN visudo -cf /etc/sudoers.d/lab-apt
 
 LABEL org.opencontainers.image.title="dev-image: full" \
-      org.opencontainers.image.description="Opt-in full dev image for lab container sessions: Go, Node, Python and PHP toolchains, Chromium and Playwright, database servers, and common shell tools." \
+      org.opencontainers.image.description="Opt-in full dev image for lab container sessions: Go, Node, Python and PHP toolchains, Chromium and Playwright, database servers, a nested-container stack (rootless podman, Docker CLI with buildx, ddev), and common shell tools." \
       org.opencontainers.image.source="https://github.com/Cloonar/coding-lab"
 
 CMD ["bash"]
