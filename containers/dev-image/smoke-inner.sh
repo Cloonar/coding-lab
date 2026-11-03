@@ -233,6 +233,10 @@ exports_only "${out}"
 grep -qF "LAB_IMAGE_ARCHIVES '/tmp/no-such-archives' is not a directory — no image archives imported" "${err}" \
   || svc_fail "start-nested-podman did not say the archives directory is missing"
 for p in ${pids}; do kill -0 "${p}" 2>/dev/null || fail "pid ${p} from start-nested-podman is gone"; done
+# The import left the image's layer in the session's storage under HOME, and
+# rootless podman makes a layer's diff/ directory read-only (0555), so the
+# host's plain rm -rf of HOME would fail on it. podman removes it cleanly.
+quiet podman rmi "${tag}"
 
 step "podman as the session user"
 got="$(podman info --format '{{.Host.CgroupManager}} {{.Host.NetworkBackend}}')" || fail "podman info (output above)"
