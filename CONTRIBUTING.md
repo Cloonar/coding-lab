@@ -23,6 +23,7 @@ make lab           # build SPA + server binary with embedded UI → bin/lab
 make labctl        # agent-side CLI → bin/labctl
 make test          # go test ./...
 make lint          # golangci-lint run
+make seccomp-refresh  # re-fetch the upstream seccomp profile nested runs patch (pin: SECCOMP_REF), then test it
 cd web && npm test # SPA unit tests (vitest)
 ```
 
