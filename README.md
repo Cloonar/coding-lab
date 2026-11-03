@@ -177,6 +177,12 @@ labctl secret scan <rev-arg>...       scan the outgoing diff for secret values; 
 labctl expose <name> <port>           serve the run's loopback <port> at https://<name>.<preview-domain>;
                                       prints the URL first, then forwards until stopped (run it with &)
 labctl expose stop <name>             end the exposure and free the name
+labctl container-entry --uid N --gid M -- <cmd> [args...]
+                                      PID 1 of a nested-containers run (lab starts it; not for hand use):
+                                      set up as container root, drop to N:M, run cmd, reap orphans
+labctl container-entry --self-test --uid N --gid M
+                                      check that nested containers can work here: one "ok: <check>" or
+                                      "fail: <check>: <why>" line per check
 ```
 
 **Probes**: `/healthz` (liveness, always 200), `/readyz` (503 while the DB is unreachable), `/metrics` (Prometheus). All three are mounted outside auth.
