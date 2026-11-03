@@ -1,8 +1,8 @@
 #!/bin/sh
 # smoke-inner.sh — runs INSIDE the full dev image, started by smoke-test.sh
 # under lab's session conditions (unprivileged uid, empty HOME, lab's PATH).
-# Expects PHP_VERSIONS, PHP_DEFAULT, GO_VERSION and NODE_MAJOR from
-# versions.env in the environment.
+# Expects PHP_VERSIONS, PHP_DEFAULT, GO_VERSION, NODE_MAJOR, BUILDX_VERSION
+# and DDEV_VERSION from versions.env in the environment.
 set -eu
 
 step() { echo ">>> $*"; }
@@ -28,7 +28,9 @@ for c in \
   rg fd jq yq shellcheck sqlite3 zip unzip tree less file patch \
   psql initdb pg_ctl mariadb mariadbd mariadb-install-db mariadb-admin \
   redis-server redis-cli start-postgres start-mariadb start-redis \
-  chromium gm gs pdftotext sudo
+  chromium gm gs pdftotext sudo \
+  podman crun conmon catatonit pasta nft newuidmap newgidmap getcap \
+  docker ddev ddev-hostname mkcert start-nested-podman
 do
   command -v "${c}" >/dev/null || fail "${c} not found on PATH (${PATH})"
 done
@@ -114,5 +116,72 @@ start-redis >/dev/null || fail "start-redis"
 start-redis >/dev/null || fail "start-redis is not re-runnable"
 [ "$(redis-cli -p "${REDIS_PORT}" ping)" = "PONG" ] || fail "redis-cli ping"
 redis-cli -p "${REDIS_PORT}" shutdown nosave >/dev/null 2>&1 || true
+
+# Nested containers (ADR-0086). Only what works without lab's nested argv:
+# this container has no /dev/net/tun, a masked /proc, podman's default seccomp
+# profile and no subuid line, so podman runs with a single-uid mapping (and
+# says so in a warning) and no nested container is started here.
+step "nested containers: file capabilities, no subid files, podman's helpers"
+# Debian installs newuidmap/newgidmap setuid root, which fails inside a run;
+# the image swaps that for file capabilities (see the Containerfile). getcap
+# may append a [rootid=...] note for a namespaced capability, so match the
+# capability itself rather than the whole line.
+for m in uid:setuid gid:setgid; do
+  b="/usr/bin/new${m%%:*}map"
+  cap="cap_${m#*:}=ep"
+  case "$(getcap "${b}")" in
+    *" ${cap}"*) ;;
+    *) fail "${b} lacks ${cap}: '$(getcap "${b}")'" ;;
+  esac
+  [ ! -u "${b}" ] || fail "${b} is still setuid"
+done
+# The entry program writes the run's one subuid/subgid line at run start; a
+# baked-in file would add a second, overlapping extent.
+for f in /etc/subuid /etc/subgid; do
+  [ ! -e "${f}" ] || fail "${f} exists in the image"
+done
+# netavark and aardvark-dns live off PATH, where podman looks for them.
+for b in /usr/lib/podman/netavark /usr/lib/podman/aardvark-dns; do
+  [ -x "${b}" ] || fail "${b} missing"
+done
+nft --version >/dev/null || fail "nft --version"
+
+step "docker buildx and compose"
+got="$(docker buildx version)" || fail "docker buildx version"
+v="$(echo "${got}" | awk '{print $2}')"
+v="${v#v}"
+[ "${v}" = "${BUILDX_VERSION}" ] || fail "buildx is ${v}, want ${BUILDX_VERSION}: ${got}"
+[ "$(printf '%s\n' 0.17.0 "${v}" | sort -V | head -n 1)" = "0.17.0" ] \
+  || fail "buildx ${v} is older than 0.17, which ddev refuses"
+docker compose version >/dev/null || fail "docker compose version"
+
+step "start-nested-podman, twice"
+rt="${XDG_RUNTIME_DIR:-/tmp/lab-nested/run}"
+want="export DOCKER_HOST=unix://${rt}/podman.sock"
+# On failure, show the service log: it dies with this container.
+svc_fail() { cat "${rt}/podman-service.log" >&2 2>/dev/null || true; fail "$*"; }
+out="$(start-nested-podman)" || svc_fail "start-nested-podman"
+[ "$(echo "${out}" | tail -n 1)" = "${want}" ] || fail "start-nested-podman's last line is not '${want}': ${out}"
+pids="$(cat "${rt}/podman-service.pid" "${rt}/healthcheck.pid")"
+out="$(start-nested-podman)" || svc_fail "start-nested-podman is not re-runnable"
+[ "$(echo "${out}" | tail -n 1)" = "${want}" ] || fail "second run's last line is not '${want}': ${out}"
+[ "$(cat "${rt}/podman-service.pid" "${rt}/healthcheck.pid")" = "${pids}" ] \
+  || fail "the second run started another service or healthcheck runner"
+for p in ${pids}; do kill -0 "${p}" 2>/dev/null || fail "pid ${p} from start-nested-podman is gone"; done
+eval "${out}"
+
+step "podman as the session user"
+got="$(podman info --format '{{.Host.CgroupManager}} {{.Host.NetworkBackend}}')" || fail "podman info (output above)"
+[ "${got}" = "cgroupfs netavark" ] || fail "podman info: want 'cgroupfs netavark', got '${got}'"
+
+step "ddev"
+# Against the helper's API service: ddev version fails without a Docker API.
+got="$(ddev version 2>&1)" || fail "ddev version: ${got}"
+echo "${got}" | grep -qF "v${DDEV_VERSION}" || fail "ddev is not v${DDEV_VERSION}: ${got}"
+
+# The service and the runner are detached on purpose; stop them so nothing
+# outlives the checks.
+# shellcheck disable=SC2086 # pids is a whitespace-separated pid list
+kill ${pids} 2>/dev/null || true
 
 echo "inner smoke: all checks passed"

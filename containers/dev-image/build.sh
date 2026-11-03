@@ -28,6 +28,8 @@ image_ref="localhost/dev-image:full"
   --build-arg "NODE_MAJOR=${NODE_MAJOR}" \
   --build-arg "PHP_VERSIONS=${PHP_VERSIONS}" \
   --build-arg "PHP_DEFAULT=${PHP_DEFAULT}" \
+  --build-arg "BUILDX_VERSION=${BUILDX_VERSION}" \
+  --build-arg "DDEV_VERSION=${DDEV_VERSION}" \
   -t "${image_ref}" \
   .
 

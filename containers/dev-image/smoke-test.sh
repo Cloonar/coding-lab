@@ -11,8 +11,13 @@
 #   * PATH is lab's fixed container PATH, not the image's.
 #
 # Inside that container smoke-inner.sh checks every toolchain, takes real
-# browser screenshots, exercises the apt-only sudo rule, and starts each
-# database server. Requires the image build.sh produces.
+# browser screenshots, exercises the apt-only sudo rule, starts each
+# database server, and checks the nested-container stack (ADR-0086) as far
+# as it works without lab's nested argv: the binaries, the newuidmap /
+# newgidmap file capabilities, podman's config, and start-nested-podman's
+# API service. Nested containers themselves need the outer flags only lab's
+# nested runs carry, so running one is left to the maintainer's end-to-end
+# check. Requires the image build.sh produces.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -65,6 +70,8 @@ echo ">>> smoke: ${image_ref} as uid $(id -u), empty HOME, lab's PATH"
   --env "PHP_DEFAULT=${PHP_DEFAULT}" \
   --env "GO_VERSION=${GO_VERSION}" \
   --env "NODE_MAJOR=${NODE_MAJOR}" \
+  --env "BUILDX_VERSION=${BUILDX_VERSION}" \
+  --env "DDEV_VERSION=${DDEV_VERSION}" \
   "${image_ref}" \
   sh /smoke-inner.sh
 
