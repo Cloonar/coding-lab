@@ -36,6 +36,8 @@ The pins, decided (with the maintainer, 2026-10-03):
 
 Accepted. Settled with the maintainer on 2026-10-03. Builds on ADR-0052 (the container runner whose argv shapes the image), ADR-0053 (per-repo dev images, pin-on-save — the mechanism this image is selected through) and ADR-0051/ADR-0064 (the ghcr publish pattern it copies). Amends ADR-0053 only in that lab now publishes a dev image of its own; the contract is unchanged. Takes up ADR-0056's named revisit condition for a Cloonar-built image while leaving that ADR's decision intact: the module default is still the stock `buildpack-deps:stable-scm`.
 
+Amended by [ADR-0086](0086-nested-containers.md) (issue #113, 2026-11-03): the sentence "A session cannot run a nested container, so the usual answer — a service container, `ddev`, `docker compose` — is unavailable" no longer holds. The image now carries rootless podman, the Docker CLI with buildx, ddev and mkcert, and a session in a run lab starts in the nested shape can run them. The baked database servers and the `start-*` helpers stay; the nested stack is additive.
+
 ## Considered options
 
 - **Making it the module default.** Rejected: it is several gigabytes, so every fresh deployment's first spawn and every containerized provider login would wait on that pull, the deploy probe would gain a dependency on this image's publish, and deployments that want a small audited userland would have to opt out. A default should be the smallest thing that works; this is the opposite, on purpose.
