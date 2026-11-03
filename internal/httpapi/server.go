@@ -43,6 +43,15 @@ const defaultHeartbeat = 25 * time.Second
 
 // Options configures a Server. Store and Bus are required; everything else
 // has sane defaults.
+// NestedHooks is the slice of the Nested containers runtime (issue #115 /
+// ADR-0086) the save handlers drive — see Options.Nested. Both methods are
+// non-blocking and idempotent enough to call on every matching save:
+// Kick starts the nested preflight once per process, RefreshCache coalesces.
+type NestedHooks interface {
+	Kick()
+	RefreshCache()
+}
+
 type Options struct {
 	Store  *store.Store
 	Bus    *events.Bus
@@ -215,6 +224,18 @@ type Options struct {
 	// (instance.EffectiveDevImage, from its own copy of the flag).
 	DevImageFallback string
 
+	// Nested receives the side effects of saving the Nested containers knobs
+	// (issue #115 / ADR-0086) — cmd/lab's *nested.Service, wired whenever
+	// container config is present: a repo PATCH that pins nested_containers
+	// on, or a settings PATCH that saves nested_containers_default "true",
+	// kicks the nested preflight, so the checks a startup with the knob off
+	// skipped run before the first nested spawn; a settings PATCH that saves
+	// nested_image_cache refreshes the shared image store. Both calls return
+	// at once and report nothing — a side effect never turns a persisted save
+	// into an error. nil (host-only deployments, most tests) makes both no-ops.
+	// Must be a true nil, never a typed nil pointer, when absent.
+	Nested NestedHooks
+
 	// BaseURL is --base-url; its origin anchors CSRF Origin checks and the
 	// Secure-cookie decision. Empty means "derive from the request".
 	BaseURL string
@@ -324,6 +345,8 @@ type Server struct {
 	warpgateHostKeys WarpgateHostKeyPin
 
 	devImageFallback string // --container-image, reported as dev_image_fallback
+
+	nested NestedHooks // Options.Nested; nil = the save hooks are no-ops
 
 	// exposures backs every run response's "exposures" key (issue #105; see
 	// Options.Exposures). nil = no preview listener; runExposures handles it.
@@ -438,6 +461,7 @@ func New(o Options) (*Server, error) {
 		warpgateSSHAddr: o.WarpgateSSHAddr,
 
 		devImageFallback: o.DevImageFallback,
+		nested:           o.Nested,
 
 		previewDomain:   o.PreviewDomain,
 		previewPort:     o.PreviewPort,

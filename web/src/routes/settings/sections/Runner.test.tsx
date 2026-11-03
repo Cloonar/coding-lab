@@ -1,9 +1,11 @@
-// Global settings › Runner (issues #55, #205, #85): the Runner pick (the repo
+// Global settings › Runner (issues #55, #205, #85, #115): the Runner pick (the repo
 // page's two picks, no inherit segment) with the unsandboxed-host warning and
 // the inheriting-repo count line; Dev image, whose hint names what a blank
 // falls through to; Container limits. Nothing folds: Dev image and the limits
 // show whatever the Runner is, and the note says they apply to container runs,
-// including repos pinned to container.
+// including repos pinned to container. The Nested containers default is an
+// on/off switch with the repo page's copy, and the nested image cache a
+// textarea of image refs, one per line, sent as the server stores it.
 //
 // Switching the default TO host asks at Save, in an in-page dialog naming the
 // inheriting repos: Cancel sends nothing and keeps every edit, Switch to host
@@ -14,8 +16,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   container,
   dialogButton,
+  fieldChanged,
   fieldError,
   fieldHint,
+  fieldLabel,
+  fieldState,
   h,
   history,
   input,
@@ -32,8 +37,12 @@ import {
   segmentLabels,
   segmentValue,
   settle,
+  switchButton,
+  switchOn,
+  textarea,
   toastText,
   typeField,
+  typeInto,
 } from '../harness';
 
 installSettingsHooks();
@@ -320,5 +329,159 @@ describe('Runner: switching the default to host', () => {
 
     expect(h.patchBodies).toEqual([{ runner_default: 'host' }]);
     expect(history.get()).toBe('/other');
+  });
+});
+
+const NESTED_HINT =
+  "Lets a run start its own rootless podman containers (ddev, docker compose, buildx). Widens the run's kernel surface and adds several gigabytes of per-run storage.";
+
+describe('Runner: nested containers default', () => {
+  it('renders the switch off from the seed, with the repo page copy', async () => {
+    await mountPage();
+    expect(fieldLabel('nested_containers_default')).toBe('Nested containers');
+    expect(switchOn('nested_containers_default')).toBe(false);
+    expect(fieldHint('nested_containers_default')).toBe(
+      `${NESTED_HINT} The default for every repo that inherits it; a repo can pin its own. Ignored under the host runner.`,
+    );
+    // The bottom layer: nothing to inherit, no state chip.
+    expect(fieldState('nested_containers_default')).toBeNull();
+  });
+
+  it('seeds on from a stored true', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, nested_containers_default: true };
+    await mountPage();
+    expect(switchOn('nested_containers_default')).toBe(true);
+  });
+
+  it('turning it on saves exactly nested_containers_default: true, and back off false', async () => {
+    await mountPage();
+    switchButton('nested_containers_default').click();
+    await settle();
+    expect(fieldChanged('nested_containers_default')).toBe(true);
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    await save();
+    expect(h.patchBodies).toEqual([{ nested_containers_default: true }]);
+    expect(h.settingsOnServer.nested_containers_default).toBe(true);
+    expect(saveBar()).toBeNull();
+
+    switchButton('nested_containers_default').click();
+    await settle();
+    await save();
+    expect(h.patchBodies.at(-1)).toEqual({ nested_containers_default: false });
+  });
+
+  it('never folds: it shows with Host as with Container', async () => {
+    await mountPage();
+    for (const runner of ['host', 'container']) {
+      await pick('runner_default', runner);
+      expect(container.querySelector('[data-field="nested_containers_default"]')).not.toBeNull();
+      expect(container.querySelector('[data-field="nested_image_cache"]')).not.toBeNull();
+    }
+  });
+});
+
+describe('Runner: nested image cache', () => {
+  const REFS = 'docker.io/ddev/ddev-webserver:v1.25.5\ndocker.io/ddev/ddev-traefik-router:v1.25.5';
+
+  it('is a textarea seeded from the stored list, one ref per line, with its help', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, nested_image_cache: REFS };
+    await mountPage();
+    expect(fieldLabel('nested_image_cache')).toBe('Nested image cache');
+    expect(textarea('nested_image_cache').value).toBe(REFS);
+    const hint = fieldHint('nested_image_cache');
+    expect(hint).toContain('One image ref per line.');
+    expect(hint).toContain('shared read-only store that nested runs use');
+    expect(hint).toContain('Saving the list starts a pull.');
+    expect(hint).toContain('a failed pull is logged and never blocks a run');
+    // The hint describes the control.
+    expect(textarea('nested_image_cache').getAttribute('aria-describedby')).toBe(
+      'rs-nested_image_cache-hint',
+    );
+  });
+
+  it('round-trips: sent as the server stores it, and the answer is applied', async () => {
+    await mountPage();
+    typeInto(
+      textarea('nested_image_cache'),
+      '  docker.io/ddev/ddev-webserver:v1.25.5  \n\n docker.io/ddev/ddev-traefik-router:v1.25.5\n',
+    );
+    await settle();
+    expect(fieldChanged('nested_image_cache')).toBe(true);
+    await save();
+
+    expect(h.patchBodies).toEqual([{ nested_image_cache: REFS }]);
+    expect(h.settingsOnServer.nested_image_cache).toBe(REFS);
+    expect(textarea('nested_image_cache').value).toBe(REFS);
+    expect(saveBar()).toBeNull();
+  });
+
+  it('blank lines and indentation alone are no change', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, nested_image_cache: REFS };
+    await mountPage();
+    typeInto(textarea('nested_image_cache'), `\n${REFS}\n\n`);
+    await settle();
+    expect(fieldChanged('nested_image_cache')).toBe(false);
+    expect(saveBar()).toBeNull();
+  });
+
+  it('clearing the list sends ""', async () => {
+    h.settingsOnServer = { ...h.settingsOnServer, nested_image_cache: REFS };
+    await mountPage();
+    typeInto(textarea('nested_image_cache'), '');
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([{ nested_image_cache: '' }]);
+  });
+
+  it('a line with a space is a problem at the field, and nothing is sent', async () => {
+    await mountPage();
+    typeInto(textarea('nested_image_cache'), 'docker.io/library/debian:trixie\nddev webserver');
+    await settle();
+    await save();
+
+    expect(h.patchBodies).toEqual([]);
+    expect(fieldError('nested_image_cache')).toBe(
+      'Line 2 contains a space. Put one image ref on each line.',
+    );
+    expect(textarea('nested_image_cache').getAttribute('aria-invalid')).toBe('true');
+    expect(saveBarTitle()).toBe('1 problem to fix');
+  });
+
+  it('a refusal naming the field is pinned under the textarea, and the list stays', async () => {
+    await mountPage();
+    typeInto(textarea('nested_image_cache'), 'docker.io/library/debian:trixie');
+    await settle();
+    h.patchRefusal = {
+      error: 'nested_image_cache: line 1 is not an image reference',
+      field: 'nested_image_cache',
+    };
+    await save();
+
+    expect(fieldError('nested_image_cache')).toBe(
+      'nested_image_cache: line 1 is not an image reference',
+    );
+    expect(textarea('nested_image_cache').getAttribute('aria-invalid')).toBe('true');
+    expect(document.activeElement).toBe(textarea('nested_image_cache'));
+    expect(textarea('nested_image_cache').value).toBe('docker.io/library/debian:trixie');
+
+    // Editing it clears the refusal; the next Save goes through.
+    typeInto(textarea('nested_image_cache'), 'docker.io/library/debian:bookworm');
+    await settle();
+    expect(fieldError('nested_image_cache')).toBeNull();
+    await save();
+    expect(h.patchBodies.at(-1)).toEqual({
+      nested_image_cache: 'docker.io/library/debian:bookworm',
+    });
+  });
+
+  it('saves with the switch in one PATCH', async () => {
+    await mountPage();
+    switchButton('nested_containers_default').click();
+    typeInto(textarea('nested_image_cache'), 'docker.io/library/debian:trixie');
+    await settle();
+    await save();
+    expect(h.patchBodies).toEqual([
+      { nested_containers_default: true, nested_image_cache: 'docker.io/library/debian:trixie' },
+    ]);
   });
 });

@@ -32,7 +32,7 @@ var inheritedKeys = []string{
 	"afk_effort_default", "afk_model_default", "afk_options", "afk_provider_default", "afk_remote_default",
 	"budget_minutes", "container_memory", "container_nofile", "container_pids", "effort_default",
 	"git_author_email", "git_author_name", "image_ref", "lander_effort", "lander_model", "lander_provider",
-	"max_instances_override", "model_default", "provider", "remote_default", "runner",
+	"max_instances_override", "model_default", "nested_containers", "provider", "remote_default", "runner",
 }
 
 // spawnTruth asks the spawn path's resolvers what each RepoInherited key is
@@ -122,6 +122,9 @@ func spawnTruth(t *testing.T, x *instTestServer, repo store.Repo) map[string]any
 		r.ContainerMemory, r.ContainerPids, r.ContainerNofile = nil, nil, nil
 	})); err == nil {
 		out["container_memory"], out["container_pids"], out["container_nofile"] = mem, float64(pids), float64(nofile)
+	}
+	if v, err := instance.EffectiveNestedContainers(ctx, x.st, with(func(r *store.Repo) { r.NestedContainers = nil })); err == nil {
+		out["nested_containers"] = v
 	}
 	return out
 }
@@ -218,8 +221,9 @@ func TestRepoInherited_agentChains(t *testing.T) {
 		"budget_minutes": float64(120), "max_instances_override": float64(6),
 		"git_author_name": "", "git_author_email": "",
 		"runner": store.RunnerHost, "image_ref": "",
-		"container_memory": store.DefaultContainerMemory,
-		"container_pids":   float64(store.DefaultContainerPids), "container_nofile": float64(store.DefaultContainerNofile),
+		"nested_containers": false, // the seeded-off nested_containers_default
+		"container_memory":  store.DefaultContainerMemory,
+		"container_pids":    float64(store.DefaultContainerPids), "container_nofile": float64(store.DefaultContainerNofile),
 	}
 	t.Run("no body resolves the saved repo", func(t *testing.T) {
 		inheritedCheck(t, x, nil, saved, seeded)
@@ -338,7 +342,8 @@ func TestRepoInherited_remoteControl(t *testing.T) {
 }
 
 // TestRepoInherited_globalsAndOverrides: the runner, dev image, container
-// limits, AFK budget, instance cap and git author follow the global settings,
+// limits, Nested containers, AFK budget, instance cap and git author follow
+// the global settings,
 // and the repo's OWN overrides — set here on every one of them — never leak
 // into their inherited values.
 func TestRepoInherited_globalsAndOverrides(t *testing.T) {
@@ -353,6 +358,7 @@ func TestRepoInherited_globalsAndOverrides(t *testing.T) {
 	x.putGlobal(t, store.SettingGitAuthorName, "Lab Bot")
 	x.putGlobal(t, store.SettingGitAuthorEmail, "bot@example.com")
 	x.putGlobal(t, store.SettingSpawnOptionsAFK, `{"ultracode":"true","foreign":"x"}`)
+	x.putGlobal(t, store.SettingNestedContainersDefault, "true")
 
 	saved := x.storeRepoSettings(t, store.RepoSettingsUpdate{
 		Runner:               store.Set(ptrOf(store.RunnerHost)),
@@ -365,10 +371,13 @@ func TestRepoInherited_globalsAndOverrides(t *testing.T) {
 		GitAuthorName:        store.Set(ptrOf("Own Name")),
 		GitAuthorEmail:       store.Set(ptrOf("own@example.com")),
 		AFKOptions:           store.Set(map[string]string{"ultracode": "false"}),
+		// An explicit off pin must not leak into the inherited (global) on.
+		NestedContainers: store.Set(ptrOf(false)),
 	})
 	inheritedCheck(t, x, nil, saved, map[string]any{
 		"runner": store.RunnerContainer, "image_ref": "registry.example/dev:1@sha256:abc",
-		"container_memory": "4g", "container_pids": float64(100), "container_nofile": float64(200),
+		"nested_containers": true,
+		"container_memory":  "4g", "container_pids": float64(100), "container_nofile": float64(200),
 		"budget_minutes": float64(45), "max_instances_override": float64(3),
 		"git_author_name": "Lab Bot", "git_author_email": "bot@example.com",
 		// The global bag filtered to the provider's declared schema.
@@ -384,6 +393,8 @@ func TestRepoInherited_resolverErrorsYieldNull(t *testing.T) {
 	x.putGlobal(t, store.SettingRunnerDefault, "bogus") // EffectiveRunner refuses a non-Runner
 	x.putGlobal(t, store.SettingSpawnOptionsAFK, "{")   // ResolveSpawnOptions refuses malformed JSON
 	x.putGlobal(t, store.SettingContainerPids, "lots")  // the limits read refuses a garbled int
+	// EffectiveNestedContainers refuses anything but exactly "true"/"false".
+	x.putGlobal(t, store.SettingNestedContainersDefault, "yes")
 	saved := x.storeRepoSettings(t, store.RepoSettingsUpdate{
 		// A stored lander agent the registry lacks is a STRICT request: the
 		// lander launch fails, so the lander model/effort cannot resolve —
@@ -391,7 +402,7 @@ func TestRepoInherited_resolverErrorsYieldNull(t *testing.T) {
 		LanderProvider: store.Set(ptrOf("ghost")),
 	})
 	got := inheritedCheck(t, x, nil, saved, map[string]any{
-		"runner": nil, "afk_options": nil,
+		"runner": nil, "afk_options": nil, "nested_containers": nil,
 		"container_memory": nil, "container_pids": nil, "container_nofile": nil,
 		"lander_model": nil, "lander_effort": nil,
 		"lander_provider": "claude-code", "provider": "claude-code", "model_default": "opus[1m]",

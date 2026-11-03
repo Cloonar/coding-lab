@@ -83,7 +83,7 @@ const SELECTS = [
   'lander_model',
   'lander_effort',
 ];
-const THREE_WAY = ['remote_default', 'afk_remote_default', 'runner'];
+const THREE_WAY = ['remote_default', 'afk_remote_default', 'runner', 'nested_containers'];
 const INPUTS = [
   'budget_minutes',
   'max_instances_override',
@@ -127,6 +127,7 @@ function pinnedRepo(): Repo {
     container_memory: '4g',
     container_pids: 2048,
     container_nofile: 8192,
+    nested_containers: true,
     lander_provider: 'claude-code',
     lander_model: 'sonnet',
     lander_effort: 'high',
@@ -220,6 +221,7 @@ describe('an inherited field shows the value it resolves to', () => {
       container_memory: '8g',
       container_pids: '4096',
       container_nofile: '16384',
+      nested_containers: 'Inherited · off',
       lander_provider: 'Inherited · Claude Code',
       lander_model: 'Inherited · Opus (1M)',
       lander_effort: 'Inherited · high',

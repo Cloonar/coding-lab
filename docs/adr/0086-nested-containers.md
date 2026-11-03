@@ -77,6 +77,8 @@ The image, decided with it (issue #113):
 
 Accepted 2026-11-03. Decided with the maintainer in a grill session on 2026-11-02; issue #113's agent brief is the contract. Lands with issue #113 (the image, the helper and this ADR); the entry program (issue 2) and the lab feature (issue 3) implement the remaining pins.
 
+Implemented 2026-11-03 by issue #114 (the entry program, `labctl container-entry`) and issue #115, the lab feature, which implements the remaining pins: the per-repo knob `repos.nested_containers` with the global `nested_containers_default`, the nested run argv, the seccomp file at `<state>/containers/nested-seccomp.json`, the `nested-tun` and `nested-probe` preflight checks, the shared store at `<state>/containers/shared-store` filled from `nested_image_cache`, and the worktree notes' `## Nested containers` section.
+
 - **[ADR-0069](0069-opt-in-full-dev-image.md):** amended. Its sentence "A session cannot run a nested container, so the usual answer — a service container, `ddev`, `docker compose` — is unavailable" is superseded: a session in a nested run can. The baked database servers and their `start-*` helpers stay. The stack is additive, and a repo that is not nested still has only them.
 - **[ADR-0074](0074-container-init-reaps-orphans.md):** unchanged for every run that is not nested. In a nested run podman refuses `--init`, and the entry program reaps instead.
 - **[ADR-0052](0052-container-runner.md):** the default argv is unchanged; a nested run adds the flags above. The run still reaches lab only through the agent socket.

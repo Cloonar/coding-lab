@@ -12,8 +12,8 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
-// fakeRunnerSettings is the settings seam of EffectiveRunner and
-// EffectiveDevImage, scripted per case: a row value (present=true), an absent
+// fakeRunnerSettings is the settings seam of EffectiveRunner,
+// EffectiveDevImage and EffectiveNestedContainers, scripted per case: a row value (present=true), an absent
 // row, or a store read error — the last being the one case a real database
 // cannot produce on demand. keys records every key read, in order.
 type fakeRunnerSettings struct {
@@ -90,6 +90,81 @@ func TestEffectiveRunner(t *testing.T) {
 			}
 			if got != "" {
 				t.Errorf("EffectiveRunner returned %q alongside its error, want \"\"", got)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("error %q does not wrap %v", err, tc.wantIs)
+			}
+		})
+	}
+}
+
+// TestEffectiveNestedContainers pins the one Nested containers resolver
+// (issue #115 / ADR-0086), the ADR-0071 shape: a pin — on or off — wins
+// without reading the setting; nil inherits nested_containers_default, read
+// live; and every way the setting can fail — absent, unreadable, anything but
+// exactly "true"/"false" — is an error that names nested_containers_default
+// (and the bad value, when there is one) and Settings → Runner, returning
+// false rather than ever silently falling back.
+func TestEffectiveNestedContainers(t *testing.T) {
+	repo := func(pin *bool) store.Repo { return store.Repo{Name: "proj", NestedContainers: pin} }
+	cases := []struct {
+		name      string
+		repo      store.Repo
+		settings  *fakeRunnerSettings
+		want      bool
+		wantReads int      // pins must not even read the setting
+		wantErr   []string // substrings the error must carry; nil = success
+		wantIs    error    // a wrapped cause the error must still match
+	}{
+		{name: "pinned on beats default off", repo: repo(new(true)),
+			settings: &fakeRunnerSettings{value: "false", present: true}, want: true},
+		{name: "pinned off beats default on", repo: repo(new(false)),
+			settings: &fakeRunnerSettings{value: "true", present: true}, want: false},
+		{name: "pin wins over a broken default", repo: repo(new(true)),
+			settings: &fakeRunnerSettings{err: errors.New("database is locked")}, want: true},
+		{name: "inherit on", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: "true", present: true}, want: true, wantReads: 1},
+		{name: "inherit off", repo: repo(nil),
+			settings: &fakeRunnerSettings{value: "false", present: true}, want: false, wantReads: 1},
+		{name: "absent default", repo: repo(nil), settings: &fakeRunnerSettings{}, wantReads: 1,
+			wantErr: []string{"repo proj", "inherits the global Nested containers default", "nested_containers_default", "not found", "Settings → Runner"},
+			wantIs:  store.ErrNotFound},
+		{name: "unreadable default", repo: repo(nil), settings: &fakeRunnerSettings{err: errors.New("database is locked")}, wantReads: 1,
+			wantErr: []string{"nested_containers_default", "could not be read", "database is locked", "Settings → Runner"}},
+		{name: "garbage default", repo: repo(nil), settings: &fakeRunnerSettings{value: "yes", present: true}, wantReads: 1,
+			wantErr: []string{"nested_containers_default", `holds "yes"`, "not true or false", "Settings → Runner"}},
+		{name: "untrimmed default", repo: repo(nil), settings: &fakeRunnerSettings{value: " true", present: true}, wantReads: 1,
+			wantErr: []string{"nested_containers_default", `holds " true"`}},
+		{name: "case-folded default", repo: repo(nil), settings: &fakeRunnerSettings{value: "TRUE", present: true}, wantReads: 1,
+			wantErr: []string{"nested_containers_default", `holds "TRUE"`}},
+		{name: "blank default", repo: repo(nil), settings: &fakeRunnerSettings{value: "", present: true}, wantReads: 1,
+			wantErr: []string{"nested_containers_default", `holds ""`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := EffectiveNestedContainers(t.Context(), tc.settings, tc.repo)
+			if tc.settings.reads != tc.wantReads {
+				t.Errorf("setting reads = %d, want %d", tc.settings.reads, tc.wantReads)
+			}
+			if tc.wantReads > 0 && !slices.Equal(tc.settings.keys, []string{store.SettingNestedContainersDefault}) {
+				t.Errorf("setting keys read = %v, want only %s", tc.settings.keys, store.SettingNestedContainersDefault)
+			}
+			if tc.wantErr == nil {
+				if err != nil || got != tc.want {
+					t.Fatalf("EffectiveNestedContainers = %v, %v; want %v, nil", got, err, tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("EffectiveNestedContainers = %v, nil; want an error (never a silent fall back)", got)
+			}
+			if got {
+				t.Error("EffectiveNestedContainers returned true alongside its error, want false")
 			}
 			for _, want := range tc.wantErr {
 				if !strings.Contains(err.Error(), want) {

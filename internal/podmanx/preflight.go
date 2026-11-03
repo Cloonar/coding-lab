@@ -27,6 +27,12 @@ const (
 	CheckSpawnProbe  = "spawn-probe"      // a real probe container failed to spawn or its caps did not land
 	CheckToolsImage  = "tools-image"      // no agent-tools images configured
 	CheckToolsPull   = "tools-image-pull" // a configured agent-tools ref does not resolve
+
+	// The nested-containers checks (ADR-0086, issue #115), run by
+	// NestedPreflight — never by Preflight, so a host on which nobody uses
+	// nested containers is never refused for one.
+	CheckNestedTun   = "nested-tun"   // /dev/net/tun missing, or not readable and writable by the service user
+	CheckNestedProbe = "nested-probe" // the nested self-test failed in a nested-shaped probe container
 )
 
 // PreflightConfig is the container-mode configuration Preflight validates —
@@ -53,12 +59,23 @@ type Deps struct {
 	// existence cannot tell — root, or a stale mount, could leave the dir in
 	// place without a live manager behind it.
 	Writable func(string) bool
+	// AccessRW reports, as an error, whether the service user can both read
+	// and write path — the probe behind the nested-tun check. An error
+	// (not a bool like Writable) because that check's detail must tell a
+	// missing device (ENOENT: the tun module is not loaded) from a present
+	// one the user may not open (EACCES: its mode), and the two have
+	// different fixes.
+	AccessRW func(path string) error
 	// Username and UID identify the service user for subuid/subgid
 	// matching: shadow(5) keys ranges by either the login name or the
 	// numeric uid, so both are accepted. UID also locates the user manager's
 	// runtime dir (/run/user/<uid>) for the user-manager check.
 	Username string
 	UID      int
+	// GID is the service user's gid, handed with UID to the nested probe's
+	// `container-entry --self-test --uid --gid` exactly as a nested run's
+	// argv hands them to the entry program.
+	GID int
 }
 
 // RealDeps returns the production probes: exec.LookPath, os.ReadFile, an
@@ -73,7 +90,9 @@ func RealDeps() Deps {
 		ReadFile: os.ReadFile,
 		Run:      ExecRunner(),
 		Writable: func(path string) bool { return unix.Access(path, unix.W_OK) == nil },
+		AccessRW: func(path string) error { return unix.Access(path, unix.R_OK|unix.W_OK) },
 		UID:      os.Getuid(),
+		GID:      os.Getgid(),
 	}
 	if u, err := user.Current(); err == nil {
 		d.Username = u.Username

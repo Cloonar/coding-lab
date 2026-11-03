@@ -44,6 +44,30 @@ func TestContainerGate_stagesMatchTheSpawnRefusal(t *testing.T) {
 		}, ContainerGateNoToolsImage},
 		{"no dev image at any layer", func(f *fixture) { f.svc.containerImage = "" }, ContainerGateNoDevImage},
 		{"open", func(*fixture) {}, ContainerGateOpen},
+		// The Nested containers stages (issue #115), after every stage above.
+		{"nested: unresolvable inherited default", func(f *fixture) {
+			f.setSetting(store.SettingNestedContainersDefault, "maybe")
+		}, ContainerGateNestedUnresolved},
+		{"nested: on without a nested runtime", func(f *fixture) {
+			f.pinNested(true)
+			f.svc.nested = nil
+		}, ContainerGateNestedUnavailable},
+		{"nested: preflight pending", func(f *fixture) {
+			f.pinNested(true)
+			f.svc.nested = &fakeNested{}
+		}, ContainerGateNestedPending},
+		{"nested: preflight failed", func(f *fixture) {
+			f.pinNested(true)
+			f.svc.nested = &fakeNested{done: true, failures: []podmanx.Failure{nestedTunFailure}}
+		}, ContainerGateNestedFailed},
+		{"nested: open", func(f *fixture) {
+			f.setSetting(store.SettingNestedContainersDefault, "true")
+			f.svc.nested = &fakeNested{done: true}
+		}, ContainerGateOpen},
+		{"nested: a pin off beats a broken default", func(f *fixture) {
+			f.setSetting(store.SettingNestedContainersDefault, "maybe")
+			f.pinNested(false)
+		}, ContainerGateOpen},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,13 +98,26 @@ func TestContainerGate_stagesMatchTheSpawnRefusal(t *testing.T) {
 			if tc.stage == ContainerGateNoDevImage && !errors.Is(g.Err, ErrNoDevImage) {
 				t.Errorf("no-dev-image Err = %v, want errors.Is ErrNoDevImage", g.Err)
 			}
+			// Nested is the resolved knob: true on the stages past a resolved
+			// "on", and on the open gate of a nested repo only.
+			wantNested := tc.stage == ContainerGateNestedUnavailable || tc.stage == ContainerGateNestedPending ||
+				tc.stage == ContainerGateNestedFailed || tc.name == "nested: open"
+			if g.Nested != wantNested {
+				t.Errorf("Nested = %v, want %v", g.Nested, wantNested)
+			}
+			if tc.stage == ContainerGateNestedFailed && (len(g.NestedFailures) != 1 || g.NestedFailures[0] != nestedTunFailure) {
+				t.Errorf("nested verdict not carried: %+v", g.NestedFailures)
+			}
+			if tc.stage != ContainerGateNestedFailed && g.NestedFailures != nil {
+				t.Errorf("NestedFailures outside the failed stage: %+v", g.NestedFailures)
+			}
 
 			// One gate, two consumers: the spawn's refusal is this verdict's
 			// Err, word for word.
-			image, refusal := f.svc.refuseContainerSpawn(t.Context(), "claude-code", repo)
+			open, refusal := f.svc.refuseContainerSpawn(t.Context(), "claude-code", repo)
 			switch {
-			case g.Err == nil && (refusal != nil || image != g.Image):
-				t.Errorf("refuseContainerSpawn = %q, %v; the open gate said %q", image, refusal, g.Image)
+			case g.Err == nil && (refusal != nil || open.Image != g.Image || open.Nested != g.Nested):
+				t.Errorf("refuseContainerSpawn = %+v, %v; the open gate said %+v", open, refusal, g)
 			case g.Err != nil && (refusal == nil || refusal.Error() != g.Err.Error()):
 				t.Errorf("refusal = %v, gate Err = %v — they must be the same text", refusal, g.Err)
 			}

@@ -9,11 +9,12 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/store"
 )
 
-// RunnerSettings is the slice of the store the two resolvers behind the
-// Settings → Runner section read — EffectiveRunner (runner_default) and
-// EffectiveDevImage (dev_image_default): the raw settings row, never a
-// defaulting getter, because both must tell an absent row apart from an
-// unreadable one. *store.Store satisfies it; the narrow interface lets the
+// RunnerSettings is the slice of the store the resolvers behind the
+// Settings → Runner section read — EffectiveRunner (runner_default),
+// EffectiveDevImage (dev_image_default) and EffectiveNestedContainers
+// (nested_containers_default): the raw settings row, never a defaulting
+// getter, because each must tell an absent row apart from an unreadable
+// one. *store.Store satisfies it; the narrow interface lets the
 // resolvers' table tests script a store read error that a real database
 // cannot produce on demand.
 type RunnerSettings interface {
@@ -65,6 +66,54 @@ func EffectiveRunner(ctx context.Context, settings RunnerSettings, repo store.Re
 	}
 	return "", fmt.Errorf("cannot resolve the Runner for repo %s: it inherits the global runner default, but the %s setting holds %q, which is not a Runner — set %s to %q or %q in Settings → Runner",
 		repo.Name, store.SettingRunnerDefault, v, store.SettingRunnerDefault, store.RunnerHost, store.RunnerContainer)
+}
+
+// EffectiveNestedContainers resolves whether a run of repo gets the Nested
+// containers shape (issue #115 / ADR-0086) — the run pane's nested podman
+// argv, the nested preflight gate, the shared image store mount and the
+// worktree notes' section — and is the ONE place that answer is computed:
+// EffectiveRunner's twin for the nested tri-state, following ADR-0071
+// exactly. No consumer reads repo.NestedContainers or the setting directly.
+//
+// The answer only matters when the repo's effective Runner is container, and
+// checking that is the CALLER's job: this resolver never reads the Runner, so
+// a host-runner repo still resolves (its pin, or the default) and the caller
+// ignores the result. The spawn path asks it only after EffectiveRunner said
+// container, so a broken nested_containers_default never blocks a host spawn.
+//
+// The two layers: a non-nil repo.NestedContainers is a pin and wins outright,
+// without reading the setting; nil inherits the global
+// nested_containers_default setting (store.SettingNestedContainersDefault),
+// read here on every call — inheritance is live, so a changed default
+// reaches every inheriting repo's NEXT spawn and nothing is cached that could
+// make two spawns disagree.
+//
+// It fails rather than guesses. The setting is read with GetSetting, not
+// GetBool-with-a-default: an absent row, a store error, or a value other than
+// exactly "true" or "false" (no trimming, no case folding — the settings
+// PATCH only ever writes those two) is an error naming
+// nested_containers_default and where to fix it — never a silent fall back
+// to off, which would quietly start a run without the containers its
+// operator turned on, nor to on, which would widen a run's kernel surface
+// nobody asked for. The caller decides what a failure costs: Launch refuses
+// the spawn before the claim.
+func EffectiveNestedContainers(ctx context.Context, settings RunnerSettings, repo store.Repo) (bool, error) {
+	if repo.NestedContainers != nil {
+		return *repo.NestedContainers, nil
+	}
+	v, err := settings.GetSetting(ctx, store.SettingNestedContainersDefault)
+	if err != nil {
+		return false, fmt.Errorf("cannot resolve Nested containers for repo %s: it inherits the global Nested containers default, but the %s setting could not be read (%w) — set %s to true or false in Settings → Runner, or pin Nested containers in the repo's Runner settings",
+			repo.Name, store.SettingNestedContainersDefault, err, store.SettingNestedContainersDefault)
+	}
+	switch v {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("cannot resolve Nested containers for repo %s: it inherits the global Nested containers default, but the %s setting holds %q, which is not true or false — set %s in Settings → Runner, or pin Nested containers in the repo's Runner settings",
+		repo.Name, store.SettingNestedContainersDefault, v, store.SettingNestedContainersDefault)
 }
 
 // EffectiveDevImage resolves the dev image a container run of repo executes

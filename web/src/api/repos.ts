@@ -92,6 +92,14 @@ export interface Repo {
    *  the ref (https registries only) on save. */
   image_ref: string | null;
   /**
+   * Nested containers (issue #115, ADR-0086): lets a container run start its
+   * own rootless podman containers. TRI-STATE like the Runner: null = inherit
+   * the global `nested_containers_default` setting (live, seeded off); `false`
+   * is an explicit "off", never collapsed into the inherit branch. Ignored
+   * while the effective Runner is host.
+   */
+  nested_containers: boolean | null;
+  /**
    * What lab knows about the repo right now without asking anyone (issue
    * #61): built from stored state and from the outcome of the most recent
    * fetch and tracker read — never a forge request or a git network
@@ -193,6 +201,8 @@ export interface RepoInherited {
   container_memory: string | null;
   container_pids: number | null;
   container_nofile: number | null;
+  /** The global nested_containers_default (issue #115). */
+  nested_containers: boolean | null;
 }
 
 /**
@@ -281,6 +291,9 @@ export interface RepoPatch {
    *  A non-null value is resolved and digest-pinned server-side on save — that
    *  can 400 with a resolution error. */
   image_ref?: string | null;
+  /** Nested containers (issue #115); null clears back to inherit the global
+   *  `nested_containers_default` setting, false is an explicit off. */
+  nested_containers?: boolean | null;
 }
 
 /** 201 with clone_status "cloning" — the bare clone runs async, watch SSE. */

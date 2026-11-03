@@ -1,5 +1,5 @@
-// Runner section suite (issues #205, #55, #61): the section's fields on the
-// one-page settings, saved through the page's one Save.
+// Runner section suite (issues #205, #55, #61, #115): the section's fields on
+// the one-page settings, saved through the page's one Save.
 //
 // The Runner is a three-way pick — inherited (naming the Runner that resolves
 // to), Container, Host — and every field of the section says "inherited" or
@@ -7,9 +7,13 @@
 // from the global runner default, the dev image from the global default dev
 // image or the server's flag, the limits from the global limits.
 //
+// Nested containers (issue #115, ADR-0086) is a three-way pick like the
+// Runner — inherited (naming the global default's on / off), On, Off — saved
+// as null / true / false, and says it is ignored while the Runner is host.
+//
 // Only what applies (issue #61 §7): while the EFFECTIVE Runner is host — set
-// here or inherited — the unsandboxed warning shows and the dev image and the
-// container limits fold into one note. "Show anyway" unfolds them with their
+// here or inherited — the unsandboxed warning shows and the dev image, the
+// container limits and Nested containers fold into one note. "Show anyway" unfolds them with their
 // values intact, and a folded field unfolds by itself when it is needed.
 
 import { describe, expect, it } from 'vitest';
@@ -51,13 +55,22 @@ const mountRunner = async (path = `${BASE}/runner`): Promise<void> => {
 
 const HOST_HINT =
   'Host runs are unsandboxed — the agent has full host access to the server. Break-glass only; use the container runner once available.';
-const FOLD_NOTE = 'Dev image and container limits apply to container runs only.';
+const FOLD_NOTE = 'Dev image, container limits and nested containers apply to container runs only.';
+const NESTED_HINT =
+  "Lets a run start its own rootless podman containers (ddev, docker compose, buildx). Widens the run's kernel surface and adds several gigabytes of per-run storage.";
+const NESTED_HOST_NOTE = 'Ignored under the host runner.';
 const IMAGE_ID = 'ghcr.io/cloonar/dev:1.4@sha256:0123456789abcdef';
 const OTHER_IMAGE = 'docker.io/library/debian:bookworm@sha256:abc123';
-const CONTAINER_ONLY = ['image_ref', 'container_memory', 'container_pids', 'container_nofile'];
+const CONTAINER_ONLY = [
+  'image_ref',
+  'container_memory',
+  'container_pids',
+  'container_nofile',
+  'nested_containers',
+];
 
 const runnerText = () => pageSection('runner').textContent ?? '';
-const rendered = (name: string) => container.querySelector(`input[name="${name}"]`) !== null;
+const rendered = (name: string) => container.querySelector(`[data-field="${name}"]`) !== null;
 const showAnyway = (): HTMLButtonElement => {
   const el = Array.from(pageSection('runner').querySelectorAll('button')).find(
     (b) => b.textContent === 'Show anyway',
@@ -530,5 +543,207 @@ describe('RepoSettings Runner: dev image', () => {
     expect(fieldState('image_ref')).toBe('set here');
     expect(fieldDefault('image_ref')).toBe('Default: none configured');
     expect(fieldHint('image_ref')).toBe('Resolved and pinned to a digest on save.');
+  });
+});
+
+describe('RepoSettings Runner: nested containers', () => {
+  it('is a three-way pick that inherits the global default, with the agreed copy', async () => {
+    h.repoOnServer = containerRepo();
+    await mountRunner();
+
+    expect(segmentLabels('nested_containers')).toEqual(['Inherited · off', 'On', 'Off']);
+    expect(segmentValue('nested_containers')).toBe('');
+    expect(fieldState('nested_containers')).toBe('inherited');
+    expect(resetButton('nested_containers')).toBeNull();
+    expect(
+      container.querySelector('[data-field="nested_containers"] .sfield-label')?.textContent,
+    ).toContain('Nested containers');
+    // Container runs read it: the copy, and nothing about the host runner.
+    expect(fieldHint('nested_containers')).toBe(NESTED_HINT);
+  });
+
+  it('names an inherited on', async () => {
+    h.repoOnServer = containerRepo();
+    h.settingsOnServer = { ...h.settingsOnServer, nested_containers_default: true };
+    await mountRunner();
+
+    expect(segmentLabels('nested_containers')[0]).toBe('Inherited · on');
+    expect(segmentValue('nested_containers')).toBe('');
+  });
+
+  it('shows the state without a value when the default cannot be resolved', async () => {
+    h.repoOnServer = containerRepo();
+    h.inheritedPatch = { nested_containers: null };
+    await mountRunner();
+
+    expect(segmentLabels('nested_containers')).toEqual(['Inherited', 'On', 'Off']);
+    expect(fieldState('nested_containers')).toBe('inherited');
+  });
+
+  it('a pinned repo reads set here, with what it would inherit and Reset', async () => {
+    h.repoOnServer = { ...containerRepo(), nested_containers: true };
+    await mountRunner();
+
+    expect(segmentValue('nested_containers')).toBe('true');
+    expect(fieldState('nested_containers')).toBe('set here');
+    expect(fieldDefault('nested_containers')).toBe('Default: off');
+    expect(resetButton('nested_containers')?.getAttribute('aria-label')).toBe(
+      'Reset Nested containers to inherited',
+    );
+  });
+
+  it('a pinned off is a value, not an inherit', async () => {
+    h.repoOnServer = { ...containerRepo(), nested_containers: false };
+    h.settingsOnServer = { ...h.settingsOnServer, nested_containers_default: true };
+    await mountRunner();
+
+    expect(segmentValue('nested_containers')).toBe('false');
+    expect(fieldState('nested_containers')).toBe('set here');
+    expect(fieldDefault('nested_containers')).toBe('Default: on');
+  });
+
+  it('On PATCHes true', async () => {
+    h.repoOnServer = containerRepo();
+    await mountRunner();
+
+    segment('nested_containers', 'true').click();
+    await settle();
+    expect(fieldState('nested_containers')).toBe('set here');
+    expect(fieldChanged('nested_containers')).toBe(true);
+    await save();
+
+    expect(h.patchBodies).toEqual([{ nested_containers: true }]);
+    expect(h.repoOnServer.nested_containers).toBe(true);
+  });
+
+  it('Off on an inheriting repo PATCHes an explicit false', async () => {
+    h.repoOnServer = containerRepo();
+    h.settingsOnServer = { ...h.settingsOnServer, nested_containers_default: true };
+    await mountRunner();
+
+    segment('nested_containers', 'false').click();
+    await settle();
+    await save();
+
+    expect(h.patchBodies).toEqual([{ nested_containers: false }]);
+    expect(h.repoOnServer.nested_containers).toBe(false);
+  });
+
+  it('Reset on a pinned repo PATCHes null, and the saved state reads inherited', async () => {
+    h.repoOnServer = { ...containerRepo(), nested_containers: true };
+    await mountRunner();
+
+    resetButton('nested_containers')?.click();
+    await settle();
+    expect(segmentValue('nested_containers')).toBe('');
+    expect(saveBarTitle()).toBe('1 unsaved change');
+    await save();
+
+    expect(h.patchBodies).toEqual([{ nested_containers: null }]);
+    expect(h.repoOnServer.nested_containers).toBeNull();
+    expect(fieldState('nested_containers')).toBe('inherited');
+    expect(segmentLabels('nested_containers')[0]).toBe('Inherited · off');
+  });
+
+  it('inherit → on → off → inherit round-trips through the repo PATCH', async () => {
+    h.repoOnServer = containerRepo();
+    await mountRunner();
+
+    for (const value of ['true', 'false', '']) {
+      segment('nested_containers', value).click();
+      await settle();
+      await save();
+    }
+
+    expect(h.patchBodies).toEqual([
+      { nested_containers: true },
+      { nested_containers: false },
+      { nested_containers: null },
+    ]);
+    expect(h.repoOnServer.nested_containers).toBeNull();
+  });
+
+  it('an untouched pin is not re-sent when saving another field', async () => {
+    h.repoOnServer = { ...containerRepo(), nested_containers: false };
+    await mountRunner();
+
+    typeInto(input('container_memory'), '512m');
+    await save();
+
+    expect(h.patchBodies).toEqual([{ container_memory: '512m' }]);
+    expect(h.repoOnServer.nested_containers).toBe(false);
+  });
+
+  it('on host it folds with the other container-only fields, and says it is ignored once shown', async () => {
+    h.repoOnServer = { ...baseRepo(), nested_containers: true };
+    await mountRunner();
+    expect(rendered('nested_containers')).toBe(false);
+    expect(runnerText()).toContain(FOLD_NOTE);
+
+    showAnyway().click();
+    await settle();
+
+    // Shown with its value intact, and the reason it does not apply.
+    expect(segmentValue('nested_containers')).toBe('true');
+    expect(fieldHint('nested_containers')).toBe(`${NESTED_HINT} ${NESTED_HOST_NOTE}`);
+    expect(container.querySelector('.settings-savebar')).toBeNull();
+  });
+
+  it('says it is ignored for an inherited host too', async () => {
+    h.repoOnServer = { ...baseRepo(), runner: null };
+    h.settingsOnServer = { ...h.settingsOnServer, runner_default: 'host' };
+    await mountRunner();
+    expect(rendered('nested_containers')).toBe(false);
+
+    showAnyway().click();
+    await settle();
+    expect(fieldHint('nested_containers')).toContain(NESTED_HOST_NOTE);
+  });
+
+  it('follows the drafted Runner: Host folds it without touching it, Container clears the note', async () => {
+    h.repoOnServer = { ...containerRepo(), nested_containers: true };
+    await mountRunner();
+    expect(fieldHint('nested_containers')).not.toContain(NESTED_HOST_NOTE);
+
+    segment('runner', 'host').click();
+    await settle();
+    expect(rendered('nested_containers')).toBe(false);
+    showAnyway().click();
+    await settle();
+    expect(fieldHint('nested_containers')).toContain(NESTED_HOST_NOTE);
+
+    segment('runner', 'container').click();
+    await settle();
+    expect(fieldHint('nested_containers')).toBe(NESTED_HINT);
+    expect(segmentValue('nested_containers')).toBe('true');
+    // Only the Runner moved, and back: nothing is pending.
+    expect(container.querySelector('.settings-savebar')).toBeNull();
+  });
+
+  it('staging a value on host is legal and saved as such', async () => {
+    await mountRunner();
+    showAnyway().click();
+    await settle();
+
+    segment('nested_containers', 'true').click();
+    await settle();
+    await save();
+
+    expect(h.patchBodies).toEqual([{ nested_containers: true }]);
+    expect(h.repoOnServer.runner).toBe('host');
+  });
+
+  it('a pending change keeps it unfolded on host', async () => {
+    h.repoOnServer = containerRepo();
+    await mountRunner();
+
+    segment('nested_containers', 'true').click();
+    segment('runner', 'host').click();
+    await settle();
+
+    expect(rendered('nested_containers')).toBe(true);
+    expect(fieldHint('nested_containers')).toContain(NESTED_HOST_NOTE);
+    await save();
+    expect(h.patchBodies).toEqual([{ runner: 'host', nested_containers: true }]);
   });
 });

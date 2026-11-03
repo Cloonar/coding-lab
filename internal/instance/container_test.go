@@ -433,13 +433,13 @@ func TestRefuseContainerSpawn_effectiveImage(t *testing.T) {
 					t.Fatalf("SetSetting(dev_image_default): %v", err)
 				}
 			}
-			image, err := f.svc.refuseContainerSpawn(t.Context(), "claude-code", store.Repo{ImageRef: tc.imageRef})
+			gate, err := f.svc.refuseContainerSpawn(t.Context(), "claude-code", store.Repo{ImageRef: tc.imageRef})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("refuseContainerSpawn: %v", err)
 				}
-				if image != tc.wantImage {
-					t.Errorf("effective image = %q, want %q", image, tc.wantImage)
+				if gate.Image != tc.wantImage {
+					t.Errorf("effective image = %q, want %q", gate.Image, tc.wantImage)
 				}
 				return
 			}

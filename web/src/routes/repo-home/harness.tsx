@@ -67,6 +67,7 @@ export function baseRepo(over: Partial<Repo> = {}): Repo {
     container_pids: null,
     container_nofile: null,
     image_ref: null,
+    nested_containers: null,
     ...over,
   };
 }

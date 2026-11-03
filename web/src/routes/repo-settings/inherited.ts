@@ -107,7 +107,8 @@ export function inheritedText(
     case 'lander_effort':
       return effortText(inherited.lander_effort, wording.landerProvider);
     case 'remote_default':
-    case 'afk_remote_default': {
+    case 'afk_remote_default':
+    case 'nested_containers': {
       const value = inherited[key];
       return value === null ? null : onOff(value);
     }

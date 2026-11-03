@@ -1,24 +1,27 @@
-// Runner section (issues #205, #55, #61): where this repo's instances run —
-// the Runner pick, the dev image and the three container limits — as a thin
-// renderer over the form store. Every control edits a draft; the page's save
-// bar sends the changed ones (form.tsx, fields.ts).
+// Runner section (issues #205, #55, #61, #115): where this repo's instances
+// run — the Runner pick, the dev image, the three container limits and Nested
+// containers — as a thin renderer over the form store. Every control edits a
+// draft; the page's save bar sends the changed ones (form.tsx, fields.ts).
 //
-// All five fields are overridable: each says "inherited" or "set here" and
+// All six fields are overridable: each says "inherited" or "set here" and
 // names what it inherits (Field.tsx). The Runner is a three-way pick —
-// inherited (naming the Runner that resolves to), Container, Host.
+// inherited (naming the Runner that resolves to), Container, Host — and so is
+// Nested containers: inherited (naming the global default's on / off), On,
+// Off, where Off is a value, never a blank.
 //
 // Only what applies (issue #61 §7): the EFFECTIVE Runner is the drafted pick
 // when set here, else the inherited one. While it is `host` the unsandboxed
-// warning shows, and the dev image and the container limits — which only
-// container runs read — fold into one note. "Show anyway" unfolds them:
-// staging a value before switching the Runner is legal. A folded field is
+// warning shows, and the dev image, the container limits and Nested
+// containers — which only container runs read — fold into one note. "Show
+// anyway" unfolds them, and Nested containers then says the host runner
+// ignores it: staging a value before switching the Runner is legal. A folded field is
 // never out of reach: it unfolds by itself while it has a pending change or a
 // problem, and when a link or a Save points at it. Folding only hides — it
 // never clears or changes a value.
 
 import { Show, createComputed, createSignal } from 'solid-js';
 import Banner from '../../../components/Banner';
-import { HOST_RUNNER_HINT } from '../../../lib/runner';
+import { HOST_RUNNER_HINT, NESTED_CONTAINERS_HINT, NESTED_HOST_NOTE } from '../../../lib/runner';
 import { FieldGroup, SegmentedField, TextField, fieldControlId } from '../Field';
 import type { RepoFieldKey } from '../fields';
 import { useRepoSettingsForm } from '../form';
@@ -29,12 +32,23 @@ const RUNNER_PICKS = [
   { value: 'host', label: 'Host' },
 ];
 
+/** The explicit Nested containers picks; the inherit segment comes first. */
+const NESTED_PICKS = [
+  { value: 'true', label: 'On' },
+  { value: 'false', label: 'Off' },
+];
+
+/** Why the container-only fields fold (or, unfolded, what they apply to). */
+const CONTAINER_ONLY_NOTE =
+  'Dev image, container limits and nested containers apply to container runs only.';
+
 /** What only a container run reads. */
 const CONTAINER_ONLY = [
   'image_ref',
   'container_memory',
   'container_pids',
   'container_nofile',
+  'nested_containers',
 ] as const satisfies readonly RepoFieldKey[];
 
 export default function RunnerSection() {
@@ -76,7 +90,7 @@ export default function RunnerSection() {
         when={!folded()}
         fallback={
           <p class="settings-na">
-            Dev image and container limits apply to container runs only.{' '}
+            {CONTAINER_ONLY_NOTE}{' '}
             <button type="button" class="settings-link-action" onClick={showAnyway}>
               Show anyway
             </button>
@@ -84,7 +98,7 @@ export default function RunnerSection() {
         }
       >
         <Show when={host()}>
-          <p class="settings-note">Dev image and container limits apply to container runs only.</p>
+          <p class="settings-note">{CONTAINER_ONLY_NOTE}</p>
         </Show>
         <TextField
           name="image_ref"
@@ -117,6 +131,16 @@ export default function RunnerSection() {
             <TextField name="container_nofile" type="number" />
           </div>
         </FieldGroup>
+        <SegmentedField
+          name="nested_containers"
+          options={NESTED_PICKS}
+          hint={
+            <>
+              {NESTED_CONTAINERS_HINT}
+              <Show when={host()}> {NESTED_HOST_NOTE}</Show>
+            </>
+          }
+        />
       </Show>
     </div>
   );

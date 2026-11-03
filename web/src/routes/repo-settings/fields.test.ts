@@ -51,7 +51,7 @@ describe('repo settings field table', () => {
 
   it('keys every entry by its own PATCH key', () => {
     for (const key of REPO_FIELD_KEYS) expect(REPO_FIELDS[key].key).toBe(key);
-    expect(REPO_FIELD_KEYS).toHaveLength(34);
+    expect(REPO_FIELD_KEYS).toHaveLength(35);
   });
 
   it('tells a field key from any other string', () => {
@@ -103,6 +103,7 @@ describe('overridable fields', () => {
       'container_memory',
       'container_pids',
       'container_nofile',
+      'nested_containers',
       'lander_provider',
       'lander_model',
       'lander_effort',
@@ -201,6 +202,20 @@ describe('buildRepoPatch: only the changed fields, in their wire form', () => {
     const pinned = { ...baseRepo(), remote_default: false };
     expect(patchOf({ remote_default: '' }, pinned)).toEqual({ remote_default: null });
     expect(patchOf({ remote_default: 'false' }, pinned)).toEqual({});
+  });
+
+  it('nested containers is tri-state: null inherits, false is an explicit off', () => {
+    // baseRepo() inherits.
+    expect(repoField('nested_containers').seed(baseRepo())).toBe('');
+    expect(patchOf({ nested_containers: 'true' })).toEqual({ nested_containers: true });
+    expect(patchOf({ nested_containers: 'false' })).toEqual({ nested_containers: false });
+    expect(patchOf({ nested_containers: '' })).toEqual({});
+    const off = { ...baseRepo(), nested_containers: false };
+    expect(repoField('nested_containers').seed(off)).toBe('false');
+    expect(patchOf({ nested_containers: '' }, off)).toEqual({ nested_containers: null });
+    expect(patchOf({ nested_containers: 'false' }, off)).toEqual({});
+    expect(draftInherits('nested_containers', '', NO_OPTIONS)).toBe(true);
+    expect(draftInherits('nested_containers', 'false', NO_OPTIONS)).toBe(false);
   });
 
   it('picks: "" is null — the runner, the agents, the credentials', () => {

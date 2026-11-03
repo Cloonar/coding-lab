@@ -196,6 +196,7 @@ export function baseRepo(): Repo {
     container_pids: null,
     container_nofile: null,
     image_ref: null,
+    nested_containers: null,
   };
 }
 
@@ -1034,6 +1035,13 @@ export function fakeInherited(drafts: Record<string, unknown> = {}): RepoInherit
     container_memory: text('container_memory') ?? '8g',
     container_pids: num('container_pids', 4096),
     container_nofile: num('container_nofile', 16384),
+    // Seeded off server-side; an unreadable or invalid default is null.
+    nested_containers:
+      settings['nested_containers_default'] === undefined
+        ? false
+        : typeof settings['nested_containers_default'] === 'boolean'
+          ? settings['nested_containers_default']
+          : null,
   };
 }
 
@@ -1507,6 +1515,8 @@ export function installRepoSettingsHooks(): void {
       runner_default: 'host',
       dev_image_default: '',
       dev_image_fallback: '',
+      // Nested containers (issue #115), seeded off server-side.
+      nested_containers_default: false,
     };
     h.credentialsOnServer = [];
     h.patchBodies = [];

@@ -1,6 +1,7 @@
-// Global settings › Runner (issues #55, #205, #85): where runs execute for
-// every repo that inherits the default — the Runner pick, the default dev
-// image and the container limits — as a thin renderer over the form store.
+// Global settings › Runner (issues #55, #205, #85, #115): where runs execute
+// for every repo that inherits the default — the Runner pick, the default dev
+// image, the container limits, the Nested containers default and the nested
+// image cache — as a thin renderer over the form store.
 // Every control edits a draft; the page's save bar sends the changed ones
 // (form.tsx, fields.ts). None of these is an override: each is the bottom
 // layer a repo's own value stands on.
@@ -18,11 +19,22 @@
 // server's read-only dev_image_fallback, never a field of its own and never
 // sent) or the plain fact that nothing is configured — and, with a ref typed,
 // that the server pins it on save.
+//
+// Nested containers (ADR-0086) is a plain on/off default with the repo
+// page's copy; it, too, never folds — a repo pinned to container reads it
+// while the default Runner is Host. The nested image cache is one image ref
+// per line, which lab pulls into the shared read-only store nested runs use
+// (on save, best effort); a line with a space is refused at the field.
 
 import { Show } from 'solid-js';
 import Banner from '../../../components/Banner';
-import { DEV_IMAGE_PLACEHOLDER, HOST_RUNNER_HINT } from '../../../lib/runner';
-import { FieldGroup, SegmentedField, TextField } from '../Field';
+import {
+  DEV_IMAGE_PLACEHOLDER,
+  HOST_RUNNER_HINT,
+  NESTED_CONTAINERS_HINT,
+  NESTED_HOST_NOTE,
+} from '../../../lib/runner';
+import { Field, FieldGroup, SegmentedField, SwitchField, TextField } from '../Field';
 import { useGlobalSettingsForm } from '../form';
 
 /** The Runner picks: the repo page's, without its inherit segment. */
@@ -30,6 +42,10 @@ const RUNNER_PICKS = [
   { value: 'container', label: 'Container' },
   { value: 'host', label: 'Host' },
 ];
+
+/** What the image list is for, under its field. */
+export const NESTED_IMAGE_CACHE_HINT =
+  'One image ref per line. Lab pulls these into a shared read-only store that nested runs use, so a run does not pull them itself. Saving the list starts a pull. Best effort: a failed pull is logged and never blocks a run.';
 
 /** "3 repos inherit this default." — the line under the Runner pick. */
 export function inheritLine(count: number): string {
@@ -90,6 +106,33 @@ export default function RunnerSection() {
           <TextField name="container_pids" type="number" />
           <TextField name="container_nofile" type="number" />
         </div>
+      </FieldGroup>
+      <FieldGroup title="Nested containers">
+        <SwitchField
+          name="nested_containers_default"
+          hint={
+            <>
+              {NESTED_CONTAINERS_HINT} The default for every repo that inherits it; a repo can pin
+              its own. {NESTED_HOST_NOTE}
+            </>
+          }
+        />
+        <Field name="nested_image_cache" hint={NESTED_IMAGE_CACHE_HINT}>
+          {(control) => (
+            <textarea
+              id={control.id}
+              name="nested_image_cache"
+              rows="4"
+              autocomplete="off"
+              spellcheck={false}
+              placeholder="docker.io/ddev/ddev-webserver:v1.25.5"
+              aria-describedby={control.describedBy()}
+              aria-invalid={control.invalid() ? 'true' : undefined}
+              value={control.binding.value()}
+              onInput={(event) => control.binding.set(event.currentTarget.value)}
+            />
+          )}
+        </Field>
       </FieldGroup>
     </div>
   );

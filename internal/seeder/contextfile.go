@@ -45,15 +45,17 @@ var contextFileTemplate = template.Must(template.New("context-file").Parse(conte
 // appendGatewaySecretsSection; then, ONLY when bastion is non-nil and names
 // at least one target, an SSH targets section (issue #39); then, ONLY when
 // preview is non-nil (the preview listener is configured, issue #105), a
-// Previews section; then, ONLY when imports is non-empty, a Read-only
+// Previews section; then, ONLY when nested is true (the run's effective
+// Nested containers value is on, issue #115), a Nested containers section,
+// see appendNestedSection; then, ONLY when imports is non-empty, a Read-only
 // imports section is appended (issue #261); then, ONLY for a provider that does not discover seeded skills
 // natively yet does seed them (!meta.NativeSkillDiscovery && meta.SkillsDir
 // != ""), a generated skills index is appended (issue #79 / ADR-0035). A
 // native-discovery provider with a gateway-less, bastion-less, preview-less,
-// secret-less, import-less repo — or one seeding no skills at all — gets
+// secret-less, import-less, nested-less repo — or one seeding no skills at all — gets
 // byte-for-byte the template render, which is exactly what the testdata
 // goldens pin.
-func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef) ([]byte, error) {
+func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef, nested bool) ([]byte, error) {
 	var b bytes.Buffer
 	data := struct{ Binding, ForgeKind string }{repo.TrackerBinding, repo.ForgeKind}
 	if err := contextFileTemplate.Execute(&b, data); err != nil {
@@ -73,6 +75,9 @@ func renderContextFile(repo store.Repo, meta provider.SeedMeta, secrets []store.
 	}
 	if preview != nil {
 		appendPreviewsSection(&b, preview)
+	}
+	if nested {
+		appendNestedSection(&b, preview)
 	}
 	if len(imports) > 0 {
 		appendImportsSection(&b, imports)
@@ -147,7 +152,7 @@ func appendSkillsIndex(buf *bytes.Buffer, skillsDir string, index []skillEntry) 
 // secret-less repo's byte-identity is then guaranteed by renderContextFile's
 // secrets branch simply not firing, never by a template conditional that must
 // stay inert. Section order in renderContextFile is template body → secrets →
-// SSH targets → previews → read-only imports → skills index: repo-driven content (what THIS repo
+// SSH targets → previews → nested containers → read-only imports → skills index: repo-driven content (what THIS repo
 // holds) precedes the provider-driven tail (what THIS provider needs
 // indexed), the same "what this repo is, then what this agent gets" ordering
 // the rest of the file follows.
@@ -384,6 +389,89 @@ func (p *PreviewRef) publicPort() int {
 	return p.Port
 }
 
+// appendNestedSection writes the "## Nested containers" section onto buf
+// (issue #115, ADR-0086: a run whose effective Nested containers value is on
+// can start its own rootless podman containers — ddev, docker compose,
+// buildx). The agent cannot guess any of it from the environment, so the
+// section teaches only the non-obvious:
+//
+//   - the first step: `start-nested-podman` (the dev image's helper,
+//     ADR-0086) prepares the run and prints, as its last two stdout lines,
+//     `export XDG_RUNTIME_DIR=…` and `export DOCKER_HOST=unix://…/podman.sock`.
+//     The section recommends `eval "$(start-nested-podman | grep '^export ')"`
+//     rather than evaluating only the last line: DOCKER_HOST alone serves
+//     docker, compose, buildx and ddev, but a plain `podman` in the agent's
+//     shell finds the service only through the XDG_RUNTIME_DIR line, and
+//     filtering on `^export ` keeps any other stdout the helper may print
+//     out of the shell. There is no Docker daemon — compose and buildx talk
+//     to the same podman socket through DOCKER_HOST;
+//   - the cost: images are pulled per run unless the operator cached them in
+//     the shared read-only image store, and the first `ddev start` pulls
+//     about 2 GB and takes about two minutes, so a long silent command is
+//     not a hang;
+//   - the ports: ddev's router listens on 8080 (HTTP) and 8443, because the
+//     session user cannot bind 80 or 443;
+//   - showing a site: `labctl expose web 8080 &`, then the preview hostname
+//     in `additional_fqdns` in `.ddev/config.local.yaml` (gitignored by
+//     ddev, so the committed ddev config stays untouched) and `ddev
+//     restart`, because ddev's router routes by Host. With p non-nil the
+//     section renders the REAL hostname and URL (`web.<p.Domain>`, via
+//     p.URL) instead of a placeholder; with p nil — no preview listener,
+//     `labctl expose` has nothing to talk to — it says previews are not
+//     available on this lab and gives the in-run check instead
+//     (`curl -H 'Host: …' http://127.0.0.1:8080/`). That is a branch, not an
+//     omission, so an agent never burns a turn on an expose that must fail;
+//   - the hazard: never write into the worktree as root from a nested
+//     container (one running as its own root with the worktree bind-mounted)
+//     — such files are owned by a subordinate uid that lab can neither diff
+//     nor delete (the ADR-0069 accident);
+//   - the budget: the run's memory and pid caps include every nested
+//     container.
+//
+// Placed right after Previews because the expose step leans on it, and
+// before Read-only imports and the skills index, keeping every repo-driven
+// section ahead of the provider-driven tail. Appended in Go for the same
+// structural reason as its neighbours: with nested false (the knob off, or
+// the runner not container — internal/instance decides, Opts.Nested)
+// renderContextFile takes the untouched path, byte-for-byte what it
+// rendered before this section existed.
+//
+// Shape mirrors appendPreviewsSection: a blank line separates the section
+// from whatever precedes it, then the heading, a blank line, the prose and
+// the indented command lines, ending in exactly one trailing "\n".
+func appendNestedSection(buf *bytes.Buffer, p *PreviewRef) {
+	buf.WriteString("\n## Nested containers\n\n")
+	buf.WriteString("This run can start its own rootless podman containers — ddev, docker\n")
+	buf.WriteString("compose, buildx. Run `start-nested-podman` first and evaluate the export\n")
+	buf.WriteString("lines it prints (`XDG_RUNTIME_DIR` for plain `podman`, `DOCKER_HOST` for\n")
+	buf.WriteString("everything else) in every shell that uses containers:\n\n")
+	buf.WriteString("    eval \"$(start-nested-podman | grep '^export ')\"\n\n")
+	buf.WriteString("There is no Docker daemon: `docker`, `docker compose` and `docker buildx`\n")
+	buf.WriteString("talk to the podman socket named by `DOCKER_HOST`.\n\n")
+	buf.WriteString("Images are pulled per run unless the operator cached them in the shared\n")
+	buf.WriteString("image store. The first `ddev start` pulls about 2 GB and takes about two\n")
+	buf.WriteString("minutes — wait for it.\n\n")
+	buf.WriteString("ddev's router listens on 8080 (HTTP) and 8443, because the session user\n")
+	buf.WriteString("cannot bind 80 or 443.\n\n")
+	if p != nil {
+		host := "web." + p.Domain
+		buf.WriteString("To show a site to the operator, expose the router's HTTP port, then add the\n")
+		buf.WriteString("preview hostname to ddev (its router routes by `Host`):\n\n")
+		buf.WriteString("    labctl expose web 8080 &\n")
+		fmt.Fprintf(buf, "    # .ddev/config.local.yaml (gitignored by ddev):\n    additional_fqdns: [\"%s\"]\n", host)
+		buf.WriteString("    ddev restart\n\n")
+		fmt.Fprintf(buf, "The site is then at `%s`.\n\n", p.URL("web"))
+	} else {
+		buf.WriteString("Previews are not available on this lab, so `labctl expose` cannot show a\n")
+		buf.WriteString("site to the operator. Check one from inside the run:\n\n")
+		buf.WriteString("    curl -H 'Host: <project>.ddev.site' http://127.0.0.1:8080/\n\n")
+	}
+	buf.WriteString("Never write into the worktree as root from a nested container (one running\n")
+	buf.WriteString("as its own root with the worktree bind-mounted): such files end up owned by\n")
+	buf.WriteString("a subordinate uid that lab can neither diff nor delete.\n\n")
+	buf.WriteString("This run's memory and pid caps include every nested container.\n")
+}
+
 // appendImportsSection writes the "## Read-only imports" section onto buf,
 // one bullet per import (issue #261: read-only imports — snapshots of other
 // lab repos materialized outside the worktree at spawn, so an instance can
@@ -403,7 +491,7 @@ func (p *PreviewRef) publicPort() int {
 // import-less repo's byte-identity is guaranteed by the len(imports) == 0
 // check in renderContextFile, never by a template conditional that must stay
 // inert. Section order in renderContextFile is template body → secrets →
-// SSH targets → previews → read-only imports → skills index (see appendSecretsSection's
+// SSH targets → previews → nested containers → read-only imports → skills index (see appendSecretsSection's
 // ordering note): every repo-driven section precedes the provider-driven tail.
 //
 // Shape mirrors appendSecretsSection: a blank line separates the section from
@@ -431,12 +519,13 @@ func appendImportsSection(buf *bytes.Buffer, imports []ImportRef) {
 // append the gateway Secrets section in its place (issue #24); bastion flows
 // through so it can append the SSH targets section (issue #39); imports flows
 // through so it can append the Read-only imports section (issue #261); preview
-// flows through so it can append the Previews section (issue #105).
-func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef) error {
+// flows through so it can append the Previews section (issue #105); nested
+// flows through so it can append the Nested containers section (issue #115).
+func seedContextFile(worktree string, repo store.Repo, meta provider.SeedMeta, secrets []store.RepoSecret, gateway *GatewayRef, bastion *BastionRef, imports []ImportRef, preview *PreviewRef, nested bool) error {
 	if meta.ContextFileName == "" {
 		return nil
 	}
-	body, err := renderContextFile(repo, meta, secrets, gateway, bastion, imports, preview)
+	body, err := renderContextFile(repo, meta, secrets, gateway, bastion, imports, preview, nested)
 	if err != nil {
 		return err
 	}
