@@ -30,13 +30,28 @@
 #
 # Why a no-op poll costs seconds. 288 runs a day, nearly all of them no-ops,
 # so the cheap idempotency check runs first: resolve the sha, clone
-# Cloonar/nixos, apply the sed, and if `git diff --quiet` says the pin is
-# already that rev, print "pin already current" and stop — two clones, no nix
+# Cloonar/nixos, read the rev currently pinned, and if it already equals
+# GitHub main, print "pin already current" and stop — one clone, no nix
 # install, no registry probes. Only a run that actually moves the pin goes on
 # to install nix, fetch the rev, probe the registries and rebuild the NixOS
 # config. The bump is *staged* before those gates but *pushed* only after
 # them, so the gate ordering is unchanged: nothing reaches Cloonar/nixos
 # until every default ref resolves and test-configuration is green.
+#
+# The pin-file contract (issue #1). The pin is the single line
+# `rev = "<40 hex>";` in hosts/dev/modules/coding-lab/pin.nix of
+# Cloonar/nixos — the file nixos ADR-0037 moved it to so that the native lab
+# and the lab-superbros guest share one rev. The idempotency check reads that
+# line FIRST and compares it to GitHub main; it does not infer "current" from
+# an empty diff after a blind sed. That distinction is the whole bug this
+# workflow had: from 2026-10-21 to 2026-11-03 it sed-edited the old
+# default.nix, matched nothing, saw no diff, and reported "pin already
+# current" every five minutes while the pin sat two weeks behind. So zero or
+# several matching lines, or a sed that leaves the file unchanged, now fail
+# the run with an error naming the file — the next move of the pin turns this
+# poll red within five minutes instead of green for weeks. Every run,
+# including a no-op, logs `pinned <sha>, GitHub main <sha>` so a stale pin is
+# visible from the run list.
 #
 # Green CI still gates the merge on the PR — GitHub branch protection
 # requires the PR's checks before main can move — and this run additionally
@@ -129,9 +144,41 @@ jobs:
           rm -rf nixos gh-rev
           git clone "https://oauth2:${NIXOS_TOKEN}@git.cloonar.com/Cloonar/nixos.git" nixos
           cd nixos
-          sed -i "s|rev = \"[0-9a-f]\{40\}\";|rev = \"${SHA}\";|" \
-            hosts/dev/modules/coding-lab/default.nix
-          git diff --quiet && { echo "pin already current"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          # The pin-file contract — see the header. Read the pinned rev
+          # before touching anything: exactly one `rev = "<40 hex>";` line
+          # in this file, or the pin has moved or changed shape and this
+          # workflow must follow it. Failing here is the point: a blind sed
+          # plus `git diff --quiet` reported "pin already current" for two
+          # weeks after the pin moved out of default.nix (issue #1).
+          PIN_FILE=hosts/dev/modules/coding-lab/pin.nix
+          if [ ! -f "$PIN_FILE" ]; then
+            echo "::error::${PIN_FILE} does not exist in Cloonar/nixos — the coding-lab pin moved; update this workflow to follow it"
+            exit 1
+          fi
+          pinned="$(grep -oE '^[[:space:]]*rev = "[0-9a-f]{40}";' "$PIN_FILE" | grep -oE '[0-9a-f]{40}')" || true
+          if [ -z "$pinned" ]; then
+            pinned_count=0
+          else
+            pinned_count="$(printf '%s\n' "$pinned" | wc -l)"
+          fi
+          if [ "$pinned_count" -ne 1 ]; then
+            echo "::error::expected exactly one 'rev = \"<40 hex>\";' line in ${PIN_FILE}, found ${pinned_count} — the coding-lab pin moved or changed shape; update this workflow to follow it"
+            exit 1
+          fi
+
+          echo "pinned ${pinned}, GitHub main ${SHA}"
+          if [ "$pinned" = "$SHA" ]; then
+            echo "pin already current"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          sed -i "s|rev = \"${pinned}\";|rev = \"${SHA}\";|" "$PIN_FILE"
+          if git diff --quiet; then
+            echo "::error::${PIN_FILE} is unchanged after the sed although it pins ${pinned} and GitHub main is ${SHA} — refusing to report a no-op"
+            exit 1
+          fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
           git --no-pager diff --stat
 
