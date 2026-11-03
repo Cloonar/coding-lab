@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
@@ -107,12 +108,12 @@ ok: sys-rw
 fail: newuidmap: exec: "newuidmap": executable file not found in $PATH
 `, 0},
 		{"several fail, reasons flattened", map[string]error{
-			checkCgroupLimits: errors.New("/sys/fs/cgroup/memory.max is writable"),
+			checkCgroupLimits: errors.New("write of the current value to /sys/fs/cgroup/memory.max was accepted"),
 			checkProcfsMount:  errors.New("mount proc on /proc:\n\toperation not permitted\n"),
 			checkSysRW:        errors.New("/sys is mounted read-only"),
 			checkNewuidmap:    errors.New("/usr/bin/newuidmap: no security.capability xattr"),
 		}, `ok: cgroup-child
-fail: cgroup-limits: /sys/fs/cgroup/memory.max is writable
+fail: cgroup-limits: write of the current value to /sys/fs/cgroup/memory.max was accepted
 fail: procfs-mount: mount proc on /proc: operation not permitted
 ok: uts-hostname
 ok: dev-net-tun
@@ -261,8 +262,10 @@ func TestSelfTestRealNonRoot(t *testing.T) {
 }
 
 // cgroupRoot is a scratch root with a /sys/fs/cgroup holding files of the
-// given modes (owned by the test user: 0644 is writable, 0444 stands in for
-// a root-owned file).
+// given modes, each with its own distinct content (cgroupFileContent), owned
+// by the test user: 0644 is a file whose write-back the scratch root
+// accepts, 0444 stands in for one whose open is refused. A mode with
+// os.ModeDir makes a directory of that name instead.
 func cgroupRoot(t *testing.T, files map[string]os.FileMode) string {
 	t.Helper()
 	root := t.TempDir()
@@ -272,7 +275,13 @@ func cgroupRoot(t *testing.T, files map[string]os.FileMode) string {
 	}
 	for name, mode := range files {
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("max\n"), 0o600); err != nil {
+		if mode.IsDir() {
+			if err := os.Mkdir(p, mode.Perm()); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(p, []byte(cgroupFileContent(name)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chmod(p, mode); err != nil {
@@ -282,6 +291,68 @@ func cgroupRoot(t *testing.T, files map[string]os.FileMode) string {
 	return root
 }
 
+// cgroupFileContent is a scratch cgroup file's content: realistic for the
+// files the check reads, distinct for every file, so a write of one file's
+// content to another would show.
+func cgroupFileContent(name string) string {
+	switch name {
+	case "memory.max":
+		return "max\n"
+	case "pids.max":
+		return "4096\n"
+	case "memory.high":
+		return "1073741824\n"
+	case "cpu.max":
+		return "max 100000\n"
+	case "cgroup.freeze":
+		return "0\n"
+	}
+	return "content of " + name + "\n"
+}
+
+// procMissing, as a procSelf argument, leaves that file out.
+const procMissing = "\x00missing"
+
+// procSelf writes the scratch root's /proc/self/mountinfo and
+// /proc/self/cgroup.
+func procSelf(t *testing.T, root, mountinfo, cgroup string) {
+	t.Helper()
+	dir := filepath.Join(root, "proc", "self")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"mountinfo": mountinfo, "cgroup": cgroup} {
+		if content == procMissing {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// mountinfo is a container's /proc/self/mountinfo with the given lines for
+// /sys/fs/cgroup, stacked in order, among the usual others.
+func mountinfo(cgroupLines ...string) string {
+	return "1600 1580 0:65 / / rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w\n" +
+		"1601 1600 0:68 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n" +
+		"1608 1600 0:70 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n" +
+		strings.Join(cgroupLines, "") +
+		"1620 1600 0:72 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,uid=100000,gid=100000\n"
+}
+
+// The /sys/fs/cgroup lines of the mountinfo fixtures.
+const (
+	miNSDelegate   = "1614 1608 0:21 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime,nosymfollow - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot,memory_hugetlb_accounting\n"
+	miNoNSDelegate = "1614 1608 0:21 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime,nosymfollow - cgroup2 cgroup2 rw,memory_recursiveprot,memory_hugetlb_accounting\n"
+	// The nested shape: a read-write cgroup2 over the runtime's one, with
+	// an optional field before the separator.
+	miStackedNSDelegate   = "1702 1614 0:21 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime master:9 - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot\n"
+	miStackedNoNSDelegate = "1702 1614 0:21 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime master:9 - cgroup2 cgroup2 rw,memory_recursiveprot\n"
+	miCgroupV1            = "1614 1608 0:21 / /sys/fs/cgroup ro,nosuid,nodev,noexec - tmpfs tmpfs ro,mode=755\n"
+	miUnified             = "1615 1614 0:22 / /sys/fs/cgroup/unified rw,nosuid,nodev,noexec - cgroup2 cgroup2 rw,nsdelegate\n"
+)
+
 func skipIfRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
@@ -289,57 +360,158 @@ func skipIfRoot(t *testing.T) {
 	}
 }
 
-// TestCheckCgroupLimits: memory.max, pids.max and every other regular file
-// in the cgroup directory must refuse a write open, the three chowned files
-// excepted; a missing limit file is no failure; the files are never written.
+// writeBackCall is one call of a recorded write-back.
+type writeBackCall struct{ path, data string }
+
+// TestCheckCgroupLimits: the check fails, with every reason in a stable
+// order, when the cgroup2 mount at /sys/fs/cgroup lacks nsdelegate, when the
+// process is not at its cgroup namespace root, or when a write-back of
+// memory.max's or pids.max's current value is accepted; a refused open or
+// write, or an absent cap file, passes. The write-back is the real one or a
+// fake that refuses (the kernel's nsdelegate rule on a file the session
+// owns) unless told to accept, and is recorded either way: it is called for
+// exactly the present caps, with exactly their content, and every file in
+// the cgroup directory is byte-identical after the check.
 func TestCheckCgroupLimits(t *testing.T) {
-	skipIfRoot(t)
-	chowned := map[string]os.FileMode{"cgroup.procs": 0o644, "cgroup.threads": 0o644, "cgroup.subtree_control": 0o644}
-	with := func(extra map[string]os.FileMode) map[string]os.FileMode {
-		m := map[string]os.FileMode{}
-		for k, v := range chowned {
-			m[k] = v
-		}
-		for k, v := range extra {
-			m[k] = v
-		}
-		return m
+	// The files beside the caps in every case: the three chowned ones and
+	// the ones with side effects, all writable to the test user.
+	extras := map[string]os.FileMode{
+		"cgroup.procs": 0o644, "cgroup.threads": 0o644, "cgroup.subtree_control": 0o644,
+		"cgroup.kill": 0o644, "cgroup.freeze": 0o644, "cpu.max": 0o644, "memory.high": 0o644,
+		"child": os.ModeDir | 0o755, // a sub-cgroup is not a file of this one
 	}
+	both := map[string]os.FileMode{"memory.max": 0o644, "pids.max": 0o644}
+	const (
+		memAccepted  = "write of the current value to /sys/fs/cgroup/memory.max was accepted"
+		pidsAccepted = "write of the current value to /sys/fs/cgroup/pids.max was accepted"
+	)
 	tests := []struct {
-		name  string
-		files map[string]os.FileMode
-		want  string // "" = ok
+		name      string
+		caps      map[string]os.FileMode
+		mountinfo string // "" = mountinfo(miNSDelegate)
+		cgroup    string // "" = "0::/\n"
+		real      bool   // the real write-back instead of the fake
+		accept    map[string]bool
+		nonRoot   bool // a 0444 file must refuse the open
+		want      string
 	}{
-		{"limits root-owned, chowned three writable", with(map[string]os.FileMode{"memory.max": 0o444, "pids.max": 0o444, "cpu.max": 0o444, "cgroup.kill": 0o444}), ""},
-		{"memory.max writable", with(map[string]os.FileMode{"memory.max": 0o644, "pids.max": 0o444}), "/sys/fs/cgroup/memory.max is writable"},
-		{"pids.max writable", with(map[string]os.FileMode{"memory.max": 0o444, "pids.max": 0o644}), "/sys/fs/cgroup/pids.max is writable"},
-		{"limit files absent from the root view", with(map[string]os.FileMode{"cpu.max": 0o444, "cgroup.events": 0o444}), ""},
-		{"absent limit files, another file writable", with(map[string]os.FileMode{"cpu.max": 0o444, "memory.high": 0o644}), "/sys/fs/cgroup/memory.high is writable"},
-		{"several writable, the two caps first", with(map[string]os.FileMode{"memory.max": 0o644, "pids.max": 0o644, "cgroup.kill": 0o644, "zz.max": 0o444}),
-			"/sys/fs/cgroup/memory.max, /sys/fs/cgroup/pids.max, /sys/fs/cgroup/cgroup.kill are writable"},
+		{name: "preconditions hold, both write-backs refused", caps: both},
+		{name: "both write-backs accepted", caps: both, real: true, want: memAccepted + "; " + pidsAccepted},
+		{name: "both write-backs accepted (fake)", caps: both, accept: map[string]bool{"memory.max": true, "pids.max": true}, want: memAccepted + "; " + pidsAccepted},
+		{name: "only memory.max accepted", caps: both, accept: map[string]bool{"memory.max": true}, want: memAccepted},
+		{name: "only pids.max accepted", caps: both, accept: map[string]bool{"pids.max": true}, want: pidsAccepted},
+		{name: "only pids.max accepted, memory.max open refused", caps: map[string]os.FileMode{"memory.max": 0o444, "pids.max": 0o644}, real: true, nonRoot: true, want: pidsAccepted},
+		{name: "both opens refused", caps: map[string]os.FileMode{"memory.max": 0o444, "pids.max": 0o444}, real: true, nonRoot: true},
+		{name: "pids.max absent", caps: map[string]os.FileMode{"memory.max": 0o644}},
+		{name: "memory.max absent, pids.max accepted", caps: map[string]os.FileMode{"pids.max": 0o644}, real: true, want: pidsAccepted},
+		{name: "both caps absent from the root view", caps: nil, real: true},
+		{name: "cap unreadable", caps: map[string]os.FileMode{"memory.max": os.ModeDir | 0o755, "pids.max": 0o644},
+			want: "read /sys/fs/cgroup/memory.max: is a directory"},
+		{name: "mount lacks nsdelegate", caps: both, mountinfo: mountinfo(miNoNSDelegate), want: "cgroup2 mount lacks nsdelegate"},
+		{name: "stacked, the visible one lacks nsdelegate", caps: both, mountinfo: mountinfo(miNSDelegate, miStackedNoNSDelegate), want: "cgroup2 mount lacks nsdelegate"},
+		{name: "stacked, the visible one has nsdelegate", caps: both, mountinfo: mountinfo(miNoNSDelegate, miStackedNSDelegate)},
+		{name: "no mount at /sys/fs/cgroup", caps: both, mountinfo: mountinfo(), want: "no cgroup2 mount at /sys/fs/cgroup"},
+		{name: "cgroup2 only below /sys/fs/cgroup", caps: both, mountinfo: mountinfo(miCgroupV1, miUnified), want: "no cgroup2 mount at /sys/fs/cgroup (tmpfs is mounted there)"},
+		{name: "not at the namespace root", caps: both, cgroup: "0::/foo\n", want: `not at the cgroup namespace root (/proc/self/cgroup is "0::/foo")`},
+		{name: "hybrid, at the namespace root", caps: both, cgroup: "12:pids:/\n1:name=systemd:/\n0::/\n"},
+		{name: "no cgroup v2 line", caps: both, cgroup: "12:pids:/\n1:name=systemd:/\n",
+			want: `not at the cgroup namespace root (/proc/self/cgroup is "12:pids:/\n1:name=systemd:/")`},
+		{name: "proc files missing", caps: both, mountinfo: procMissing, cgroup: procMissing,
+			want: "read /proc/self/mountinfo: no such file or directory; read /proc/self/cgroup: no such file or directory"},
+		{name: "everything fails, in order", caps: both, mountinfo: mountinfo(miNoNSDelegate), cgroup: "0::/foo\n", real: true,
+			want: `cgroup2 mount lacks nsdelegate; not at the cgroup namespace root (/proc/self/cgroup is "0::/foo"); ` + memAccepted + "; " + pidsAccepted},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			root := cgroupRoot(t, tc.files)
-			// A writable sub-cgroup is not a file of this one.
-			if err := os.Mkdir(filepath.Join(root, cgroupDir, "child"), 0o755); err != nil {
-				t.Fatal(err)
+			if tc.nonRoot {
+				skipIfRoot(t)
 			}
-			err := checkCgroupLimitsAt(root)
-			if got := errString(err); got != tc.want {
+			files := map[string]os.FileMode{}
+			for _, m := range []map[string]os.FileMode{extras, tc.caps} {
+				for k, v := range m {
+					files[k] = v
+				}
+			}
+			root := cgroupRoot(t, files)
+			mi, cg := tc.mountinfo, tc.cgroup
+			if mi == "" {
+				mi = mountinfo(miNSDelegate)
+			}
+			if cg == "" {
+				cg = "0::/\n"
+			}
+			procSelf(t, root, mi, cg)
+			dir := filepath.Join(root, cgroupDir)
+			before := cgroupFiles(t, dir)
+
+			var calls []writeBackCall
+			write := func(p string, b []byte) error {
+				calls = append(calls, writeBackCall{p, string(b)})
+				if tc.real {
+					return writeBack(p, b)
+				}
+				if tc.accept[filepath.Base(p)] {
+					return nil
+				}
+				return syscall.EPERM
+			}
+			if got := errString(checkCgroupLimitsWith(root, write)); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
-			for name := range tc.files {
-				if b, err := os.ReadFile(filepath.Join(root, cgroupDir, name)); err == nil && string(b) != "max\n" {
-					t.Errorf("%s changed to %q: the check must never write or truncate", name, b)
+
+			var wantCalls []writeBackCall
+			for _, n := range cgroupCapFiles {
+				if c, ok := before[n]; ok {
+					wantCalls = append(wantCalls, writeBackCall{filepath.Join(dir, n), c})
 				}
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Errorf("write-backs %q, want %q", calls, wantCalls)
+			}
+			if after := cgroupFiles(t, dir); !reflect.DeepEqual(after, before) {
+				t.Errorf("cgroup files changed by the check:\nbefore %q\nafter  %q", before, after)
 			}
 		})
 	}
 
-	if got := errString(checkCgroupLimitsAt(t.TempDir())); got != "list /sys/fs/cgroup: no such file or directory" {
-		t.Errorf("no cgroup dir: %q", got)
+	// checkCgroupLimitsAt is the check with the real write-back.
+	root := cgroupRoot(t, both)
+	procSelf(t, root, mountinfo(miNSDelegate), "0::/\n")
+	if got := errString(checkCgroupLimitsAt(root)); got != memAccepted+"; "+pidsAccepted {
+		t.Errorf("checkCgroupLimitsAt: %q", got)
 	}
+
+	// The real write-back opens without O_CREATE: an absent file stays
+	// absent.
+	p := filepath.Join(t.TempDir(), "memory.max")
+	if err := writeBack(p, []byte("max\n")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write-back of an absent file: %v, want not-exist", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write-back created the file (stat err %v)", err)
+	}
+}
+
+// cgroupFiles is the content of every regular file directly in dir, by
+// name.
+func cgroupFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]string{}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m[e.Name()] = string(b)
+	}
+	return m
 }
 
 // TestCheckCgroupChild: a child cgroup is created and removed again; a

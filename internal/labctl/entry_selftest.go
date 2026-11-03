@@ -155,51 +155,147 @@ func checkCgroupChildAt(root string, pid int) error {
 	return nil
 }
 
-// checkCgroupLimitsAt is cgroup-limits: the run must not be able to raise
-// its own caps. memory.max and pids.max are named explicitly, and every
-// other regular file directly in the cgroup directory is tried too, because
-// the limit files may not exist at all in the namespaced root view (the
-// caps can live on the parent, issue #114) — then the assertion is that no
-// file there is writable. The three files the setup chowned to the session
-// (cgroupChownPaths) are the only exceptions.
+// checkCgroupLimitsAt is cgroup-limits: the run must not be able to change
+// its own caps. File mode cannot show that: crun chowns only the delegatable
+// files to container root, so under keep-id the session uid owns every other
+// file of the namespace root, memory.max and pids.max included, and opens
+// them for writing (issue #121). What protects them is the kernel's nsdelegate
+// rule: cgroup_file_write (kernel/cgroup/cgroup.c) refuses with EPERM, on a
+// cgroup2 mount with nsdelegate, any write to a file not marked delegatable
+// in the root cgroup of a non-init cgroup namespace, from inside that
+// namespace, whatever the file's mode.
 //
-// Each file is opened O_WRONLY — no O_CREATE, no O_TRUNC — and closed at
-// once, never written: opening a cgroup file has no effect, writing would.
-// A missing file, or any refused open, is "cannot open for writing", which
-// is what is asserted.
+// So the check asserts what the kernel enforces, in three parts, all run and
+// all reported, in this order:
+//
+//   - the cgroup2 mount at /sys/fs/cgroup carries nsdelegate (mountinfo's
+//     super options of the visible mount, the last one stacked there);
+//   - this process is at its cgroup namespace root (/proc/self/cgroup is
+//     0::/, which podman's default cgroupns=private gives on cgroup v2);
+//   - memory.max and pids.max are written back with exactly their current
+//     content, and the kernel must refuse the write: a refused open or a
+//     refused write both mean the session cannot change the cap. A cap file
+//     absent from the namespaced root view is no failure (the caps can sit
+//     on the scope, issue #114).
+//
+// Writing the current value is a no-op even where it is accepted, so the
+// check never changes a run's caps. No other file is opened for writing:
+// cgroup.kill and cgroup.freeze act on any accepted write, so they are
+// covered by the two preconditions only.
 func checkCgroupLimitsAt(root string) error {
-	dir := filepath.Join(root, cgroupDir)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("list %s: %v", cgroupDir, pathReason(err))
+	return checkCgroupLimitsWith(root, writeBack)
+}
+
+// cgroupCapFiles are the caps cgroup-limits test-writes, in reporting order.
+var cgroupCapFiles = []string{"memory.max", "pids.max"}
+
+// checkCgroupLimitsWith is checkCgroupLimitsAt with the write-back
+// injectable, so tests can model the kernel refusing a write the scratch
+// root would accept.
+func checkCgroupLimitsWith(root string, write func(path string, b []byte) error) error {
+	var reasons []string
+	if r := checkNSDelegate(root); r != "" {
+		reasons = append(reasons, r)
 	}
-	skip := map[string]bool{"memory.max": true, "pids.max": true}
-	for _, p := range cgroupChownPaths[1:] {
-		skip[path.Base(p)] = true
+	if r := checkCgroupNSRoot(root); r != "" {
+		reasons = append(reasons, r)
 	}
-	names := []string{"memory.max", "pids.max"}
-	for _, e := range entries { // sorted by name
-		if e.Type().IsRegular() && !skip[e.Name()] {
-			names = append(names, e.Name())
-		}
-	}
-	var writable []string
-	for _, n := range names {
-		f, err := os.OpenFile(filepath.Join(dir, n), os.O_WRONLY, 0)
-		if err != nil {
+	for _, n := range cgroupCapFiles {
+		p := cgroupDir + "/" + n
+		full := filepath.Join(root, p)
+		b, err := os.ReadFile(full)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		_ = f.Close()
-		writable = append(writable, cgroupDir+"/"+n)
+		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("read %s: %v", p, pathReason(err)))
+			continue
+		}
+		if write(full, b) == nil {
+			reasons = append(reasons, fmt.Sprintf("write of the current value to %s was accepted", p))
+		}
 	}
-	switch len(writable) {
-	case 0:
+	if len(reasons) == 0 {
 		return nil
-	case 1:
-		return fmt.Errorf("%s is writable", writable[0])
-	default:
-		return fmt.Errorf("%s are writable", strings.Join(writable, ", "))
 	}
+	return errors.New(strings.Join(reasons, "; "))
+}
+
+// checkNSDelegate returns why the mount visible at /sys/fs/cgroup is not a
+// cgroup2 mount with the nsdelegate super option, or "". A mountinfo line is
+// `id parent major:minor root mountpoint options [optional...] - fstype
+// source superoptions`; mounts stack, so the last line for the mount point
+// is the one the path resolves to.
+func checkNSDelegate(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "/proc/self/mountinfo"))
+	if err != nil {
+		return fmt.Sprintf("read /proc/self/mountinfo: %v", pathReason(err))
+	}
+	var visible []string // the fields after the separator, or none
+	found := false
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[4] != cgroupDir {
+			continue
+		}
+		found, visible = true, nil
+		for i := 6; i < len(f); i++ {
+			if f[i] == "-" {
+				visible = f[i+1:]
+				break
+			}
+		}
+	}
+	switch {
+	case !found:
+		return "no cgroup2 mount at " + cgroupDir
+	case len(visible) < 3 || visible[0] != "cgroup2":
+		fstype := "an unparsable mount"
+		if len(visible) > 0 {
+			fstype = visible[0]
+		}
+		return fmt.Sprintf("no cgroup2 mount at %s (%s is mounted there)", cgroupDir, fstype)
+	}
+	for _, o := range strings.Split(visible[2], ",") {
+		if o == "nsdelegate" {
+			return ""
+		}
+	}
+	return "cgroup2 mount lacks nsdelegate"
+}
+
+// checkCgroupNSRoot returns why this process is not at its cgroup namespace
+// root, or "": the cgroup v2 line of /proc/self/cgroup must be exactly 0::/.
+func checkCgroupNSRoot(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "/proc/self/cgroup"))
+	if err != nil {
+		return fmt.Sprintf("read /proc/self/cgroup: %v", pathReason(err))
+	}
+	shown := strings.TrimSpace(string(b))
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "0::") {
+			if line == "0::/" {
+				return ""
+			}
+			shown = line
+			break
+		}
+	}
+	return fmt.Sprintf("not at the cgroup namespace root (/proc/self/cgroup is %q)", shown)
+}
+
+// writeBack is the real write-back: open O_WRONLY — no O_CREATE, no O_TRUNC
+// — write b in one write, close. An error from the open or the write is the
+// kernel (or the mode) refusing it; nil is an accepted write. A cgroup file
+// applies a write in write(2), so the close's result says nothing about it.
+func writeBack(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	_ = f.Close()
+	return err
 }
 
 // checkDevNetTunAt is dev-net-tun: open read-write and close at once. An

@@ -76,7 +76,11 @@ const (
 // for nested podman to create and populate child cgroups: the directory, and
 // the files that move processes and enable controllers (moving a process into
 // a child cgroup needs write access to the common ancestor's cgroup.procs).
-// Nothing else — the limit files stay root-owned.
+// Nothing else is chowned here, but that is not what protects the limit
+// files: under crun and keep-id the session uid owns them already. They are
+// protected by the kernel's nsdelegate rule, which refuses writes to every
+// non-delegatable file at the run's cgroup namespace root whatever its owner
+// or mode (checkCgroupLimitsAt, issue #121).
 var cgroupChownPaths = []string{
 	cgroupDir,
 	cgroupDir + "/cgroup.procs",
