@@ -267,6 +267,12 @@ func TestAddCloneLifecycle(t *testing.T) {
 	if repo.ContainerMemory != nil || repo.ContainerPids != nil || repo.ContainerNofile != nil {
 		t.Errorf("container overrides = %v/%v/%v, want nil/nil/nil at create", repo.ContainerMemory, repo.ContainerPids, repo.ContainerNofile)
 	}
+	// Nested containers (issue #115) starts nil too: a new repo inherits the
+	// global nested_containers_default (seeded off) — never stamped false,
+	// which would be a pin a later default flip could not reach.
+	if repo.NestedContainers != nil {
+		t.Errorf("nested_containers = %v, want nil (inherit the global default)", *repo.NestedContainers)
+	}
 
 	final := e.waitCloneStatus(t, repo.ID, store.CloneStatusReady)
 	if final.DefaultBranch != "trunk" {
@@ -1097,6 +1103,22 @@ func TestUpdateSettingsValidationAndEvents(t *testing.T) {
 	}
 	if updated.Runner == nil || *updated.Runner != store.RunnerHost {
 		t.Errorf("runner after host = %v, want the host pin", updated.Runner)
+	}
+
+	// Nested containers tri-state round trip (issue #115): on and an explicit
+	// off each pin — off must never fold into nil — and nil clears the pin
+	// back to inherit the global nested_containers_default.
+	for _, pin := range []*bool{ptr(true), ptr(false), nil} {
+		updated, err = e.svc.UpdateSettings(t.Context(), repo.ID, store.RepoSettingsUpdate{
+			NestedContainers: store.Set(pin),
+		})
+		if err != nil {
+			t.Fatalf("UpdateSettings nested_containers=%v: %v", pin, err)
+		}
+		if (pin == nil) != (updated.NestedContainers == nil) ||
+			(pin != nil && *updated.NestedContainers != *pin) {
+			t.Errorf("nested_containers after %v = %v, want it read back exactly", pin, updated.NestedContainers)
+		}
 	}
 
 	waitFor(t, "repo.changed after PATCH", func() bool {

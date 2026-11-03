@@ -510,6 +510,12 @@ func (s *Service) Add(ctx context.Context, p AddParams) (store.Repo, error) {
 		// were migrated as pins (migration 0024), so this stamp is the only
 		// way a repo ever starts out inheriting.
 		Runner: nil,
+		// NestedContainers (issue #115 / ADR-0086) starts nil for the same
+		// reason: a new repo inherits the global nested_containers_default
+		// (seeded off), resolved live by instance.EffectiveNestedContainers.
+		// Never stamped false — that would be a pin a later flip of the
+		// default could not reach.
+		NestedContainers: nil,
 	}
 	created, err := s.store.CreateRepo(ctx, repo)
 	if err != nil {
@@ -701,6 +707,14 @@ func (s *Service) UpdateSettings(ctx context.Context, id string, u store.RepoSet
 			return store.Repo{}, fieldBadRequestf("runner", "runner: must be %q, %q, or null (inherit the global runner default)", store.RunnerHost, store.RunnerContainer)
 		}
 	}
+	// nested_containers (issue #115 / ADR-0086) needs no check here: it is a
+	// *bool, so the API layer's strict decode already refused anything but
+	// true, false or null, and every one of those is legal — nil clears the
+	// pin back to NULL (inherit the global nested_containers_default), and
+	// false is a real pin, never folded into nil. It is accepted under either
+	// Runner: a host-runner repo keeps the pin, ignored until its effective
+	// Runner is container.
+
 	// container_memory (issue #205): nullable — null clears the per-repo
 	// override back to inherit the global container_memory setting — but a
 	// non-null value must match podman's --memory grammar (store.ValidContainerMemory,

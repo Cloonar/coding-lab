@@ -148,6 +148,17 @@ type Repo struct {
 	// store persists whatever it is given, unchanged. It only matters while
 	// the effective Runner is "container".
 	ImageRef *string
+	// NestedContainers is the repo's Nested containers pin (issue #115 /
+	// ADR-0086): true lets a container run's panes start their own rootless
+	// podman containers (the nested argv shape), false keeps today's shape.
+	// Nil / NULL means inherit the global nested_containers_default setting
+	// (seeded off — the state every new repo starts in); a non-nil value pins
+	// the repo regardless of that setting. *bool, not bool, for the
+	// RemoteDefault reason: false is a legal pin, so inherit has no in-band
+	// spelling. Never compare it directly: instance.EffectiveNestedContainers
+	// is the one resolver, and its answer only matters while the effective
+	// Runner is "container" — a host-runner repo ignores it.
+	NestedContainers *bool
 }
 
 // repoColumns is the one column list every repo SELECT/INSERT uses, in the
@@ -163,7 +174,8 @@ const repoColumns = `id, name, remote_url, credential_id, forge_credential_id,
 	afk_provider_default, remote_default, afk_remote_default,
 	autoland_enabled, max_fix_attempts, auto_merge, lander_provider,
 	lander_model, lander_effort,
-	runner, container_memory, container_pids, container_nofile, image_ref`
+	runner, container_memory, container_pids, container_nofile, image_ref,
+	nested_containers`
 
 // triageLabels are the five canonical triage labels seeded per repo at
 // creation (design §3a colors; docs/agents/triage-labels.md meanings).
@@ -199,7 +211,7 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 	}
 	_, err = tx.ExecContext(ctx, s.rebind(
 		`INSERT INTO repos (`+repoColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.Name, r.RemoteURL, r.CredentialID, r.ForgeCredentialID,
 		r.TrackerBinding, r.ForgeKind, r.DefaultBranch, r.Provider, r.ModelDefault,
 		r.EffortDefault, r.Incogni, r.GitAuthorName, r.GitAuthorEmail,
@@ -211,7 +223,8 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, error) {
 		r.AFKProviderDefault, r.RemoteDefault, r.AFKRemoteDefault,
 		r.AutolandEnabled, r.MaxFixAttempts, r.AutoMerge, r.LanderProvider,
 		r.LanderModel, r.LanderEffort,
-		r.Runner, r.ContainerMemory, r.ContainerPids, r.ContainerNofile, r.ImageRef)
+		r.Runner, r.ContainerMemory, r.ContainerPids, r.ContainerNofile, r.ImageRef,
+		r.NestedContainers)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Repo{}, fmt.Errorf("create repo %q: %w", r.Name, ErrNameTaken)
@@ -292,6 +305,26 @@ func (s *Store) RepoByID(ctx context.Context, id string) (Repo, error) {
 	return r, nil
 }
 
+// AnyRepoNestedContainers reports whether any repo row pins Nested containers
+// on (repos.nested_containers = TRUE, issue #115 / ADR-0086). It is half of
+// the "nested is on anywhere" gate — the other half is the global
+// nested_containers_default setting, which the caller reads itself — that
+// decides whether startup runs the nested preflight checks and creates the
+// shared image store, so a host that never uses the knob pays nothing for
+// it. NULL rows (inherit) and FALSE pins never count: an inheriting repo is
+// covered by the default half, and the runner is deliberately not consulted
+// — a host-runner repo with the pin on still counts, because switching its
+// Runner to container must not meet an unchecked host.
+func (s *Store) AnyRepoNestedContainers(ctx context.Context) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.rebind(
+		`SELECT COUNT(*) FROM repos WHERE nested_containers = ?`), true).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("any repo nested containers: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Opt is one optional field of a partial update: the zero value leaves the
 // column untouched; Set true writes Value, which may itself be a nil pointer
 // for nullable columns.
@@ -341,6 +374,7 @@ type RepoSettingsUpdate struct {
 	ContainerPids        Opt[*int]    // podman --pids-limit override; nil clears (NULL = inherit)
 	ContainerNofile      Opt[*int]    // podman --ulimit nofile override; nil clears (NULL = inherit)
 	ImageRef             Opt[*string] // dev container image ref override (issue #207); nil clears (NULL = inherit the global default dev image)
+	NestedContainers     Opt[*bool]   // Nested containers pin (issue #115); nil clears (NULL = inherit the global nested_containers_default), false is a value
 }
 
 // UpdateRepoSettings applies the set fields of u to one repo and returns the
@@ -460,6 +494,9 @@ func (s *Store) UpdateRepoSettings(ctx context.Context, id string, u RepoSetting
 	}
 	if u.ImageRef.Set {
 		add("image_ref", u.ImageRef.Value)
+	}
+	if u.NestedContainers.Set {
+		add("nested_containers", u.NestedContainers.Value)
 	}
 	if len(sets) == 0 {
 		return s.RepoByID(ctx, id)
@@ -658,6 +695,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		runner, containerMemory           sql.NullString
 		containerPids, containerNofile    sql.NullInt64
 		imageRef                          sql.NullString
+		nestedContainers                  sql.NullBool
 	)
 	if err := scan(&r.ID, &r.Name, &r.RemoteURL, &credID, &forgeCredID,
 		&r.TrackerBinding, &r.ForgeKind, &r.DefaultBranch, &providerCol, &modelDef,
@@ -670,7 +708,8 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 		&afkProviderDef, &remoteDef, &afkRemoteDef,
 		&r.AutolandEnabled, &r.MaxFixAttempts, &r.AutoMerge, &landerProvider,
 		&landerModel, &landerEffort,
-		&runner, &containerMemory, &containerPids, &containerNofile, &imageRef); err != nil {
+		&runner, &containerMemory, &containerPids, &containerNofile, &imageRef,
+		&nestedContainers); err != nil {
 		return Repo{}, err
 	}
 	r.CredentialID = nullStr(credID)
@@ -697,6 +736,7 @@ func scanRepo(scan func(dest ...any) error) (Repo, error) {
 	r.ContainerPids = nullInt(containerPids)
 	r.ContainerNofile = nullInt(containerNofile)
 	r.ImageRef = nullStr(imageRef)
+	r.NestedContainers = nullBool(nestedContainers)
 
 	var err error
 	if r.AFKOptions, err = unmarshalOptions(afkOptions); err != nil {

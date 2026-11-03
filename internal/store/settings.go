@@ -159,6 +159,36 @@ const (
 	// the tracker adapters never read settings, they take
 	// tracker.MergeOptions.
 	SettingMergeDeleteHead = "merge_delete_head"
+
+	// Global Nested containers default (issue #115 / ADR-0086): the value a
+	// repo with a NULL repos.nested_containers inherits — exactly "true" or
+	// "false", nothing else. It IS seeded, to "false": every nested flag
+	// widens a run's kernel surface, so the knob starts off and an upgrade
+	// changes no run's argv by itself; and like spawn_remote_default a boolean
+	// knob has no blank-means-unset spelling, so the default is stated out
+	// loud. Inheritance is live, the runner_default way: the resolver
+	// (instance.EffectiveNestedContainers) reads this row per spawn and never
+	// caches it, so a change reaches every inheriting repo's NEXT spawn while
+	// runs already alive keep their argv. A missing row or a value other than
+	// exactly "true"/"false" refuses an inheriting repo's container spawn
+	// naming this key — never a silent fall back to off. Its answer only
+	// matters while the effective Runner is container. With
+	// Store.AnyRepoNestedContainers it also forms the "nested is on anywhere"
+	// gate for the startup preflight checks and the shared image store.
+	SettingNestedContainersDefault = "nested_containers_default"
+
+	// Shared image store list (issue #115 / ADR-0086): the image refs lab
+	// pulls, best effort, into <state>/containers/shared-store — the store a
+	// nested run mounts read-only and lists under additionalimagestores, so
+	// a ref cached here is not pulled per run. One ref per line; the settings
+	// PATCH normalizes it (lines trimmed, blank lines dropped, joined with
+	// "\n") and refuses a line with whitespace inside it, so a stored value
+	// splits on "\n" into clean refs. Seeded "" (an empty list: nothing
+	// cached, every nested run pulls its own images) on the insert-if-absent
+	// footing, so an operator's list survives re-seeding. A failed pull is
+	// logged naming the ref and never refuses a spawn — a cache miss only
+	// costs the run a pull.
+	SettingNestedImageCache = "nested_image_cache"
 )
 
 // Transcript retention bounds (issue #81) — the ONE source shared by the seed,
@@ -350,7 +380,10 @@ func (s *Store) TranscriptRetentionDays(ctx context.Context) (int, error) {
 // insert-if-absent footing: an operator's 0 (off) or 365 is never reset.
 // merge_delete_head (issue #90, ADR-0081) is a boolean knob, so it states its
 // "true" default out loud like spawn_remote_default; an operator's "false"
-// survives re-seeding.
+// survives re-seeding. nested_containers_default (issue #115, ADR-0086) is
+// seeded "false" for the same boolean-knob reason — and off, because every
+// nested flag widens the run's surface — and nested_image_cache is seeded ""
+// (an empty cache list); an operator's on or list survives re-seeding.
 func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defaultProvider string) error {
 	defaults := map[string]string{
 		SettingSpawnModelDefault:    "opus[1m]",
@@ -372,6 +405,9 @@ func (s *Store) SeedDefaultSettings(ctx context.Context, maxInstances int, defau
 		SettingTranscriptRetentionDays: strconv.Itoa(DefaultTranscriptRetentionDays),
 
 		SettingMergeDeleteHead: "true",
+
+		SettingNestedContainersDefault: "false",
+		SettingNestedImageCache:        "",
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, s.rebind(

@@ -174,6 +174,9 @@ func TestSeedDefaultSettings(t *testing.T) {
 			SettingTranscriptRetentionDays: "30",
 
 			SettingMergeDeleteHead: "true",
+
+			SettingNestedContainersDefault: "false",
+			SettingNestedImageCache:        "",
 		}
 		if len(all) != len(want) {
 			t.Errorf("seeded %d keys, want %d: %v", len(all), len(want), all)
@@ -295,6 +298,49 @@ func TestSeedDefaultSettings_runnerDefault(t *testing.T) {
 		}
 		if v, err := s.GetSetting(ctx, SettingRunnerDefault); err != nil || v != RunnerContainer {
 			t.Errorf("runner_default after re-seed = %q, %v; want the operator's %q to survive", v, err, RunnerContainer)
+		}
+	})
+}
+
+// TestSeedDefaultSettings_nestedContainers pins the Nested containers seed
+// contract (issue #115 / ADR-0086): a fresh database ends up with
+// nested_containers_default = "false" — a real row that GetBool reads as off
+// even when the caller's fallback says on — and nested_image_cache = "" (an
+// empty list), and an operator's on and cache list both survive a later
+// boot's re-seed (an overwrite would silently switch every inheriting repo
+// back off, and empty the cache, on the next restart).
+func TestSeedDefaultSettings_nestedContainers(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("first seed: %v", err)
+		}
+		if v, err := s.GetSetting(ctx, SettingNestedContainersDefault); err != nil || v != "false" {
+			t.Fatalf("fresh nested_containers_default = %q, %v; want the seeded \"false\"", v, err)
+		}
+		if v, err := s.GetBool(ctx, SettingNestedContainersDefault, true); err != nil || v {
+			t.Errorf("GetBool(nested_containers_default, true) = %v, %v; want seeded false, nil", v, err)
+		}
+		if v, err := s.GetSetting(ctx, SettingNestedImageCache); err != nil || v != "" {
+			t.Fatalf("fresh nested_image_cache = %q, %v; want the seeded empty row", v, err)
+		}
+
+		const list = "docker.io/library/mariadb:11.8\nghcr.io/ddev/ddev-router:v1.25.5"
+		if err := s.SetSetting(ctx, SettingNestedContainersDefault, "true"); err != nil {
+			t.Fatalf("set nested_containers_default: %v", err)
+		}
+		if err := s.SetSetting(ctx, SettingNestedImageCache, list); err != nil {
+			t.Fatalf("set nested_image_cache: %v", err)
+		}
+		if err := s.SeedDefaultSettings(ctx, 6, "claude-code"); err != nil {
+			t.Fatalf("re-seed: %v", err)
+		}
+		if v, err := s.GetSetting(ctx, SettingNestedContainersDefault); err != nil || v != "true" {
+			t.Errorf("nested_containers_default after re-seed = %q, %v; want the operator's \"true\" to survive", v, err)
+		}
+		if v, err := s.GetSetting(ctx, SettingNestedImageCache); err != nil || v != list {
+			t.Errorf("nested_image_cache after re-seed = %q, %v; want the operator's list to survive", v, err)
 		}
 	})
 }

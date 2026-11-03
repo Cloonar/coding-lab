@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -828,6 +829,142 @@ func TestRepoImageRefColumnRoundTrip(t *testing.T) {
 	})
 }
 
+// TestRepoNestedContainersColumnRoundTrip pins the repos.nested_containers
+// tri-state (issue #115 / ADR-0086, migration 0025): a repo created with a
+// pin round-trips it — true, and an explicit false that must never fold into
+// nil — a minimal repo reads nil (inherit nested_containers_default), and
+// UpdateRepoSettings sets, flips and clears the pin back to NULL while an
+// unrelated field (Runner) and an unrelated patch leave it untouched.
+func TestRepoNestedContainersColumnRoundTrip(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+
+		// Create with each pin round-trips exactly.
+		for _, pin := range []bool{true, false} {
+			full := testRepo(fmt.Sprintf("nested%v", pin), now)
+			full.Runner = strPtr(RunnerContainer)
+			full.NestedContainers = boolPtr(pin)
+			created, err := s.CreateRepo(ctx, full)
+			if err != nil {
+				t.Fatalf("create pin %v: %v", pin, err)
+			}
+			got, err := s.RepoByID(ctx, full.ID)
+			if err != nil {
+				t.Fatalf("by id pin %v: %v", pin, err)
+			}
+			if !reflect.DeepEqual(got, created) {
+				t.Errorf("nested_containers pin %v round trip mismatch:\n got %+v\nwant %+v", pin, got, created)
+			}
+			if got.NestedContainers == nil || *got.NestedContainers != pin {
+				t.Errorf("NestedContainers = %v, want the pinned %v (not nil)", got.NestedContainers, pin)
+			}
+		}
+
+		// A minimal repo carries the caller-applied default: nil (inherit).
+		min := testRepo("nestedmin", now)
+		if _, err := s.CreateRepo(ctx, min); err != nil {
+			t.Fatalf("create minimal: %v", err)
+		}
+		gotMin, err := s.RepoByID(ctx, min.ID)
+		if err != nil {
+			t.Fatalf("by id minimal: %v", err)
+		}
+		if gotMin.NestedContainers != nil {
+			t.Errorf("minimal repo nested_containers = %v, want nil (inherit)", *gotMin.NestedContainers)
+		}
+
+		// Patch: pin on, then flip to an explicit off.
+		for _, pin := range []bool{true, false} {
+			updated, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+				NestedContainers: Set(boolPtr(pin)),
+			})
+			if err != nil {
+				t.Fatalf("pin %v: %v", pin, err)
+			}
+			if updated.NestedContainers == nil || *updated.NestedContainers != pin {
+				t.Errorf("patched nested_containers = %v, want %v", updated.NestedContainers, pin)
+			}
+			if !reflect.DeepEqual(updated.Runner, gotMin.Runner) {
+				t.Errorf("unrelated runner column changed by nested patch: %v", updated.Runner)
+			}
+		}
+
+		// An unrelated patch leaves the stored false alone.
+		untouched, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			ImageRef: Set(strPtr("registry.example.com/dev@sha256:cccc")),
+		})
+		if err != nil {
+			t.Fatalf("unrelated patch: %v", err)
+		}
+		if untouched.NestedContainers == nil || *untouched.NestedContainers {
+			t.Errorf("nested_containers after unrelated patch = %v, want the stored false", untouched.NestedContainers)
+		}
+
+		// Patch: clear the pin back to NULL (inherit).
+		cleared, err := s.UpdateRepoSettings(ctx, min.ID, RepoSettingsUpdate{
+			NestedContainers: Set[*bool](nil),
+		})
+		if err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		if cleared.NestedContainers != nil {
+			t.Errorf("cleared nested_containers = %v, want nil (inherit)", *cleared.NestedContainers)
+		}
+	})
+}
+
+// TestAnyRepoNestedContainers pins the repo half of the "nested is on
+// anywhere" gate (issue #115): false with no repos, false while every repo
+// inherits (NULL) or pins off, true as soon as one repo pins on — whatever
+// its Runner — and false again once that pin is cleared.
+func TestAnyRepoNestedContainers(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+		check := func(want bool, when string) {
+			t.Helper()
+			got, err := s.AnyRepoNestedContainers(ctx)
+			if err != nil {
+				t.Fatalf("%s: AnyRepoNestedContainers: %v", when, err)
+			}
+			if got != want {
+				t.Errorf("%s: AnyRepoNestedContainers = %v, want %v", when, got, want)
+			}
+		}
+
+		check(false, "no repos")
+
+		inherit := testRepo("anyinherit", now)
+		if _, err := s.CreateRepo(ctx, inherit); err != nil {
+			t.Fatalf("create inherit: %v", err)
+		}
+		off := testRepo("anyoff", now)
+		off.NestedContainers = boolPtr(false)
+		if _, err := s.CreateRepo(ctx, off); err != nil {
+			t.Fatalf("create off: %v", err)
+		}
+		check(false, "inherit + off pins")
+
+		// A host-runner repo's on pin still counts: the gate never reads the
+		// Runner, so switching that repo to container meets a checked host.
+		on := testRepo("anyon", now)
+		on.Runner = strPtr(RunnerHost)
+		on.NestedContainers = boolPtr(true)
+		if _, err := s.CreateRepo(ctx, on); err != nil {
+			t.Fatalf("create on: %v", err)
+		}
+		check(true, "one on pin")
+
+		if _, err := s.UpdateRepoSettings(ctx, on.ID, RepoSettingsUpdate{
+			NestedContainers: Set[*bool](nil),
+		}); err != nil {
+			t.Fatalf("clear on pin: %v", err)
+		}
+		check(false, "on pin cleared")
+	})
+}
+
 func TestUpdateRepoCloneStatusAndTouch(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
@@ -1182,6 +1319,12 @@ func TestRunnerInheritMigration(t *testing.T) {
 				t.Errorf("runner-less insert after 0024 = %q, want NULL (no default)", v.String)
 			}
 			// The normal accessors read the reshaped column: nil is inherit.
+			// They select every head-schema column (0025 added
+			// nested_containers), so migrate to head first; the down step
+			// below unwinds the later migrations back past 0024 too.
+			if _, err := p.Up(ctx); err != nil {
+				t.Fatalf("migrate to head: %v", err)
+			}
 			if got, err := st.RepoByID(ctx, inheritID); err != nil || got.Runner != nil {
 				t.Errorf("RepoByID(inherit) runner = %v, %v; want nil, nil", got.Runner, err)
 			}
