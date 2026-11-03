@@ -18,9 +18,11 @@ package labctl
 //     inside what keep-id maps, uid+1 through 65535.
 //  3. Chown the run's cgroup directory and exactly its cgroup.procs,
 //     cgroup.threads and cgroup.subtree_control to the session user — never
-//     recursively: memory.max and pids.max must stay root-owned so the run
-//     cannot raise its own caps. A read-only cgroup mount (the non-nested
-//     shape) is a hard error naming the file.
+//     recursively. That is not what keeps the run from raising its own caps:
+//     under crun and keep-id the session uid owns memory.max and pids.max
+//     already, and the kernel's nsdelegate rule at the run's cgroup namespace
+//     root refuses the write (issue #121). A read-only cgroup mount (the
+//     non-nested shape) is a hard error naming the file.
 //  4. Drop to the session uid/gid irreversibly and prove it by failing to get
 //     uid 0 back.
 //
@@ -132,9 +134,9 @@ line per check, in this order, nothing else:
   fail: <check>: <why>
 
   cgroup-child   a child cgroup can be created under /sys/fs/cgroup and removed
-  cgroup-limits  no limit file in /sys/fs/cgroup (memory.max, pids.max, ...)
-                 opens for writing; only cgroup.procs, cgroup.threads and
-                 cgroup.subtree_control are the session's
+  cgroup-limits  the cgroup2 mount at /sys/fs/cgroup carries nsdelegate, this
+                 process is at its cgroup namespace root (0::/), and writing
+                 the current value back to memory.max and pids.max is refused
   procfs-mount   a new user+pid+mount namespace can mount a fresh procfs
   uts-hostname   a new user+UTS namespace can set its hostname
   dev-net-tun    /dev/net/tun opens read-write
