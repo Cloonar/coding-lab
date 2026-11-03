@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,227 @@ func TestRunArgvGolden(t *testing.T) {
 		"claude", "--model", "opus",
 	}
 	assertArgv(t, RunArgv(s), want)
+}
+
+// goldenRunSpec is TestRunArgvGolden's spec — every run-shape field set —
+// so the nested tests below vary exactly one thing against it: Nested.
+func goldenRunSpec() RunSpec {
+	return RunSpec{
+		Bin:         "/usr/bin/podman",
+		Name:        "labrun-myrepo.afk-205-7876ed",
+		Image:       "docker.io/library/debian:stable-slim",
+		ToolsImage:  "git.cloonar.com/cloonar/agent-tools@sha256:deadbeef",
+		WorktreeDir: "/var/lib/lab/worktrees/myrepo-1",
+		BareDir:     "/var/lib/lab/repos/myrepo.git",
+		AgentDir:    "/var/lib/lab/agent",
+		HomeDir:     "/var/lib/lab/instances/run_1/home",
+		RuntimeDir:  "/var/lib/lab/runtime/run_1",
+		ImportDirs: []string{
+			"/var/lib/lab/instances/run_1/imports/libcore",
+			"/var/lib/lab/instances/run_1/imports/webapp",
+		},
+		Memory: "8g",
+		Pids:   4096,
+		Nofile: 16384,
+		Env: []string{
+			"PATH=" + PATH,
+			"HOME=" + Home,
+			"LAB_URL=unix:///var/lib/lab/agent/agent.sock",
+		},
+		ForwardEnv: []string{"LAB_TOKEN", "GIT_ASKPASS"},
+		Argv:       []string{"claude", "--model", "opus"},
+	}
+}
+
+// TestRunArgvNestedGolden pins the nested-containers run shape (ADR-0086,
+// issue #115) flag by flag, with and without the shared image store. Every
+// difference from TestRunArgvGolden is marked; everything unmarked is the
+// default shape verbatim — the caps, keep-id, the pasta and add-host pins,
+// the tools mount, the whole bind inventory, -w and the env discipline.
+func TestRunArgvNestedGolden(t *testing.T) {
+	const (
+		seccomp = "/var/lib/lab/containers/nested-seccomp.json"
+		store   = "/var/lib/lab/containers/shared-store"
+	)
+	head := []string{
+		"/usr/bin/podman", "--cgroup-manager=systemd", "run", "--rm", "-it",
+		"--name", "labrun-myrepo.afk-205-7876ed",
+		// The nested block, in --init's place (no --init: podman refuses
+		// it with systemd mode, and the entry program reaps instead).
+		"--systemd=always",
+		"--stop-signal", "SIGTERM",
+		"--user", "0",
+		"--security-opt", "unmask=ALL",
+		"--security-opt", "seccomp=" + seccomp,
+		"--device", "/dev/net/tun",
+		"-v", "/sys:/sys",
+		// The default shape from here on, unchanged.
+		"--userns=keep-id",
+		"--network=pasta:--map-guest-addr,none",
+		"--add-host", "host.containers.internal:127.0.0.1",
+		"--add-host", "host.docker.internal:127.0.0.1",
+		"--memory", "8g",
+		"--pids-limit", "4096",
+		"--ulimit", "nofile=16384:16384",
+		"--mount", "type=image,src=git.cloonar.com/cloonar/agent-tools@sha256:deadbeef,dst=/opt/lab",
+		"-v", "/var/lib/lab/worktrees/myrepo-1:/var/lib/lab/worktrees/myrepo-1",
+		"-v", "/var/lib/lab/repos/myrepo.git:/var/lib/lab/repos/myrepo.git",
+		"-v", "/var/lib/lab/agent:/var/lib/lab/agent",
+		"-v", "/var/lib/lab/instances/run_1/home:/home/agent",
+		"-v", "/var/lib/lab/runtime/run_1:/var/lib/lab/runtime/run_1",
+		"-v", "/var/lib/lab/instances/run_1/imports/libcore:/var/lib/lab/instances/run_1/imports/libcore:ro",
+		"-v", "/var/lib/lab/instances/run_1/imports/webapp:/var/lib/lab/instances/run_1/imports/webapp:ro",
+	}
+	// The entry program as the command, the provider argv after its --.
+	tail := []string{
+		"docker.io/library/debian:stable-slim",
+		"/opt/lab/bin/labctl", "container-entry", "--uid", "990", "--gid", "991", "--",
+		"claude", "--model", "opus",
+	}
+	cat := func(parts ...[]string) []string {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name   string
+		nested NestedSpec
+		want   []string
+	}{
+		{
+			name:   "with the shared store",
+			nested: NestedSpec{SeccompProfile: seccomp, SharedStore: store, UID: 990, GID: 991},
+			want: cat(head, []string{
+				// The store: read-only, host-identical, after the imports.
+				"-v", store + ":" + store + ":ro",
+				"-w", "/var/lib/lab/worktrees/myrepo-1",
+				"--env", "PATH=" + PATH,
+				"--env", "HOME=/home/agent",
+				"--env", "LAB_URL=unix:///var/lib/lab/agent/agent.sock",
+				// Named to the image's helper, after the caller's K=V env.
+				"--env", "LAB_SHARED_STORE=" + store,
+				"--env", "LAB_TOKEN",
+				"--env", "GIT_ASKPASS",
+			}, tail),
+		},
+		{
+			// The store dir does not exist yet (the caller passes ""):
+			// neither its bind nor LAB_SHARED_STORE renders — podman would
+			// refuse a missing bind source, and the helper then writes a
+			// storage.conf without an additional store.
+			name:   "without the shared store",
+			nested: NestedSpec{SeccompProfile: seccomp, UID: 990, GID: 991},
+			want: cat(head, []string{
+				"-w", "/var/lib/lab/worktrees/myrepo-1",
+				"--env", "PATH=" + PATH,
+				"--env", "HOME=/home/agent",
+				"--env", "LAB_URL=unix:///var/lib/lab/agent/agent.sock",
+				"--env", "LAB_TOKEN",
+				"--env", "GIT_ASKPASS",
+			}, tail),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := goldenRunSpec()
+			s.Nested = &tt.nested
+			got := RunArgv(s)
+			assertArgv(t, got, tt.want)
+			for _, a := range got {
+				if a == "--init" || strings.Contains(a, "/dev/fuse") {
+					t.Errorf("nested argv carries %q: %q", a, got)
+				}
+			}
+		})
+	}
+}
+
+// TestRunArgvNestedOnlyAddsItsPins: the nested shape is the default shape
+// with --init swapped for nestedFlags at the same position, the store
+// bind and env added, and the entry program prefixed to the provider argv —
+// nothing else. Removing exactly those from the nested argv must give back
+// the default argv, so a future default-shape pin cannot silently go
+// missing from (or differ in) nested runs. NoTTY rides along to prove -it
+// discipline is shared too.
+func TestRunArgvNestedOnlyAddsItsPins(t *testing.T) {
+	for _, noTTY := range []bool{false, true} {
+		base := goldenRunSpec()
+		base.NoTTY = noTTY
+		def := RunArgv(base)
+
+		nested := base
+		nested.Nested = &NestedSpec{SeccompProfile: "/s.json", SharedStore: "/store", UID: 7, GID: 8}
+		got := RunArgv(nested)
+
+		i := slices.Index(def, "--init")
+		if i < 0 {
+			t.Fatalf("default argv has no --init: %q", def)
+		}
+		flags := nestedFlags("/s.json")
+		if !slices.Equal(got[i:i+len(flags)], flags) {
+			t.Fatalf("nested argv at --init's slot = %q, want nestedFlags %q", got[i:i+len(flags)], flags)
+		}
+		stripped := slices.Concat(got[:i], got[i+len(flags):])
+		stripped = removeSeq(t, stripped, "-v", "/store:/store:ro")
+		stripped = removeSeq(t, stripped, "--env", "LAB_SHARED_STORE=/store")
+		stripped = removeSeq(t, stripped, EntryBin, "container-entry", "--uid", "7", "--gid", "8", "--")
+		withoutInit := slices.Concat(def[:i], def[i+1:])
+		assertArgv(t, stripped, withoutInit)
+	}
+}
+
+// removeSeq removes the first occurrence of seq from argv, failing when it
+// is absent.
+func removeSeq(t *testing.T, argv []string, seq ...string) []string {
+	t.Helper()
+	for i := 0; i+len(seq) <= len(argv); i++ {
+		if slices.Equal(argv[i:i+len(seq)], seq) {
+			return slices.Concat(argv[:i], argv[i+len(seq):])
+		}
+	}
+	t.Fatalf("argv %q does not contain %q", argv, seq)
+	return nil
+}
+
+// TestRunArgvNilNestedIsDefault: a nil Nested is today's shape, with
+// --init and without a single nested-only flag. The byte-for-byte pin of
+// that shape stays TestRunArgvGolden (and the login/CLI goldens), left
+// untouched by issue #115 on purpose.
+func TestRunArgvNilNestedIsDefault(t *testing.T) {
+	got := RunArgv(goldenRunSpec())
+	if !slices.Contains(got, "--init") {
+		t.Fatalf("default argv lost --init: %q", got)
+	}
+	for _, a := range append(nestedFlags("x"), EntryBin, "container-entry") {
+		if a == "-v" || a == "--security-opt" {
+			continue // shared with the default shape's own flags
+		}
+		if slices.Contains(got, a) {
+			t.Errorf("default argv carries nested-only %q: %q", a, got)
+		}
+	}
+	for _, a := range got {
+		if strings.HasPrefix(a, "LAB_SHARED_STORE") || a == "/sys:/sys" {
+			t.Errorf("default argv carries nested-only %q: %q", a, got)
+		}
+	}
+}
+
+// TestNestedPaths pins the two state-dir paths the nested shape and its
+// preflight agree on.
+func TestNestedPaths(t *testing.T) {
+	if got, want := NestedSeccompPath("/var/lib/lab"), "/var/lib/lab/containers/nested-seccomp.json"; got != want {
+		t.Errorf("NestedSeccompPath = %q, want %q", got, want)
+	}
+	if got, want := SharedStorePath("/var/lib/lab"), "/var/lib/lab/containers/shared-store"; got != want {
+		t.Errorf("SharedStorePath = %q, want %q", got, want)
+	}
+	if EntryBin != "/opt/lab/bin/labctl" {
+		t.Errorf("EntryBin = %q, want /opt/lab/bin/labctl", EntryBin)
+	}
 }
 
 // TestLoginArgvGolden pins the login-session shape (issue #206): the same

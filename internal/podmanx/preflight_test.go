@@ -18,6 +18,7 @@ import (
 // to the libpod-*.scope component, where the cap files actually live.
 const (
 	testUID       = 990
+	testGID       = 991
 	testRunUser   = "/run/user/990"
 	probeScopeDir = "/user.slice/user-990.slice/user@990.service/user.slice/libpod-abc123.scope"
 
@@ -42,6 +43,9 @@ type pfFixture struct {
 	paths    map[string]string
 	files    map[string]string
 	writable map[string]bool // paths the service user can write (the user-manager probe)
+	// accessRW answers Deps.AccessRW: a listed path returns its error (nil
+	// = readable and writable), an unlisted one does not exist.
+	accessRW map[string]error
 	runner   *recordingRunner
 }
 
@@ -72,6 +76,8 @@ func greenFixture() *pfFixture {
 		// exactly while user@<uid>.service runs — the user-manager
 		// reachability signal.
 		writable: map[string]bool{testRunUser: true},
+		// The nested-tun check's device, present and usable (mode 0666).
+		accessRW: map[string]error{"/dev/net/tun": nil},
 		runner: &recordingRunner{script: map[string]cmdResult{
 			"podman version --format {{.Client.Version}}": {out: "5.2.3\n"},
 			// pasta's capability probe: the option comes BEFORE --version, so
@@ -107,9 +113,16 @@ func (f *pfFixture) deps() Deps {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 		},
 		Writable: func(path string) bool { return f.writable[path] },
+		AccessRW: func(path string) error {
+			if err, ok := f.accessRW[path]; ok {
+				return err
+			}
+			return &fs.PathError{Op: "access", Path: path, Err: fs.ErrNotExist}
+		},
 		Run:      f.runner.run,
 		Username: "lab",
 		UID:      testUID,
+		GID:      testGID,
 	}
 }
 

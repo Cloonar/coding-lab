@@ -5,7 +5,10 @@
 // the container-side mount point, the `podman rm` backstop, and the startup
 // preflight (preflight.go) that refuses container spawns on a host that
 // cannot run them. The same argv renderer also serves issue #206's
-// provider-login shapes — see RunSpec for the three shapes it renders.
+// provider-login shapes — see RunSpec for the three shapes it renders —
+// and the run shape's nested-containers variant (ADR-0086, issue #115),
+// whose seccomp profile (seccomp.go) and gated preflight (nested_probe.go)
+// live here too.
 //
 // The tracer-bullet split (#205): tmux stays host-side and untouched —
 // containerizing a run means the pane command BECOMES `podman run -it --rm
@@ -58,6 +61,17 @@ const Home = "/home/agent"
 // reachable behind it.
 const PATH = "/opt/lab/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+// EntryBin is the container-side path of the nested run's entry program,
+// `labctl container-entry` (issue #114, ADR-0086): the static labctl the
+// agent-tools image carries in its bin dir, reached through the read-only
+// image mount at ToolsDst. A nested run's command is this binary, not the
+// provider — it is PID 1 and starts the provider as its child.
+const EntryBin = ToolsDst + "/bin/labctl"
+
+// devNetTun is the tun device the nested shape passes in: pasta, the
+// network of the run's own nested containers, creates its tap on it.
+const devNetTun = "/dev/net/tun"
+
 // RunSpec is everything RunArgv needs to render a containerized command.
 // One renderer serves three shapes: the run session (#205 — the full mount
 // inventory, interactive), the login-session pane (#206 — only the tools
@@ -71,6 +85,13 @@ const PATH = "/opt/lab/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sb
 // which moves to Home — so path-valued state (worktree .git links into the
 // bare repo, git cred file paths, LAB_URL's socket path) stays valid
 // inside without rewriting.
+//
+// The run shape comes in two variants (ADR-0086): the default, and the
+// nested-containers run shape (Nested non-nil) for a repo whose effective
+// Nested containers knob is on. Nested applies to the run shape ONLY —
+// manual and AFK run panes alike; the login and CLI shapes never set it,
+// whatever the knob says, because they start no containers and run without
+// a repo.
 type RunSpec struct {
 	Bin        string // podman binary (config PodmanBin, PATH-resolved by exec)
 	Name       string // container name, from ContainerName(session)
@@ -161,13 +182,68 @@ type RunSpec struct {
 	// ever entering an argv.
 	ForwardEnv []string
 	// Argv is the provider CLI command exec'd inside the container,
-	// appended verbatim after the image.
+	// appended verbatim after the image — or, in the nested shape, after
+	// the entry program's own argv and its `--` separator.
 	Argv []string
+
+	// Nested selects the nested-containers run shape (ADR-0086, issue
+	// #115) when non-nil; nil renders today's shape byte-for-byte. Run
+	// shape only (see the type doc): the login and CLI shapes leave it
+	// nil. RunArgv documents every flag it changes.
+	Nested *NestedSpec
+}
+
+// NestedSpec is what the nested-containers run shape needs beyond a plain
+// run (ADR-0086). The caller resolves the per-repo knob; a non-nil
+// RunSpec.Nested is the decision, and these fields are its inputs.
+type NestedSpec struct {
+	// SeccompProfile is the host path of the lab-generated seccomp
+	// profile, NestedSeccompPath(stateDir) as WriteNestedSeccomp wrote it
+	// at startup; passed as --security-opt seccomp=<path>.
+	SeccompProfile string
+	// SharedStore is the host path of the shared read-only image store,
+	// SharedStorePath(stateDir). "" renders neither its bind nor
+	// LAB_SHARED_STORE: the caller passes it only when the directory
+	// exists, because podman refuses to start a container whose bind
+	// source is missing, and a run without the cache still works — its
+	// nested podman pulls what it needs into the run's own storage.
+	SharedStore string
+	// UID and GID are the service user's ids, handed to the entry program
+	// as `--uid`/`--gid`: the ids it writes the subuid/subgid lines for,
+	// chowns the run's cgroup to, and drops to before starting the
+	// provider. Under --userns=keep-id they are the session's ids inside
+	// the run as well as outside.
+	UID, GID int
+}
+
+// nestedFlags are the nested shape's outer `podman run` flags beyond the
+// default shape's (RunArgv's doc gives each one's reason), in the order
+// RunArgv renders them: at the slot the default shape's --init occupies,
+// which the nested shape drops. One list, one contract: the nested
+// preflight probe (nestedProbe) renders exactly this list too, so a host
+// that accepts the probe accepts the run, and a flag added here is probed
+// the moment it is rendered. seccompPath is the profile's host path.
+func nestedFlags(seccompPath string) []string {
+	return []string{
+		"--systemd=always",
+		"--stop-signal", "SIGTERM",
+		"--user", "0",
+		"--security-opt", "unmask=ALL",
+		"--security-opt", "seccomp=" + seccompPath,
+		"--device", devNetTun,
+		"-v", "/sys:/sys",
+	}
 }
 
 // RunArgv renders s into the complete `podman run` argv — the containerized
 // pane command (run and login shapes) or the non-interactive CLI command
-// (NoTTY); see RunSpec for the three shapes. Flag rationale, in argv order:
+// (NoTTY); see RunSpec for the three shapes and the run shape's nested
+// variant (Nested non-nil, ADR-0086). With Nested nil the argv is exactly
+// the default shape below; the nested variant swaps --init for the nested
+// block (nestedFlags) at the same position, adds the shared store's bind
+// and env var, and prefixes the provider argv with the entry program —
+// every other flag, the whole mount inventory and the env discipline are
+// identical in both. Flag rationale, in argv order:
 //
 //   - --rm: the container is run-scoped state; the exiting client reaps it
 //     so a clean stop leaves nothing for RemoveContainer to do.
@@ -193,7 +269,49 @@ type RunSpec struct {
 //     a login or CLI poke is short-lived, but one renderer means one
 //     contract. The preflight spawn probe creates its container with the
 //     same flag, so a host without the helper fails preflight instead of
-//     failing every spawn.
+//     failing every spawn. The nested shape drops it (podman refuses --init
+//     together with --systemd=always); the entry program reaps instead.
+//   - the nested block (Nested non-nil only, in --init's place, in this
+//     order — nestedFlags, which the nested preflight probe renders too).
+//     Each flag was measured necessary in the maintainer's 2026-11-02 probe
+//     (ADR-0086), and each widens the run only inside namespaces it owns:
+//   - --systemd=always: podman's systemd mode mounts the run's cgroup
+//     read-write and namespaced, and crun hands it to container root — the
+//     only route to a cgroup a nested podman may create children in. The
+//     run is still one libpod-<id>.scope under the user manager with the
+//     run's MemoryMax and TasksMax (ADR-0060), so nested containers are
+//     bounded by the run's caps; container-entry chowns the directory and
+//     its procs/threads/subtree_control files to the session, never the
+//     limit files.
+//   - --stop-signal SIGTERM: systemd mode would otherwise pick SIGRTMIN+3,
+//     the signal that halts systemd. The entry program is no systemd: it
+//     installs no handler for that signal, and the kernel drops a signal
+//     PID 1 does not handle, so every stop would wait out the full stop
+//     timeout before the kill — measured on teardown at podman's ten
+//     seconds. SIGTERM is one the entry program forwards to the provider,
+//     and the provider CLI exits on it.
+//   - --user 0: the container starts as container root — under keep-id
+//     that is root of the run's own user namespace, no host privilege —
+//     because the entry program's setup (the one subuid and subgid line,
+//     the cgroup chown) needs it; it then drops to UID:GID irreversibly
+//     before the provider starts.
+//   - --security-opt unmask=ALL: the default masked /proc and /sys paths
+//     make the kernel refuse a fresh procfs or sysfs mount in any child
+//     namespace, so no nested container could start.
+//   - --security-opt seccomp=<SeccompProfile>: the lab-generated profile
+//     (seccomp.go) that allows sethostname/setdomainname without
+//     CAP_SYS_ADMIN — every nested crun sets its container's hostname, and
+//     the kernel still demands CAP_SYS_ADMIN over the UTS namespace, so the
+//     change reaches only namespaces the run created.
+//   - --device /dev/net/tun: pasta, the nested containers' network, creates
+//     its tap on it. No /dev/fuse: native overlay works inside a user
+//     namespace on the pinned kernel, so FUSE stays closed.
+//   - -v /sys:/sys: the outer sysfs is read-only and flag-locked, so
+//     buildx's privileged buildkit container cannot mount sysfs read-write
+//     unless the outer /sys is a read-write bind. Podman still mounts its
+//     namespaced cgroup2 on /sys/fs/cgroup on top of it: it orders the
+//     spec's mounts by destination depth, not by argv position, so the
+//     shallower /sys bind always lands first.
 //   - --userns=keep-id: the agent runs as the service uid inside, so files
 //     it writes into the shared mounts (worktree, home, runtime) are owned
 //     by the same uid host-side and the server can tail/diff them without
@@ -272,20 +390,39 @@ type RunSpec struct {
 //     immediately after the home bind (nesting is by destination, see
 //     StoreDir, so adjacency is for readability, not correctness). The
 //     read-only import snapshots (ImportDirs, issue #261) render last among
-//     the binds, one `:ro` bind each in the caller's order. -w prefers
-//     Workdir, falls back to WorktreeDir, and vanishes when both are empty.
+//     the inventory's binds, one `:ro` bind each in the caller's order. -w
+//     prefers Workdir, falls back to WorktreeDir, and vanishes when both
+//     are empty.
+//   - the shared image store (Nested non-nil with SharedStore set, after
+//     the import binds): `-v <store>:<store>:ro`, read-only at its
+//     host-identical path, so the path lab names in LAB_SHARED_STORE (the
+//     env, below) is the path the image's start-nested-podman helper finds
+//     inside and lists under additionalimagestores. Read-only because every
+//     nested run shares it: a run may read cached images, never alter
+//     another run's.
 //
-// Then --env K=V per Env entry, --env K per ForwardEnv entry (order
-// preserved — later entries win under podman just as with exec env), the
-// image, and the provider argv verbatim.
+// Then --env K=V per Env entry, --env LAB_SHARED_STORE=<store> when the
+// store is mounted (after the caller's Env, so a lab-owned pin is never
+// shadowed by a K=V entry), --env K per ForwardEnv entry (order preserved —
+// later entries win under podman just as with exec env), the image, and the
+// provider argv verbatim. In the nested shape the command is the entry
+// program instead — `EntryBin container-entry --uid <UID> --gid <GID> --`
+// followed by the provider argv: container-entry is PID 1 (systemd mode
+// leaves no room for --init), does the root-only setup, drops to UID:GID,
+// runs the provider as its child, forwards signals and reaps orphans
+// (ADR-0074's duty, moved from catatonit).
 func RunArgv(s RunSpec) []string {
 	args := []string{s.Bin, "--cgroup-manager=systemd", "run", "--rm"}
 	if !s.NoTTY {
 		args = append(args, "-it")
 	}
+	args = append(args, "--name", s.Name)
+	if s.Nested != nil {
+		args = append(args, nestedFlags(s.Nested.SeccompProfile)...)
+	} else {
+		args = append(args, "--init")
+	}
 	args = append(args,
-		"--name", s.Name,
-		"--init",
 		"--userns=keep-id",
 		"--network=pasta:--map-guest-addr,none",
 		"--add-host", "host.containers.internal:127.0.0.1",
@@ -316,6 +453,9 @@ func RunArgv(s RunSpec) []string {
 	for _, d := range s.ImportDirs {
 		args = append(args, "-v", d+":"+d+":ro")
 	}
+	if s.Nested != nil && s.Nested.SharedStore != "" {
+		args = append(args, "-v", s.Nested.SharedStore+":"+s.Nested.SharedStore+":ro")
+	}
 	if s.Workdir != "" {
 		args = append(args, "-w", s.Workdir)
 	} else if s.WorktreeDir != "" {
@@ -324,10 +464,19 @@ func RunArgv(s RunSpec) []string {
 	for _, kv := range s.Env {
 		args = append(args, "--env", kv)
 	}
+	if s.Nested != nil && s.Nested.SharedStore != "" {
+		args = append(args, "--env", "LAB_SHARED_STORE="+s.Nested.SharedStore)
+	}
 	for _, k := range s.ForwardEnv {
 		args = append(args, "--env", k)
 	}
 	args = append(args, s.Image)
+	if s.Nested != nil {
+		args = append(args, EntryBin, "container-entry",
+			"--uid", strconv.Itoa(s.Nested.UID),
+			"--gid", strconv.Itoa(s.Nested.GID),
+			"--")
+	}
 	return append(args, s.Argv...)
 }
 
