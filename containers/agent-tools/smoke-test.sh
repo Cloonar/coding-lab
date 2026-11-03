@@ -69,7 +69,43 @@ for base in ${bases}; do
     "${extra_run_args[@]}" \
     --mount "type=image,source=${image_ref},destination=/opt/lab" \
     "${base}" \
-    sh -c "export PATH=/opt/lab/bin:\$PATH; ${cli} --version && labctl --help >/dev/null && echo \"OK (${cli} + labctl on \$(uname -m))\""
+    sh -c "export PATH=/opt/lab/bin:\$PATH; ${cli} --version && labctl --help >/dev/null && labctl container-entry --help >/dev/null && echo \"OK (${cli} + labctl on \$(uname -m))\""
+
+  # container-entry --self-test as a non-root user: the smoke environment has
+  # no container root with a writable cgroup, so the setup must refuse — and
+  # still speak the self-test's stdout contract (one `fail: setup: ...` line,
+  # exit 1) that the preflight probe parses.
+  echo ">>> smoke: labctl container-entry --self-test refuses non-root on ${base}"
+  # shellcheck disable=SC2016 # the script is expanded by the container's shell
+  "${PODMAN}" run --rm \
+    --network=host --cgroups=disabled --user 65534:65534 \
+    "${extra_run_args[@]}" \
+    --mount "type=image,source=${image_ref},destination=/opt/lab" \
+    "${base}" \
+    sh -c 'out=$(/opt/lab/bin/labctl container-entry --self-test --uid 1000 --gid 1000 2>/dev/null); rc=$?
+           case "${rc}:${out}" in
+             "1:fail: setup: must run as uid 0"*) echo "OK (self-test refused non-root: ${out})" ;;
+             *) echo "FAIL: self-test as non-root: exit ${rc}, stdout: ${out}" >&2; exit 1 ;;
+           esac'
 done
+
+# SMOKE_NESTED_SELF_TEST=1: additionally run the real self-test in a
+# nested-shaped container (ADR-0086's outer flags, started as container root
+# under keep-id), on a host that can run one — CI's nested job container
+# cannot, so nothing sets it there. seccomp=unconfined stands in for lab's
+# patched profile, which only lab itself renders. Every line must be `ok: …`
+# except newuidmap, which reports on the image (the stock base has no stack).
+if [ "${SMOKE_NESTED_SELF_TEST:-}" = "1" ]; then
+  base="docker.io/library/debian:stable-slim"
+  echo ">>> smoke: labctl container-entry --self-test in a nested-shaped ${base}"
+  "${PODMAN}" run --rm \
+    --userns=keep-id --user 0 --systemd=always \
+    --security-opt unmask=ALL --security-opt seccomp=unconfined \
+    --device /dev/net/tun -v /sys:/sys \
+    "${extra_run_args[@]}" \
+    --mount "type=image,source=${image_ref},destination=/opt/lab" \
+    "${base}" \
+    /opt/lab/bin/labctl container-entry --self-test --uid "$(id -u)" --gid "$(id -g)"
+fi
 
 echo "ALL GREEN: ${provider} (${cli} + labctl) injected cleanly on both glibc and musl bases"

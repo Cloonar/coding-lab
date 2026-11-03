@@ -16,8 +16,14 @@
 // AND every failure (git, transport, non-2xx) exit 1; only no rev-args or
 // missing env is 2; a clean pass is a silent 0. The `expose` verb keeps the
 // convention but runs in the foreground (see expose.go): 0 once stopped or
-// signalled, 1 when lab refuses or ends the exposure. No color, no spinner —
-// output is for agents.
+// signalled, 1 when lab refuses or ends the exposure. The `container-entry`
+// verb deviates like `secret exec` (see entry.go): as a nested run's PID 1 it
+// relays the provider's exit status VERBATIM (128+signal when a signal killed
+// it); only a failure before the provider runs is labctl's own — 2 for a
+// usage error, 1 for a failed setup step (not uid 0, the subuid/subgid write,
+// the cgroup chown, the privilege drop, or a provider that cannot start).
+// Its `--self-test` exits 1 when the setup or a fatal check failed.
+// No color, no spinner — output is for agents.
 package labctl
 
 import (
@@ -77,6 +83,15 @@ Usage:
                                         background), reconnects on a dropped connection; exits 0 when
                                         stopped or on SIGINT/SIGTERM, 1 when lab ends it or refuses
   labctl expose stop <name>             end the exposure called name and release the name
+  labctl container-entry --uid N --gid M -- <cmd> [args...]
+                                        PID 1 of a nested-containers run, as container root: write the
+                                        one /etc/subuid and /etc/subgid line, chown the run's cgroup to
+                                        N:M, drop to N:M for good, run cmd as a child, forward signals,
+                                        reap orphans; exits with cmd's status (128+signal if killed)
+  labctl container-entry --self-test --uid N --gid M
+                                        the same setup, then check as N:M that nested containers can
+                                        work here: one "ok: <check>" or "fail: <check>: <why>" line per
+                                        check on stdout; exit 1 when a check other than newuidmap failed
   labctl --version                      print version
 
 Environment:
@@ -120,6 +135,8 @@ func Run(args []string, env Env) int {
 		return runSecret(args[1:], env)
 	case "expose":
 		return runExpose(args[1:], env)
+	case "container-entry":
+		return runContainerEntry(args[1:], env)
 	default:
 		_, _ = fmt.Fprintf(env.Stderr, "labctl: unknown command %q\n\n%s", args[0], usage)
 		return 2
