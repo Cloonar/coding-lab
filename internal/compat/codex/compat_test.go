@@ -14,9 +14,11 @@ import (
 )
 
 // spawnBase is the pinned flag prefix of every codex spawn (compat.md §1):
-// the never-ask/full-access posture plus the AGENTS.local.md fallback key,
-// each -c value one argv element with no shell quoting.
-const spawnBase = `codex --ask-for-approval never --sandbox danger-full-access -c project_doc_fallback_filenames=["AGENTS.local.md"]`
+// no shared daemon (0.167.0's auto-started background app-server is forced
+// off — the flag is the pin's hard version floor), the never-ask/full-access
+// posture, plus the AGENTS.local.md fallback key, each -c value one argv
+// element with no shell quoting.
+const spawnBase = `codex --no-daemon --ask-for-approval never --sandbox danger-full-access -c project_doc_fallback_filenames=["AGENTS.local.md"]`
 
 // Spawn argv snapshot (compat.md §1). Manual spawn: model + effort, no seed
 // prompt, so no trailing positional. SessionName is deliberately present in
@@ -151,14 +153,17 @@ func TestCompat_ModelCatalog_matchesDebugModelsFixture(t *testing.T) {
 		gotEfforts = append(gotEfforts, e.Value)
 	}
 	if !reflect.DeepEqual(gotEfforts, wantEfforts) {
-		t.Errorf("effort catalog drifted:\n got  %v\n want %v (no minimal tier on 0.133)", gotEfforts, wantEfforts)
+		t.Errorf("effort catalog drifted:\n got  %v\n want %v (no minimal/max/ultra tier in the 0.133 fallback)", gotEfforts, wantEfforts)
 	}
 }
 
 // Auth-status coupling (compat.md §2): both pinned `codex login status`
-// shapes, exit code + text together. The logged-out fixture carries the
-// leading CODEX_HOME-under-/tmp WARNING line — parsing is containment-based
-// and must tolerate leading noise.
+// shapes, exit code + text together. The logged-in capture is 0.133.0's (no
+// authenticated 0.167.0 host was available; the verdict line is unchanged in
+// source); the logged-out capture is REAL 0.167.0 and carries the leading
+// CODEX_HOME-under-/tmp WARNING line (reworded on 0.167: "could not create
+// PATH aliases") — parsing is containment-based and must tolerate leading
+// noise.
 func TestCompat_AuthStatusFixtures_parse(t *testing.T) {
 	in, err := os.ReadFile(filepath.Join("testdata", "login-status-in-0.133.0.txt"))
 	if err != nil {
@@ -180,7 +185,7 @@ func TestCompat_AuthStatusFixtures_parse(t *testing.T) {
 		t.Error("logged-in text with a non-zero exit parsed as logged in; the exit code must gate the verdict")
 	}
 
-	out, err := os.ReadFile(filepath.Join("testdata", "login-status-out-0.133.0.txt"))
+	out, err := os.ReadFile(filepath.Join("testdata", "login-status-out-0.167.0.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,15 +195,24 @@ func TestCompat_AuthStatusFixtures_parse(t *testing.T) {
 	if codex.ParseAuthStatus(out, false).LoggedIn {
 		t.Error("logged-out fixture (exit 1) parsed as logged in")
 	}
+	// FOUND, NOT FIXED (identical on 0.133.0 — compat.md §2): the WARNING
+	// line's "Refusing" contains "using ", so Method reads the warning's tail
+	// while logged out. Method is only meaningful when LoggedIn is true and
+	// production CODEX_HOMEs never sit under /tmp, so the quirk is recorded
+	// rather than papered over here; this pins that it stays harmless.
+	if st := codex.ParseAuthStatus(out, false); st.LoggedIn || st.Method == "chatgpt" {
+		t.Errorf("logged-out fixture: %+v; the warning-line Method quirk must never flip the verdict", st)
+	}
 }
 
 // Device-code login scrape (compat.md §2): the verification URL and one-time
 // user code extract from the captured `codex login --device-auth` stdout
 // (ANSI-stripped — the production scrape source is tmux capture-pane rendered
-// text; the code in the fixture expired 15 minutes after the 2026-07-10
-// capture).
+// text; the code in the fixture expired 15 minutes after the 2026-11-10
+// capture on 0.167.0, whose only change from the 0.133.0 capture is the
+// closing phishing-warning sentence).
 func TestCompat_DeviceAuthFixture_extracts(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("testdata", "device-auth-0.133.0.txt"))
+	b, err := os.ReadFile(filepath.Join("testdata", "device-auth-0.167.0.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,14 +220,14 @@ func TestCompat_DeviceAuthFixture_extracts(t *testing.T) {
 	if got, want := codex.ExtractLoginURL(s), "https://auth.openai.com/codex/device"; got != want {
 		t.Errorf("ExtractLoginURL = %q; want %q", got, want)
 	}
-	if got, want := codex.ExtractUserCode(s), "Y9HC-QKI85"; got != want {
+	if got, want := codex.ExtractUserCode(s), "A8LJ-AROO3"; got != want {
 		t.Errorf("ExtractUserCode = %q; want %q", got, want)
 	}
-	// The version banner ("Welcome to Codex [v0.133.0]") precedes the code and
+	// The version banner ("Welcome to Codex [v0.167.0]") precedes the code and
 	// must never be mistaken for one — the code regex boundaries exclude '-'
 	// and the version has no XXXX- shape; pin that the banner is present so
 	// the fixture keeps exercising that noise.
-	if !strings.Contains(s, "Welcome to Codex [v0.133.0]") {
+	if !strings.Contains(s, "Welcome to Codex [v0.167.0]") {
 		t.Error("fixture lost the version banner the scrape must tolerate")
 	}
 }
@@ -282,6 +296,58 @@ func TestCompat_RolloutPlainFixture_maps(t *testing.T) {
 		if msg.Tool != nil && strings.Contains(strings.ToLower(msg.Tool.Input), "co-authored-by") {
 			t.Errorf("commit input carries an attribution trailer: %q", msg.Tool.Input)
 		}
+	}
+}
+
+// Rollout grammar, 0.167.0 PAGINATED history (compat.md §5): a REAL
+// `codex exec` rollout from the pinned 0.167.0 binary (unauthenticated — the
+// turn 401s at the API; base_instructions, the developer-prompt blobs and the
+// gateway error body stubbed, scratch paths rewritten to /work/repo, all
+// else verbatim). Pins the new grammar lab must read: session_meta carries
+// history_mode "paginated", the operator's prompt arrives ONLY as an
+// item_completed UserMessage item (no user_message event is written in this
+// mode), the response_item user message still does not render (double-render
+// guard), the v1 task_started/task_complete names survive (serde rename —
+// the v2 turn_* spellings are aliases), and the new record types
+// (world_state, thread_settings_applied, additional_tools,
+// configuration_update) render nothing.
+func TestCompat_RolloutExecFixture_paginated(t *testing.T) {
+	chat := parseRollout(t, "rollout-exec-0.167.0.jsonl")
+	if len(chat.Messages) != 1 || chat.Cursor != 1 {
+		t.Fatalf("mapped %d messages (cursor %d); want exactly the UserMessage item: %+v", len(chat.Messages), chat.Cursor, chat.Messages)
+	}
+	if m := chat.Messages[0]; m.Kind != provider.MessageText || m.Role != "user" || m.Text != "ok" {
+		t.Errorf("msg0 = %+v; want the item_completed UserMessage text \"ok\"", m)
+	}
+	if chat.State != provider.StateNeedsInput {
+		t.Errorf("State = %q; want %q (tail is task_complete, even a failed one)", chat.State, provider.StateNeedsInput)
+	}
+	if chat.ContextUsage != nil {
+		t.Errorf("ContextUsage = %+v; the 401 turn wrote no token_count", chat.ContextUsage)
+	}
+
+	// The session_meta line is what LocateTranscript keys on: cwd is still
+	// payload.cwd, and the mode marker is present for the record.
+	f, err := os.Open(filepath.Join("testdata", "rollout-exec-0.167.0.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	var first struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Cwd         string `json:"cwd"`
+			HistoryMode string `json:"history_mode"`
+			CLIVersion  string `json:"cli_version"`
+			Originator  string `json:"originator"`
+		} `json:"payload"`
+	}
+	if err := json.NewDecoder(f).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Type != "session_meta" || first.Payload.Cwd != "/work/repo" || first.Payload.HistoryMode != "paginated" ||
+		first.Payload.CLIVersion != "0.167.0" || first.Payload.Originator != "codex_exec" {
+		t.Errorf("session_meta = %+v; want cwd /work/repo, history_mode paginated, cli_version 0.167.0, originator codex_exec", first)
 	}
 }
 
@@ -477,30 +543,40 @@ func TestCompat_AgentsBridge_roundtrip(t *testing.T) {
 	}
 }
 
-// popupCommandRe extracts the command names from the raw slash-popup scrape:
-// a row is "  /name  description…" (two-plus spaces after the name; wrapped
-// description lines carry no slash).
+// popupCommandRe extracts the command names from the slash-command listing
+// (the 0.133.0 live popup scrape and the 0.167.0 source extraction share the
+// row form): a row is "  /name  description…" (two-plus spaces after the name;
+// wrapped description lines carry no slash).
 var popupCommandRe = regexp.MustCompile(`(?m)^\s+/([a-z-]+)\s{2,}`)
 
-// Builtin slash-command catalog (compat.md §7, live TUI scrape 2026-07-10):
+// Builtin slash-command catalog (compat.md §7, 0.167.0 source extraction
+// 2026-11-10 — the fixture is the SlashCommand enum rendered in popup form):
 // the pinned table against the raw popup capture — count, pinned chat-safe
 // set and order, /new's clear role, and table/scrape matching exactly in
 // both directions (any divergence must be a deliberate edit of commands.go
 // AND compat.md §7).
 func TestCompat_BuiltinCommands_pinned(t *testing.T) {
 	cmds := codex.BuiltinCommands()
-	if len(cmds) == 0 || cmds[0].Name != "new" {
-		t.Fatalf("builtins[0] = %+v; want /new first (pinned order)", cmds)
+	if len(cmds) == 0 || cmds[0].Name != "clear" {
+		t.Fatalf("builtins[0] = %+v; want /clear first (pinned order)", cmds)
 	}
 	clear := cmds[0]
-	if clear.Description != "start a new chat during a conversation" {
-		t.Errorf("/new description = %q; want the 0.133.0 popup text verbatim", clear.Description)
+	if clear.Description != "clear the terminal and start a new chat" {
+		t.Errorf("/clear description = %q; want the 0.167.0 description() text verbatim", clear.Description)
 	}
 	if clear.Role != provider.CommandRoleClear || !clear.ChatSafe || clear.Source != "builtin" {
-		t.Errorf("/new row = %+v; want role=clear/chat-safe/builtin (native rotation, compat §5)", clear)
+		t.Errorf("/clear row = %+v; want role=clear/chat-safe/builtin (ClearUi → start_fresh_session, native rotation, compat §5)", clear)
+	}
+	// /new lost the role AND its chat safety on 0.167: inside any git repo
+	// (every lab worktree) it opens the "Where should the new conversation
+	// run?" worktree picker.
+	for _, c := range cmds {
+		if c.Name == "new" && (c.ChatSafe || c.Role != "") {
+			t.Errorf("/new row = %+v; want curated out with no role (worktree picker on 0.167)", c)
+		}
 	}
 
-	wantSafe := []string{"new", "clear", "compact", "status", "diff", "mcp", "ps", "stop", "copy"}
+	wantSafe := []string{"clear", "compact", "status", "diff", "mcp", "ps", "stop", "pwd", "recap", "hooks", "plugins", "debug-config"}
 	var gotSafe []string
 	table := map[string]bool{}
 	for _, c := range cmds {
@@ -511,16 +587,18 @@ func TestCompat_BuiltinCommands_pinned(t *testing.T) {
 		if c.ChatSafe {
 			gotSafe = append(gotSafe, c.Name)
 		}
-		if c.Name != "new" && c.Role != "" {
-			t.Errorf("%s carries role %q; only /new is tagged", c.Name, c.Role)
+		if c.Name != "clear" && c.Role != "" {
+			t.Errorf("%s carries role %q; only /clear is tagged", c.Name, c.Role)
 		}
 	}
 	if !reflect.DeepEqual(gotSafe, wantSafe) {
 		t.Errorf("chat-safe builtin set drifted:\n got  %v\n want %v", gotSafe, wantSafe)
 	}
 
-	// Cross-check against the raw scrape fixture.
-	b, err := os.ReadFile(filepath.Join("testdata", "commands-popup-0.133.0.txt"))
+	// Cross-check against the source-extraction fixture (the enum rendered in
+	// the popup's "  /name  description" row form; 62 commands visible on a
+	// Linux release build — App, Rollout and TestApproval are compiled out).
+	b, err := os.ReadFile(filepath.Join("testdata", "commands-source-0.167.0.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,26 +606,30 @@ func TestCompat_BuiltinCommands_pinned(t *testing.T) {
 	for _, m := range popupCommandRe.FindAllStringSubmatch(string(b), -1) {
 		scraped[m[1]] = true
 	}
-	if len(scraped) != 40 {
-		t.Errorf("popup scrape yields %d distinct commands; want 40 (re-scrape or update §7)", len(scraped))
+	if len(scraped) != 62 {
+		t.Errorf("command listing yields %d distinct commands; want 62 (re-extract or update §7)", len(scraped))
 	}
 	for name := range table {
 		if !scraped[name] {
-			t.Errorf("pinned builtin /%s is not in the popup scrape", name)
+			t.Errorf("pinned builtin /%s is not in the 0.167.0 command listing", name)
 		}
 	}
 	for name := range scraped {
 		if !table[name] {
-			t.Errorf("scraped command /%s is missing from the pinned table (unpinned drift — update commands.go and compat.md §7 together)", name)
+			t.Errorf("listed command /%s is missing from the pinned table (unpinned drift — update commands.go and compat.md §7 together)", name)
 		}
 	}
 }
 
-// Scrub-marker samples (compat.md §9): codex 0.133 writes NO attribution at
-// the source (live ground truth), so the declared ScrubPatterns are
-// defensive — but they must actually catch the documented upstream marker
-// shapes (the Tier-1 conformance AttributionSamples) and spare the near-miss
-// clean lines, through the RE2 engine the agent-API sanitizer runs.
+// Scrub-marker samples (compat.md §9): codex 0.133 wrote NO attribution at
+// the source (live ground truth); 0.167.0 ships a server-driven
+// git-attribution extension whose instructions, when the ChatGPT backend's
+// user setting enables it, tell the model to append EXACTLY these markers
+// to commits and PR bodies — with no local off switch, the declared
+// ScrubPatterns are now the load-bearing backstop. They must catch the
+// documented marker shapes (the Tier-1 conformance AttributionSamples) and
+// 0.167.0's verbatim strings, and spare the near-miss clean lines, through
+// the RE2 engine the agent-API sanitizer runs.
 func TestCompat_ScrubPatterns_markerSamples(t *testing.T) {
 	meta := (&codex.Provider{}).SeedMeta()
 	res, err := provider.CompileScrubPatterns(meta.ScrubPatterns)
@@ -563,9 +645,11 @@ func TestCompat_ScrubPatterns_markerSamples(t *testing.T) {
 		return false
 	}
 	for _, marker := range []string{
-		"Co-authored-by: Codex <noreply@openai.com>", // the documented upstream default
+		"Co-authored-by: Codex <noreply@openai.com>", // the documented upstream default — and 0.167.0's git-attribution extension trailer, verbatim
 		"Co-authored-by: ChatGPT Codex <bot@openai.com>",
 		"Generated with Codex",
+		"Generated with [Codex](https://openai.com/codex/).", // 0.167.0's PR-body marker, verbatim (ext/git-attribution/src/world_state.rs)
+		"Generated with Codex.",                              // the extension's legacy-matcher alternative
 	} {
 		if !matchAny(marker) {
 			t.Errorf("no scrub pattern catches the marker sample %q", marker)

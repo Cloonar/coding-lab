@@ -426,8 +426,19 @@ func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
 }
 
 // SpawnArgv is the pure spawn-argv builder behind Provider.SpawnArgv,
-// exported for the compat snapshot test. Pins (all live 0.133.0):
+// exported for the compat snapshot test. Pins (live 0.133.0, re-verified on
+// 0.167.0 — compat.md §1):
 //
+//   - --no-daemon (0.167.0+, the pin's hard version floor: 0.133.0 rejects
+//     the flag with "unexpected argument"): 0.167.0 auto-starts a SHARED
+//     background app-server daemon for every interactive launch
+//     (`daemon_auto_start` stable, default on) and hosts the thread there —
+//     a process lab never spawned, outside the tmux pane runner.Stop tears
+//     down, holding the instance CODEX_HOME (and its injected auth.json)
+//     after the session ends. --no-daemon forces the embedded server, the
+//     0.133 process model. The -c overrides do NOT disable it (only the
+//     remote-control path checks overrides); nixpkgs patches the feature
+//     off for the same reason.
 //   - --ask-for-approval never + --sandbox danger-full-access is the
 //     unattended posture: no approval prompt can ever block an AFK run.
 //   - project_doc_fallback_filenames makes codex read the lab-owned
@@ -435,9 +446,10 @@ func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
 //     quoting (tmux receives argv verbatim).
 //   - Effort is ALWAYS emitted: `codex exec` defaults effort to none, so an
 //     empty spec.Effort injects defaultEffort instead of omitting the flag.
-//   - NO `-c commit_attribution=""`: unknown config field on 0.133 (hard
-//     error under --strict-config); attribution is absent at source anyway
-//     (the codex_git_commit feature is off/removed in 0.133).
+//   - NO `-c commit_attribution=""`: unknown config field on 0.133 AND
+//     0.167 (hard error under --strict-config). 0.167.0's attribution is a
+//     server-driven git-attribution extension with no local off switch
+//     (compat.md §9) — the ADR-0033 ScrubPatterns are the backstop.
 //   - spec.SessionName is unused — codex has no --remote-control equivalent.
 //   - spec.Remote is unused too, and codex deliberately does NOT implement
 //     provider.RemoteCapable (issue #163): it receives lab's remote knob and
@@ -452,6 +464,7 @@ func (p *Provider) SpawnArgv(spec provider.SpawnSpec) []string {
 func SpawnArgv(codexBin string, spec provider.SpawnSpec) []string {
 	argv := []string{
 		codexBin,
+		"--no-daemon",
 		"--ask-for-approval", "never",
 		"--sandbox", "danger-full-access",
 		"-c", `project_doc_fallback_filenames=["AGENTS.local.md"]`,

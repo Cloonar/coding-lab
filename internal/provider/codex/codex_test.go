@@ -10,7 +10,7 @@ import (
 )
 
 func TestSpawnArgv(t *testing.T) {
-	const base = `codex --ask-for-approval never --sandbox danger-full-access -c project_doc_fallback_filenames=["AGENTS.local.md"]`
+	const base = `codex --no-daemon --ask-for-approval never --sandbox danger-full-access -c project_doc_fallback_filenames=["AGENTS.local.md"]`
 	for _, tc := range []struct {
 		name               string
 		model, eff, prompt string
@@ -18,8 +18,9 @@ func TestSpawnArgv(t *testing.T) {
 		wantLast           string // expected trailing positional ("" → none)
 	}{
 		{
-			// Pinned 0.133.0 shape: never-ask + full sandbox + the
-			// AGENTS.local.md fallback, model flag, explicit effort.
+			// Pinned shape (0.133.0, re-verified 0.167.0): no shared daemon,
+			// never-ask + full sandbox + the AGENTS.local.md fallback, model
+			// flag, explicit effort.
 			name: "full", model: "gpt-5.5", eff: "high",
 			want: base + " --model gpt-5.5 -c model_reasoning_effort=high",
 		},

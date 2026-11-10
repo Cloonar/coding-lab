@@ -1,8 +1,9 @@
 package codex
 
 // Commands catalog tests (issue #51 decision 5): the pinned static builtin
-// table scraped from the live 0.133.0 TUI (issue #87). Unlike claudecode
-// there is no project/user discovery to test — the golden IS the machinery.
+// table extracted from codex-cli 0.167.0's SlashCommand enum (compat.md §7;
+// the 0.133.0 table was a live TUI scrape). Unlike claudecode there is no
+// project/user discovery to test — the golden IS the machinery.
 
 import (
 	"context"
@@ -12,17 +13,21 @@ import (
 	"git.cloonar.com/Cloonar/coding-lab/internal/provider"
 )
 
-// The pinned catalog order (scrape 2026-07-10): chat-safe rows first in
-// operator-usefulness order, curated-out rows alphabetically after.
+// The pinned catalog order (source extraction 2026-11-10): chat-safe rows
+// first in operator-usefulness order, curated-out rows alphabetically after.
 var wantCommandOrder = []string{
 	// chat-safe
-	"new", "clear", "compact", "status", "diff", "mcp", "ps", "stop", "copy",
+	"clear", "compact", "status", "diff", "mcp", "ps", "stop", "pwd", "recap",
+	"hooks", "plugins", "debug-config",
 	// curated out
-	"agent", "approve", "exit", "experimental", "feedback", "fork", "goal",
-	"hooks", "ide", "init", "keymap", "logout", "memories", "mention", "model",
-	"permissions", "personality", "pets", "plan", "plugins", "raw", "rename",
-	"resume", "review", "side", "skills", "statusline", "subagents", "theme",
-	"title", "vim",
+	"agents", "approve", "apps", "archive", "btw", "cd", "config", "copy",
+	"daemon", "daybreak", "debug-m-drop", "debug-m-update", "delete", "exit",
+	"experimental", "export", "feedback", "fork", "goal", "ide", "import",
+	"init", "keymap", "logout", "memories", "mention", "model", "new",
+	"permissions", "pets", "plan", "presets", "quit", "raw", "rename",
+	"resume", "review", "setup-default-sandbox", "side", "skills",
+	"statusline", "subagents", "theme", "title", "tui", "usage", "vim",
+	"voice", "warnings", "worktree",
 }
 
 func TestBuiltinCommands_pinnedGolden(t *testing.T) {
@@ -30,7 +35,7 @@ func TestBuiltinCommands_pinnedGolden(t *testing.T) {
 	if len(cmds) != len(wantCommandOrder) {
 		t.Fatalf("catalog has %d entries; want %d", len(cmds), len(wantCommandOrder))
 	}
-	safeCut := 9 // the chat-safe prefix length
+	safeCut := 12 // the chat-safe prefix length
 	for i, want := range wantCommandOrder {
 		c := cmds[i]
 		if c.Name != want {
@@ -45,24 +50,26 @@ func TestBuiltinCommands_pinnedGolden(t *testing.T) {
 		if c.Description == "" {
 			t.Errorf("cmds[%d] (%s) has no description; the popup shows one for every row", i, c.Name)
 		}
-		if wantRole := ""; c.Name == "new" {
+		if wantRole := ""; c.Name == "clear" {
 			wantRole = provider.CommandRoleClear
 			if c.Role != wantRole {
-				t.Errorf("/new role = %q; want %q (the native clear-context command)", c.Role, wantRole)
+				t.Errorf("/clear role = %q; want %q (the native clear-context command on 0.167: /new opens a worktree picker in a git repo)", c.Role, wantRole)
 			}
 		} else if c.Role != "" {
-			t.Errorf("cmds[%d] (%s).Role = %q; only /new carries a role", i, c.Name, c.Role)
+			t.Errorf("cmds[%d] (%s).Role = %q; only /clear carries a role", i, c.Name, c.Role)
 		}
 	}
 
-	// Spot-pin scraped descriptions verbatim (0.133.0 popup text).
+	// Spot-pin descriptions verbatim (0.167.0 slash_command.rs description()).
 	wantDescriptions := map[string]string{
+		"clear":  "clear the terminal and start a new chat",
 		"new":    "start a new chat during a conversation",
 		"model":  "choose what model and reasoning effort to use",
-		"mcp":    "list configured MCP tools; use /mcp verbose for details",
+		"mcp":    "list MCP tools; use /mcp verbose or /mcp login <name>",
 		"raw":    "toggle raw scrollback mode for copy-friendly terminal selection",
 		"init":   "create an AGENTS.md file with instructions for Codex",
 		"status": "show current session configuration and token usage",
+		"copy":   "copy the last response or part of it",
 	}
 	byName := map[string]provider.CommandSpec{}
 	for _, c := range cmds {
@@ -70,13 +77,13 @@ func TestBuiltinCommands_pinnedGolden(t *testing.T) {
 	}
 	for name, want := range wantDescriptions {
 		if got := byName[name].Description; got != want {
-			t.Errorf("/%s description = %q; want the scraped %q", name, got, want)
+			t.Errorf("/%s description = %q; want the extracted %q", name, got, want)
 		}
 	}
 }
 
-// Commands is static and worktree-independent — codex 0.133 discovers
-// nothing per-project — and returns a defensive copy.
+// Commands is static and worktree-independent — codex discovers nothing
+// per-project — and returns a defensive copy.
 func TestCommands_staticAndCopied(t *testing.T) {
 	p, _ := testProvider(t, newFakeRunner())
 	ctx := context.Background()
@@ -94,16 +101,16 @@ func TestCommands_staticAndCopied(t *testing.T) {
 	}
 
 	a[0].Name = "mutated"
-	if BuiltinCommands()[0].Name != "new" {
+	if BuiltinCommands()[0].Name != "clear" {
 		t.Error("Commands exposed internal catalog storage")
 	}
-	if fresh, _ := p.Commands(ctx, "/anywhere", ""); fresh[0].Name != "new" {
+	if fresh, _ := p.Commands(ctx, "/anywhere", ""); fresh[0].Name != "clear" {
 		t.Error("a caller's mutation poisoned the next Commands call")
 	}
 }
 
 // TestCommands_homeIndependence pins the doc comment's home-independence claim
-// (issue #202) with DEEP equality, not just a count: codex 0.133 has no
+// (issue #202) with DEEP equality, not just a count: codex has no
 // project- or user-level command discovery, so the served catalog must be
 // byte-for-byte identical for every worktree/home combination, including the
 // empty-string edges that mean "no worktree yet" / "no per-run home".

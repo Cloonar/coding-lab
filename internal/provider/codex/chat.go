@@ -220,8 +220,10 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 				// context wrappers (<environment_context>, <permissions
 				// instructions>, <turn_aborted>…), and the operator's real
 				// prompt / the assistant's prose arrive via the user_message /
-				// agent_message event_msg records below — consuming both would
-				// double-render every turn.
+				// agent_message event_msg records below (legacy history) or the
+				// item_completed UserMessage/AgentMessage items (0.167.0
+				// paginated history) — consuming both would double-render every
+				// turn.
 			case "reasoning":
 				// content is encrypted (encrypted_content); only a non-empty
 				// summary is renderable. Summary items are checked
@@ -283,13 +285,36 @@ func foldTranscript(sc *bufio.Scanner) (provider.Chat, error) {
 				if pl.Info != nil && pl.Info.LastTokenUsage != nil && pl.Info.ModelContextWindow > 0 {
 					lastUsage = pl.Info
 				}
+			case "item_completed":
+				// codex 0.167.0 paginated history: the prompt and the prose ride
+				// as completed TurnItems; user_message/agent_message above are
+				// never written in this mode (legacy-only), so the two grammars
+				// cannot double-render. Every other item kind (CommandExecution,
+				// FileChange, Reasoning, …) is skipped — the response_item
+				// records remain the chip/thinking source in both modes.
+				if pl.Item == nil {
+					break
+				}
+				switch pl.Item.Type {
+				case "UserMessage":
+					if text := pl.Item.text(); text != "" {
+						emit(provider.Message{Kind: provider.MessageText, Role: "user",
+							Time: rec.Timestamp, Text: text})
+					}
+				case "AgentMessage":
+					if text := pl.Item.text(); text != "" {
+						emit(provider.Message{Kind: provider.MessageText, Role: "assistant",
+							Time: rec.Timestamp, Text: text})
+					}
+				}
 			default:
-				// patch_apply_end and unknown event types carry no chat content
-				// and are skipped silently (forward-compatible)
+				// patch_apply_end, thread_settings_applied and unknown event
+				// types carry no chat content and are skipped silently
+				// (forward-compatible)
 			}
 		default:
-			// session_meta, turn_context, and unknown record types carry no
-			// chat content
+			// session_meta, turn_context, world_state, token_usage_record and
+			// unknown record types carry no chat content
 		}
 	}
 	if err := sc.Err(); err != nil {
