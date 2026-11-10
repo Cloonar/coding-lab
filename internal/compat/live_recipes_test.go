@@ -106,7 +106,7 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 	}
 	t.Cleanup(func() { _ = tm.Stop(context.Background(), name) })
 
-	// Wait for the composer ("? for shortcuts" is the 2.1.198 composer hint).
+	// Wait for the composer (composerReady below names its markers).
 	// The trust dialog can still appear despite SeedTrust: a PRIOR test's
 	// claude exiting rewrites ~/.claude.json from its own startup snapshot and
 	// clobbers the just-seeded entry (the documented SeedTrust concurrency
@@ -122,7 +122,7 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		pane, err := rig.tm.CapturePane(context.Background(), name)
-		if err == nil && strings.Contains(pane, "? for shortcuts") {
+		if err == nil && composerReady(pane) {
 			break
 		}
 		if err == nil && strings.Contains(pane, "Yes, I trust this folder") {
@@ -133,8 +133,9 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 			if err := rig.tm.SendNamedKeys(context.Background(), name, "Enter"); err != nil {
 				t.Fatalf("accepting trust dialog: %v", err)
 			}
-			rig.waitPane(t, 60*time.Second, "? for shortcuts")
-			break
+			// Keep polling for the composer, with a fresh budget.
+			deadline = time.Now().Add(60 * time.Second)
+			continue
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("composer never appeared within 90s; last pane:\n%s", pane)
@@ -142,6 +143,15 @@ func newLiveRecipeRig(t *testing.T, name string, extraArgs ...string) *liveRecip
 		time.Sleep(500 * time.Millisecond)
 	}
 	return rig
+}
+
+// composerReady reports whether the pane shows claude's composer footer.
+// "? for shortcuts" is the composer hint through 2.1.284; 2.1.322 starts in
+// auto mode and its footer ("⏵⏵ auto mode on (shift+tab to cycle)") drops the
+// hint, so the "<mode> mode on" indicator every footer carries counts too
+// (compat §7 / the 2.1.322 note).
+func composerReady(pane string) bool {
+	return strings.Contains(pane, "? for shortcuts") || strings.Contains(pane, " mode on")
 }
 
 // waitPane polls capture-pane until it contains needle (see the NOTE in the
