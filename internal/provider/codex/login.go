@@ -8,7 +8,9 @@ package codex
 // forced auth status until the CLI records the login (or the 15-minute
 // device-code window expires) and publishes provider.auth.changed.
 //
-// Pinned pane output (verbatim, live 0.133.0 probe 2026-07-10):
+// Pinned pane output (verbatim, live 0.167.0 probe 2026-11-10; the 0.133.0
+// capture differed only in the closing phishing line, "Device codes are a
+// common phishing target. Never share this code."):
 //
 //	Follow these steps to sign in with ChatGPT using device code authorization:
 //
@@ -16,9 +18,9 @@ package codex
 //	   https://auth.openai.com/codex/device
 //
 //	2. Enter this one-time code (expires in 15 minutes)
-//	   Y9HC-QKI85
+//	   A8LJ-AROO3
 //
-//	Device codes are a common phishing target. Never share this code.
+//	Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.
 //
 // NEVER emit Ctrl-C at the login session (upstream: Ctrl-C on codex quits
 // immediately) — the session is disposable, runner.Stop kills it, which is
@@ -35,12 +37,13 @@ import (
 )
 
 // codexLoginURLRe matches the device-auth verification link the login flow
-// prints (pinned host auth.openai.com; live 0.133.0 prints
+// prints (pinned host auth.openai.com; live 0.133.0 and 0.167.0 both print
 // https://auth.openai.com/codex/device).
 var codexLoginURLRe = regexp.MustCompile(`https://auth\.openai\.com/\S+`)
 
 // codexUserCodeRe matches the standalone one-time user code (observed shape
-// Y9HC-QKI85: four uppercase alphanumerics, a dash, five to eight more). The
+// Y9HC-QKI85 on 0.133.0, A8LJ-AROO3 on 0.167.0: four uppercase
+// alphanumerics, a dash, five to eight more). The
 // boundaries exclude alphanumerics AND '-', so version strings, timestamps,
 // and longer dashed tokens never match.
 var codexUserCodeRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9-])([A-Z0-9]{4}-[A-Z0-9]{5,8})(?:[^A-Za-z0-9-]|$)`)

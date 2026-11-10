@@ -1,7 +1,8 @@
 package codex
 
 // The codex rollout JSONL grammar lab reads, pinned from REAL 0.133.0
-// rollouts (issue #87, 2026-07-10). Only the fields lab maps are declared;
+// rollouts (issue #87, 2026-07-10) plus the 0.167.0 paginated-history
+// additions below (2026-11-10). Only the fields lab maps are declared;
 // every other key codex writes is ignored by construction. One line is one
 // record: {"timestamp":"…","type":"…","payload":{…}} where type is
 // session_meta | turn_context | response_item | event_msg (unknown types
@@ -27,6 +28,28 @@ package codex
 //	                the context-pressure meter (issue #243 / ADR-0061); the degenerate
 //	                {"info":null} shape codex also writes is tolerated (no meter)
 //	event_msg:     {"type":"patch_apply_end",…} — skipped
+//
+// codex-cli 0.167.0 (paginated thread history, the default since the
+// "paginated" history_mode shipped — session_meta.payload.history_mode
+// "paginated"; 0.133 rollouts carry no history_mode and are "legacy") persists
+// the operator's prompt and the assistant's prose ONLY as item_completed events
+// carrying a TurnItem — the user_message/agent_message event_msg records above
+// are legacy-mode-only (codex-rs/rollout/src/policy.rs persisted_event_msg).
+// Both grammars are mapped; a rollout is written in exactly one of them, so
+// nothing double-renders:
+//
+//	event_msg:     {"type":"item_completed","thread_id":…,"turn_id":…,
+//	                "item":{"type":"UserMessage","id":…,
+//	                        "content":[{"type":"text","text":…,"text_elements":[]}]}}
+//	event_msg:     {"type":"item_completed",…,
+//	                "item":{"type":"AgentMessage","id":…,"phase":"commentary|final_answer",
+//	                        "content":[{"type":"text","text":…}]}}
+//	event_msg:     {"type":"item_completed",…,"item":{"type":"CommandExecution"|
+//	                "FileChange"|"Reasoning"|…}} — skipped: the response_item
+//	                function_call/custom_tool_call/reasoning records above are
+//	                still persisted in paginated mode and remain the chip source
+//	event_msg:     {"type":"thread_settings_applied",…} — skipped
+//	world_state / token_usage_record / … — new record types, skipped
 
 import (
 	"encoding/json"
@@ -65,6 +88,55 @@ type tPayload struct {
 	// ADR-0061): only this event type populates Info; every other payload leaves
 	// it nil (including the degenerate {"info":null} token_count records).
 	Info *tTokenInfo `json:"info"`
+
+	// event_msg / item_completed (codex 0.167.0 paginated history): the
+	// completed TurnItem. Only the UserMessage/AgentMessage shapes are mapped
+	// (see turnItemText); every other item type is skipped.
+	Item *tTurnItem `json:"item"`
+}
+
+// tTurnItem is the subset of an item_completed event's TurnItem lab maps
+// (codex-rs/protocol/src/items.rs, serde tag "type" with the variant name
+// VERBATIM — "UserMessage", "AgentMessage", not snake_case). Content parts are
+// tagged "text" for both shapes (UserInput::Text snake_case, AgentMessageContent::Text
+// — a single-variant enum whose tag serializes as "Text"; both spellings are
+// accepted). Live pin: the UserMessage item from a real 0.167.0 `codex exec`
+// rollout (testdata/rollout-exec-0.167.0.jsonl); the AgentMessage shape is
+// source-derived (no authenticated 0.167.0 capture exists yet — compat.md §5).
+type tTurnItem struct {
+	Type    string         `json:"type"`
+	Phase   string         `json:"phase"`
+	Content []tItemContent `json:"content"`
+}
+
+// tItemContent is one TurnItem content part; only text parts render (images,
+// local_image, mentions and skills carry no renderable prose).
+type tItemContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// text joins a UserMessage/AgentMessage item's text parts with single
+// newlines, "" when there is none.
+func (it *tTurnItem) text() string {
+	if it == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range it.Content {
+		if c.Type != "" && c.Type != "text" && c.Type != "Text" {
+			continue
+		}
+		text := strings.TrimSpace(c.Text)
+		if text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text)
+	}
+	return b.String()
 }
 
 // tTokenInfo is a token_count event's info object (issue #243 / ADR-0061). The

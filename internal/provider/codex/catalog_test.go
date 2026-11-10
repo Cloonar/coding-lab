@@ -251,3 +251,62 @@ func TestEffortLabel(t *testing.T) {
 		}
 	}
 }
+
+// The probe's parse/mapping contract on the committed 0.167.0 fixture (the
+// agent-tools pin since 2026-11-10; same trimming convention as 0.144.1):
+// twelve models, nine listed — gpt-6.1-sol is the bare spawn default with a
+// default_reasoning_level of LOW (the first pinned catalog whose default is
+// not medium), the three "hide" entries (the Daybreak pair and
+// codex-auto-review) are filtered, and the union carries six efforts because
+// the first listed model already does.
+func TestProbeModels_fixtureMapping_0167(t *testing.T) {
+	abs, err := filepath.Abs(filepath.Join("testdata", "models-0.167.0.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, efforts, err := ProbeModels(context.Background(), &provider.HostCLI{}, fakeCodex(t, "cat '"+abs+"'"))
+	if err != nil {
+		t.Fatalf("ProbeModels: %v", err)
+	}
+	wantOrder := []provider.Option{
+		{Value: "gpt-6.1-sol", Label: "GPT-6.1-Sol"},
+		{Value: "gpt-6-astra", Label: "GPT-6-Astra"},
+		{Value: "gpt-6-sol", Label: "GPT-6-Sol"},
+		{Value: "gpt-6-luna", Label: "GPT-6-Luna"},
+		{Value: "gpt-5.6-sol", Label: "GPT-5.6-Sol"},
+		{Value: "gpt-6.1-terra", Label: "GPT-6.1 Terra"},
+		{Value: "gpt-5.6-terra", Label: "GPT-5.6-Terra"},
+		{Value: "gpt-5.6-luna", Label: "GPT-5.6-Luna"},
+		{Value: "gpt-5.5", Label: "GPT-5.5"},
+	}
+	if len(models) != len(wantOrder) {
+		t.Fatalf("ProbeModels returned %d models (%+v); want %d", len(models), models, len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if models[i].Option != want {
+			t.Errorf("models[%d] = %+v; want %+v (priority-ascending order)", i, models[i].Option, want)
+		}
+	}
+	for _, hidden := range []string{"gpt-daybreak-blue-latest", "gpt-daybreak-red-latest", "codex-auto-review"} {
+		if provider.HasModelOption(models, hidden) {
+			t.Errorf("%s (visibility \"hide\") survived the list filter", hidden)
+		}
+	}
+	if models[0].DefaultEffort != "low" {
+		t.Errorf("gpt-6.1-sol DefaultEffort = %q; want low (the fixture's default_reasoning_level — the bare spawn default is no longer medium)", models[0].DefaultEffort)
+	}
+	wantSix := []provider.Option{
+		{Value: "low", Label: "Low"}, {Value: "medium", Label: "Medium"}, {Value: "high", Label: "High"},
+		{Value: "xhigh", Label: "Extra high"}, {Value: "max", Label: "Max"}, {Value: "ultra", Label: "Ultra"},
+	}
+	if !slices.Equal(models[0].Efforts, wantSix) || !slices.Equal(efforts, wantSix) {
+		t.Errorf("gpt-6.1-sol Efforts = %+v, union = %+v; want the six %+v", models[0].Efforts, efforts, wantSix)
+	}
+	// gpt-6-luna / gpt-5.6-luna stop at max — the per-model lists are
+	// load-bearing (codex does not clamp; lab 400s unsupported combos).
+	for _, m := range models {
+		if m.Value == "gpt-6-luna" && slices.Contains(m.Efforts, provider.Option{Value: "ultra", Label: "Ultra"}) {
+			t.Errorf("gpt-6-luna carries ultra; the fixture lists five efforts for it: %+v", m.Efforts)
+		}
+	}
+}

@@ -614,3 +614,50 @@ func TestPatchToolOutput_detailSized(t *testing.T) {
 		t.Errorf("short output = %q; want it unchanged", short.Output)
 	}
 }
+
+// codex 0.167.0 paginated thread history (compat.md §5): the prompt and the
+// prose arrive ONLY as item_completed events carrying UserMessage/AgentMessage
+// TurnItems — the legacy user_message/agent_message event_msg records are
+// never written in that mode. The two grammars map to the same messages and,
+// because a rollout is written in exactly one mode, nothing double-renders.
+// Non-text content parts (images, mentions) render nothing; unknown item kinds
+// (CommandExecution, FileChange, Reasoning, …) are skipped — the response_item
+// records stay the chip source in both modes.
+func TestParseTranscript_paginatedItemCompleted(t *testing.T) {
+	const meta = `{"timestamp":"2026-11-10T10:54:59.776Z","type":"session_meta","payload":{"id":"x","cwd":"/w","cli_version":"0.167.0","history_mode":"paginated"}}`
+	lines := []string{
+		meta,
+		`{"timestamp":"2026-11-10T10:55:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+		`{"timestamp":"2026-11-10T10:55:00.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ok"}]}}`,
+		`{"timestamp":"2026-11-10T10:55:00.200Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"x","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"ok","text_elements":[]},{"type":"local_image","path":"/w/shot.png"}]}}}`,
+		`{"timestamp":"2026-11-10T10:55:01.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"x","turn_id":"t1","item":{"type":"CommandExecution","id":"c1","command":"git status","aggregated_output":"clean"}}}`,
+		`{"timestamp":"2026-11-10T10:55:02.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"x","turn_id":"t1","item":{"type":"AgentMessage","id":"a1","phase":"final_answer","content":[{"type":"text","text":"All clean."}]}}}`,
+		`{"timestamp":"2026-11-10T10:55:02.500Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"x","turn_id":"t1","item":{"type":"AgentMessage","id":"a2","content":[{"type":"text","text":"   "}]}}}`,
+		`{"timestamp":"2026-11-10T10:55:03.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"All clean."}}`,
+	}
+	chat, err := ParseTranscript(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
+	want := []provider.Message{
+		{Seq: 1, Kind: provider.MessageText, Role: "user", Time: "2026-11-10T10:55:00.200Z", Text: "ok"},
+		{Seq: 2, Kind: provider.MessageText, Role: "assistant", Time: "2026-11-10T10:55:02.000Z", Text: "All clean."},
+	}
+	if !reflect.DeepEqual(chat.Messages, want) {
+		t.Errorf("paginated rollout mapped %+v; want %+v (UserMessage + AgentMessage items only, text parts only, no double-render from the response_item message)", chat.Messages, want)
+	}
+	if chat.State != provider.StateNeedsInput || chat.Cursor != 2 {
+		t.Errorf("State/Cursor = %q/%d; want needs_input/2 (tail is task_complete)", chat.State, chat.Cursor)
+	}
+
+	// The AgentMessageContent enum's single variant may serialize its tag as
+	// "Text" (no rename_all on that enum) — both spellings render.
+	chat, err = ParseTranscript(strings.NewReader(meta + "\n" +
+		`{"timestamp":"2026-11-10T10:55:02.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"a1","content":[{"type":"Text","text":"Hi"},{"type":"text","text":"there"}]}}}` + "\n"))
+	if err != nil {
+		t.Fatalf("ParseTranscript: %v", err)
+	}
+	if len(chat.Messages) != 1 || chat.Messages[0].Text != "Hi\nthere" {
+		t.Errorf("mixed-tag AgentMessage mapped %+v; want one assistant message \"Hi\\nthere\"", chat.Messages)
+	}
+}
