@@ -96,7 +96,10 @@ var builtinCommands = []provider.CommandSpec{
 	{Name: "rewind", Description: "Restore the code and/or conversation to a previous point", Source: commandSourceBuiltin},
 	{Name: "statusline", Description: "Set up Claude Code's status line UI", Source: commandSourceBuiltin},
 	{Name: "terminal-setup", Description: "Install Shift+Enter key binding for newlines", Source: commandSourceBuiltin},
-	{Name: "upgrade", Description: "Upgrade to Max for higher rate limits and more Opus", Source: commandSourceBuiltin},
+	// upgrade: description reworded 2.1.284 → 2.1.322 ("Upgrade to Max for
+	// higher rate limits and more Opus" → the text below; reverse-grep of the
+	// old text: 0 on 2.1.322).
+	{Name: "upgrade", Description: "Upgrade your plan for higher rate limits and more Opus", Source: commandSourceBuiltin},
 	{Name: "usage-credits", Description: "Configure usage credits or request them from your admin when you hit a limit", Source: commandSourceBuiltin},
 }
 
